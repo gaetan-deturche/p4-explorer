@@ -1,0 +1,123 @@
+:root {
+  --bg: #f6f6f6;
+  --bg-panel: #ffffff;
+  --bg-alt: #f0f0f2;
+  --bg-hover: #e8edff;
+  --bg-sel: #d6e4ff;
+  --border: #d7d7dc;
+  --text: #1b1b1f;
+  --text-dim: #6b6b74;
+  --accent: #2f6feb;
+  --have: #1f9d55;
+  --have-bg: #e6f6ec;
+  --warn: #c0392b;
+  --mono: "Cascadia Code", "Consolas", "SFMono-Regular", ui-monospace, monospace;
+  font-family: "Segoe UI", Inter, system-ui, sans-serif;
+  font-size: 13px;
+  color: var(--text);
+  background: var(--bg);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1e1e20;
+    --bg-panel: #252528;
+    --bg-alt: #2b2b2f;
+    --bg-hover: #33384a;
+    --bg-sel: #2d3a57;
+    --border: #3a3a40;
+    --text: #e6e6ea;
+    --text-dim: #9a9aa4;
+    --accent: #5b8cff;
+    --have: #4ecb8d;
+    --have-bg: #1e3328;
+    --warn: #ff6b5e;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+button {
+  font: inherit;
+  color: var(--text);
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 3px 10px;
+  cursor: pointer;
+}
+button:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+input,
+select {
+  font: inherit;
+  color: var(--text);
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 3px 6px;
+}
+
+.mono {
+  font-family: var(--mono);
+}
+.dim {
+  color: var(--text-dim);
+}
+
+/* Scrollable panel bodies */
+.scroll {
+  overflow: auto;
+}
+
+/* Generic data tables */
+table.grid {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 12px;
+}
+table.grid th {
+  text-align: left;
+  position: sticky;
+  top: 0;
+  background: var(--bg-alt);
+  border-bottom: 1px solid var(--border);
+  padding: 4px 8px;
+  font-weight: 600;
+  color: var(--text-dim);
+  z-index: 1;
+}
+table.grid td {
+  padding: 3px 8px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+table.grid tr {
+  cursor: default;
+}
+table.grid tbody tr:hover {
+  background: var(--bg-hover);
+}
+table.grid tbody tr.selected {
+  background: var(--bg-sel);
+}
+table.grid tbody tr.have {
+  background: var(--have-bg);
+}
