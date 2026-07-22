@@ -44,5 +44,5 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: Auger ${{ github.ref_name }}
           releaseBody: Automated build of Auger ${{ github.ref_name }}.
-          releaseDraft: true
+          releaseDraft: false
           prerelease: false
