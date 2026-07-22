@@ -25,6 +25,8 @@ jobs:
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+          shared-key: auger-build # same key as ci.yml: restore the cache CI built on main
+          save-if: false # tag runs are ref-scoped and can't be reused; only restore
 
       - name: Cache Tauri NSIS toolchain
         uses: actions/cache@v4
