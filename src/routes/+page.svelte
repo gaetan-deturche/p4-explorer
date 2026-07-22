@@ -2,6 +2,8 @@
   import { onMount, onDestroy } from "svelte";
   import { listen } from "@tauri-apps/api/event";
   import { getVersion } from "@tauri-apps/api/app";
+  import { check, type Update } from "@tauri-apps/plugin-updater";
+  import { relaunch } from "@tauri-apps/plugin-process";
   import { openUrl } from "@tauri-apps/plugin-opener";
   import { p4, idx, listLocalDir, emptyConn, type P4Conn, type P4Record } from "$lib/p4";
   import { makeNode, type TreeNode } from "$lib/tree";
@@ -11,6 +13,7 @@
   import OptionsDialog from "$lib/components/OptionsDialog.svelte";
   import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
   import SyncProgressDialog from "$lib/components/SyncProgressDialog.svelte";
+  import UpdateDialog from "$lib/components/UpdateDialog.svelte";
   import DepotTree from "$lib/components/DepotTree.svelte";
   import HistoryTable from "$lib/components/HistoryTable.svelte";
   import PendingList from "$lib/components/PendingList.svelte";
@@ -921,6 +924,64 @@
     await getCurrentWindow().close();
   }
 
+  // --- auto-update -----------------------------------------------------------
+  let pendingUpdate: Update | null = null;
+  let updateState = $state<{
+    version: string;
+    notes: string;
+    phase: "available" | "downloading" | "error";
+    downloaded: number;
+    total: number;
+    message: string;
+  } | null>(null);
+
+  async function checkForUpdates(silent: boolean) {
+    try {
+      const update = await check();
+      if (update) {
+        pendingUpdate = update;
+        updateState = {
+          version: update.version,
+          notes: update.body ?? "",
+          phase: "available",
+          downloaded: 0,
+          total: 0,
+          message: "",
+        };
+      } else if (!silent) {
+        notice = `You're on the latest version (v${appVersion}).`;
+        window.setTimeout(() => (notice = ""), 4000);
+      }
+    } catch (e) {
+      if (!silent) {
+        error = `Update check failed: ${e}`;
+        window.setTimeout(() => (error = ""), 6000);
+      }
+    }
+  }
+
+  async function installUpdate() {
+    if (!pendingUpdate || !updateState) return;
+    updateState.phase = "downloading";
+    let downloaded = 0;
+    try {
+      await pendingUpdate.downloadAndInstall((event) => {
+        if (!updateState) return;
+        if (event.event === "Started") updateState.total = event.data.contentLength ?? 0;
+        else if (event.event === "Progress") {
+          downloaded += event.data.chunkLength;
+          updateState.downloaded = downloaded;
+        }
+      });
+      await relaunch();
+    } catch (e) {
+      if (updateState) {
+        updateState.phase = "error";
+        updateState.message = String(e);
+      }
+    }
+  }
+
   function showAbout() {
     notice = `P4 Explorer${appVersion ? " v" + appVersion : ""}${serverVersion ? " · server " + serverVersion : ""}`;
     window.setTimeout(() => (notice = ""), 6000);
@@ -931,6 +992,7 @@
     getVersion()
       .then((v) => (appVersion = v))
       .catch(() => {});
+    checkForUpdates(true); // silent: only surfaces a dialog if an update exists
   });
 </script>
 
@@ -945,6 +1007,7 @@
     onRefresh={refresh}
     onSync={globalSync}
     onAbout={showAbout}
+    onCheckUpdates={() => checkForUpdates(false)}
   />
   <Toolbar
     bind:conn
@@ -1112,6 +1175,19 @@
   {#if items.length}
     <ContextMenu x={pendingCtx.x} y={pendingCtx.y} {items} onClose={() => (pendingCtx = null)} />
   {/if}
+{/if}
+
+{#if updateState}
+  <UpdateDialog
+    version={updateState.version}
+    notes={updateState.notes}
+    phase={updateState.phase}
+    downloaded={updateState.downloaded}
+    total={updateState.total}
+    message={updateState.message}
+    onInstall={installUpdate}
+    onDismiss={() => (updateState = null)}
+  />
 {/if}
 
 <style>

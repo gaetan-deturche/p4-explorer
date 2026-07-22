@@ -9,6 +9,7 @@
     onRefresh,
     onSync,
     onAbout,
+    onCheckUpdates,
   }: {
     connected: boolean;
     refreshing: boolean;
@@ -19,6 +20,7 @@
     onRefresh: () => void;
     onSync: () => void;
     onAbout: () => void;
+    onCheckUpdates: () => void;
   } = $props();
 
   type Item = { label: string; action?: () => void; disabled?: boolean; sep?: boolean };
@@ -45,7 +47,10 @@
     },
     {
       name: "Help",
-      items: [{ label: "About", action: onAbout }],
+      items: [
+        { label: "Check for updates…", action: onCheckUpdates },
+        { label: "About", action: onAbout },
+      ],
     },
   ]);
 
