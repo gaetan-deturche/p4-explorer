@@ -849,6 +849,7 @@
   }
 
   function onStreamContext(stream: string, e: MouseEvent) {
+    if (!connected || !conn.client) return; // switching reconfigures the current workspace
     if (!stream || stream === rootPath) return; // already on it
     streamCtx = { x: e.clientX, y: e.clientY, stream };
   }
