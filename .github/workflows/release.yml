@@ -12,6 +12,8 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history + tags so we can diff against the previous tag
 
       - uses: actions/setup-node@v4
         with:
@@ -34,6 +36,23 @@ jobs:
           node -e "const f='src-tauri/tauri.conf.json';const j=require('./'+f);j.version='$V';require('fs').writeFileSync(f, JSON.stringify(j,null,2)+'\n')"
           echo "App version set to $V"
 
+      - name: Generate changelog
+        id: changelog
+        shell: bash
+        run: |
+          prev=$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || true)
+          if [ -n "$prev" ]; then range="$prev..${GITHUB_REF_NAME}"; else range="${GITHUB_REF_NAME}"; fi
+          log=$(git log --no-merges --pretty=format:'- %s' "$range")
+          [ -z "$log" ] && log="- Maintenance release."
+          echo "Changelog for $range:"; echo "$log"
+          {
+            echo "notes<<CHANGELOG_EOF"
+            echo "What's changed:"
+            echo ""
+            echo "$log"
+            echo "CHANGELOG_EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Build and publish release
         uses: tauri-apps/tauri-action@v0
         env:
@@ -43,6 +62,6 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: Auger ${{ github.ref_name }}
-          releaseBody: Automated build of Auger ${{ github.ref_name }}.
+          releaseBody: ${{ steps.changelog.outputs.notes }}
           releaseDraft: false
           prerelease: false
