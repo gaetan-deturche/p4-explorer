@@ -90,6 +90,7 @@ export const p4 = {
     call("p4_reopen", { conn, depotFile, change }),
   newChangelist: (conn: P4Conn, description: string) =>
     invoke<string>("p4_new_changelist", { conn, description }),
+  envPort: (conn: P4Conn) => invoke<string>("p4_env_port", { conn }),
 };
 
 /** Last path segment of a depot path. */

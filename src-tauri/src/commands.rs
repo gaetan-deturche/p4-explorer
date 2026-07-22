@@ -616,3 +616,21 @@ pub async fn list_local_dir(path: String) -> Result<LocalDir, String> {
 pub fn is_release_build() -> bool {
     option_env!("AUGER_RELEASE").is_some()
 }
+
+/// The configured P4PORT (`p4 set P4PORT`), stripped of its ` (origin)` tag —
+/// seeds the server dropdown with the ambient default.
+#[tauri::command]
+pub async fn p4_env_port(conn: P4Conn) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let out = p4::run_raw(&conn, &["set", "P4PORT"]).unwrap_or_default();
+        let line = out.lines().next().unwrap_or("");
+        let val = line.strip_prefix("P4PORT=").unwrap_or("").trim();
+        let val = match val.rfind(" (") {
+            Some(i) => val[..i].trim(),
+            None => val,
+        };
+        Ok(val.to_string())
+    })
+    .await
+    .map_err(|e| format!("env-port task failed: {e}"))?
+}

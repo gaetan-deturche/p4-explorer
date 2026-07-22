@@ -135,6 +135,52 @@
   let isRelease = $state(false); // dev/local builds skip auto-update and show -dev
   let clients = $state<P4Record[]>([]);
 
+  // Server selector: remembered connections (localStorage) + seeded from p4 env.
+  let servers = $state<string[]>([]);
+  let serverCtx = $state<{ x: number; y: number } | null>(null);
+  let addServerOpen = $state(false);
+  const SERVERS_KEY = "p4:servers";
+  function loadServers(): string[] {
+    try {
+      const s = localStorage.getItem(SERVERS_KEY);
+      return s ? (JSON.parse(s) as string[]) : [];
+    } catch {
+      return [];
+    }
+  }
+  function saveServers() {
+    try {
+      localStorage.setItem(SERVERS_KEY, JSON.stringify(servers));
+    } catch {
+      /* ignore */
+    }
+  }
+  function rememberServer(port: string) {
+    const v = port.trim();
+    if (v && !servers.includes(v)) {
+      servers = [...servers, v];
+      saveServers();
+    }
+  }
+  function forgetServer(port: string) {
+    servers = servers.filter((s) => s !== port);
+    saveServers();
+  }
+  async function switchServerTo(port: string) {
+    if (port === conn.port) return;
+    conn.port = port;
+    conn.client = "";
+    resetBrowse();
+    await connect();
+  }
+  function submitAddServer(port: string) {
+    addServerOpen = false;
+    const v = port.trim();
+    if (!v) return;
+    rememberServer(v);
+    switchServerTo(v);
+  }
+
   // Depot tree
   let rootPath = $state(""); // stream root, e.g. //Curiosity/main
   let clientRoot = $state(""); // local workspace root, e.g. H:\Dev\...\Curiosity
@@ -381,6 +427,12 @@
       const i = info[0] ?? {};
       serverVersion = i.serverVersion ?? "";
       if (!conn.user && i.userName) conn.user = i.userName;
+      // Seed the server dropdown: adopt the ambient P4PORT if none was set.
+      if (!conn.port) {
+        const env = await p4.envPort(conn).catch(() => "");
+        if (env) conn.port = env;
+      }
+      rememberServer(conn.port);
       connected = true;
       optionsOpen = false;
       startKeepAlive();
@@ -1082,6 +1134,7 @@
   }
 
   onMount(() => {
+    servers = loadServers();
     connect();
     getVersion()
       .then((v) => (appVersion = v))
@@ -1111,10 +1164,16 @@
   <Toolbar
     bind:conn
     {clients}
+    {servers}
     {connected}
     {refreshing}
     {syncing}
     onClientChange={selectClient}
+    onServerChange={switchServerTo}
+    onAddServer={() => (addServerOpen = true)}
+    onServerContext={(e) => {
+      if (conn.port) serverCtx = { x: e.clientX, y: e.clientY };
+    }}
     onRefresh={refresh}
     onSync={globalSync}
   />
@@ -1295,6 +1354,26 @@
     okLabel="Create & move"
     onSubmit={submitNewChangelist}
     onCancel={() => (newClFile = null)}
+  />
+{/if}
+
+{#if serverCtx}
+  <ContextMenu
+    x={serverCtx.x}
+    y={serverCtx.y}
+    items={[{ label: `Forget "${conn.port}"`, action: () => forgetServer(conn.port) }]}
+    onClose={() => (serverCtx = null)}
+  />
+{/if}
+
+{#if addServerOpen}
+  <InputDialog
+    title="Add server"
+    label="Server (P4PORT)"
+    placeholder="ssl:host:1666"
+    okLabel="Connect"
+    onSubmit={submitAddServer}
+    onCancel={() => (addServerOpen = false)}
   />
 {/if}
 

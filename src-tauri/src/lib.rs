@@ -56,6 +56,7 @@ pub fn run() {
             commands::p4_switch,
             commands::list_local_dir,
             commands::is_release_build,
+            commands::p4_env_port,
             index::index_status,
             index::index_build,
             index::index_search,
