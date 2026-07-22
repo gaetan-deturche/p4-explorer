@@ -87,15 +87,15 @@ pub async fn p4_changes(conn: P4Conn, path: String, max: u32, before: Option<u32
 /// Pending changelists for the connection's client/user.
 #[tauri::command]
 pub async fn p4_pending(conn: P4Conn, max: u32) -> Res {
-    let max = max.to_string();
-    let mut args = v(&["changes", "-l", "-m", &max, "-s", "pending"]);
-    if !conn.client.is_empty() {
-        args.push("-c".into());
-        args.push(conn.client.clone());
-    } else if !conn.user.is_empty() {
-        args.push("-u".into());
-        args.push(conn.user.clone());
+    // Pending is workspace-scoped. Without a client, don't fall back to a
+    // user-wide `-u` listing — that showed every workspace's pending CLs even
+    // when no workspace was selected.
+    if conn.client.is_empty() {
+        return Ok(Vec::new());
     }
+    let max = max.to_string();
+    let mut args = v(&["changes", "-l", "-m", &max, "-s", "pending", "-c"]);
+    args.push(conn.client.clone());
     run(conn, args).await
 }
 

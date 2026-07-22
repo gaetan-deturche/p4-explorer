@@ -113,7 +113,7 @@
     {#if loading}
       <div class="msg dim">Loading…</div>
     {:else if rows.length === 0}
-      <div class="msg dim">No pending changelists.</div>
+      <div class="msg dim">{client ? "No pending changelists." : "Select a workspace to browse."}</div>
     {:else}
       {#each rows as r (r.change)}
         {@const s = cls[r.change]}

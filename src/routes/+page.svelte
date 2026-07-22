@@ -720,7 +720,13 @@
 
   async function loadPending() {
     centerTab = "pending";
-    if (!connected) return;
+    // Workspace-scoped: no client selected → nothing to show (don't list the
+    // user's pending CLs from other workspaces).
+    if (!connected || !conn.client) {
+      pendingRows = [];
+      pendingLoading = false;
+      return;
+    }
     if (pendingRows.length === 0) pendingLoading = true; // keep previous list otherwise
     const rows = await safe(() => p4.pending(conn, 100));
     pendingLoading = false;
