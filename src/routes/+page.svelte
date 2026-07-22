@@ -983,7 +983,7 @@
   }
 
   function showAbout() {
-    notice = `P4 Explorer${appVersion ? " v" + appVersion : ""}${serverVersion ? " · server " + serverVersion : ""}`;
+    notice = `Auger${appVersion ? " v" + appVersion : ""}${serverVersion ? " · server " + serverVersion : ""}`;
     window.setTimeout(() => (notice = ""), 6000);
   }
 

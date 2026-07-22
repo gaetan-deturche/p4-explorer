@@ -1,4 +1,4 @@
-# P4 Explorer
+# Auger
 
 A dedicated desktop GUI for Perforce Helix Core — the moddable, source-available
 client P4V isn't. Built with **Tauri v2 (Rust)** + **SvelteKit (Svelte 5)**.
@@ -32,7 +32,7 @@ npm run tauri dev
 
 ```sh
 npm run tauri build
-# exe:       src-tauri/target/release/p4gui.exe
+# exe:       src-tauri/target/release/Auger.exe
 # installer: src-tauri/target/release/bundle/
 ```
 

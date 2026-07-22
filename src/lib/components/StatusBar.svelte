@@ -15,7 +15,7 @@
 </script>
 
 <div class="statusbar">
-  <span class="app dim">P4 Explorer{appVersion ? ` v${appVersion}` : ""}</span>
+  <span class="app dim">Auger{appVersion ? ` v${appVersion}` : ""}</span>
   {#if connected}
     <span class="ok">● connected</span>
   {:else}
