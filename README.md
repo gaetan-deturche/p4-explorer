@@ -46,9 +46,19 @@ src-tauri/src/p4.rs               p4 CLI runner + JSON/record parsing
 src-tauri/src/commands.rs         Tauri command wrappers
 ```
 
-## Current limitations (v1)
+## Current limitations
 
-- Depot browsing requires a **stream** client (SloClap workspaces are streams).
-  Classic (view-based) clients don't yet enumerate a root.
-- Read-only: no sync/submit/shelve actions yet.
-- Depot browser is breadcrumb-based, not a persistent expanding tree.
+- Depot browsing requires a **stream** client. Classic (view-based) clients
+  don't yet enumerate a root (the Repo tab still browses any depot path).
+
+## Disclaimer
+
+This is an independent, unofficial tool. It invokes the `p4` command-line client
+(which you must install separately) and does not bundle, link, or redistribute
+any Perforce software or SDK. It is **not affiliated with or endorsed by Perforce
+Software, Inc.** "Perforce", "Helix Core", "P4", and "Swarm" are trademarks of
+Perforce Software, Inc., used here only to refer to the software this tool works with.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

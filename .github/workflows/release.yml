@@ -27,6 +27,13 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Set app version from tag
+        shell: bash
+        run: |
+          V="${GITHUB_REF_NAME#v}"
+          node -e "const f='src-tauri/tauri.conf.json';const j=require('./'+f);j.version='$V';require('fs').writeFileSync(f, JSON.stringify(j,null,2)+'\n')"
+          echo "App version set to $V"
+
       - name: Build and publish release
         uses: tauri-apps/tauri-action@v0
         env:

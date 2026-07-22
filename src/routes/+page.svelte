@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import { listen } from "@tauri-apps/api/event";
+  import { getVersion } from "@tauri-apps/api/app";
   import { openUrl } from "@tauri-apps/plugin-opener";
   import { p4, idx, listLocalDir, emptyConn, type P4Conn, type P4Record } from "$lib/p4";
   import { makeNode, type TreeNode } from "$lib/tree";
@@ -117,6 +118,7 @@
   let error = $state("");
   let notice = $state(""); // transient info (e.g. sync result)
   let serverVersion = $state("");
+  let appVersion = $state("");
   let clients = $state<P4Record[]>([]);
 
   // Depot tree
@@ -188,9 +190,23 @@
   let keepAliveId: number | null = null;
   function startKeepAlive() {
     if (keepAliveId !== null) clearInterval(keepAliveId);
-    keepAliveId = window.setInterval(() => {
-      if (rootPath) p4.dirs(conn, rootPath).catch(() => {});
-      else p4.info(conn).catch(() => {});
+    // Doubles as a health check: if the server becomes unreachable the status
+    // flips to disconnected (and recovers automatically when it returns), so
+    // the UI never shows a stale "connected" while operations silently fail.
+    keepAliveId = window.setInterval(async () => {
+      try {
+        await p4.info(conn);
+        if (!connected) {
+          connected = true; // recovered
+          error = "";
+        }
+        if (rootPath) p4.dirs(conn, rootPath).catch(() => {}); // keep cache warm
+      } catch (e) {
+        if (connected) {
+          connected = false;
+          error = "Lost connection to the Perforce server. Retrying…";
+        }
+      }
     }, 20000);
   }
   onDestroy(() => {
@@ -906,11 +922,16 @@
   }
 
   function showAbout() {
-    notice = `P4 Explorer — Perforce client${serverVersion ? " · server " + serverVersion : ""}`;
+    notice = `P4 Explorer${appVersion ? " v" + appVersion : ""}${serverVersion ? " · server " + serverVersion : ""}`;
     window.setTimeout(() => (notice = ""), 6000);
   }
 
-  onMount(connect);
+  onMount(() => {
+    connect();
+    getVersion()
+      .then((v) => (appVersion = v))
+      .catch(() => {});
+  });
 </script>
 
 <div class="app">
@@ -1035,7 +1056,7 @@
     </section>
   </div>
 
-  <StatusBar {connected} {serverVersion} {busy} onConnect={connect} />
+  <StatusBar {connected} {serverVersion} {appVersion} {busy} onConnect={connect} />
 </div>
 
 {#if optionsOpen}
