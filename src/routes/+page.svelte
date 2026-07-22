@@ -5,7 +5,7 @@
   import { check, type Update } from "@tauri-apps/plugin-updater";
   import { relaunch } from "@tauri-apps/plugin-process";
   import { openUrl } from "@tauri-apps/plugin-opener";
-  import { p4, idx, listLocalDir, emptyConn, type P4Conn, type P4Record } from "$lib/p4";
+  import { p4, idx, listLocalDir, emptyConn, firstLine, type P4Conn, type P4Record } from "$lib/p4";
   import { makeNode, type TreeNode } from "$lib/tree";
   import MenuBar from "$lib/components/MenuBar.svelte";
   import Toolbar from "$lib/components/Toolbar.svelte";
@@ -768,10 +768,13 @@
   function fileMenuItems(file: P4Record, change: string) {
     const targets = pendingRows
       .filter((cl) => cl.change !== change)
-      .map((cl) => ({
-        label: cl.change === "default" ? "Default" : "@" + cl.change,
-        action: () => reopenFile(file.depotFile, cl.change),
-      }));
+      .map((cl) => {
+        const desc = firstLine(cl.desc);
+        const short = desc.length > 32 ? desc.slice(0, 31) + "…" : desc;
+        const label =
+          cl.change === "default" ? "Default" : short ? `@${cl.change}  ${short}` : "@" + cl.change;
+        return { label, action: () => reopenFile(file.depotFile, cl.change) };
+      });
     targets.push({ label: "New changelist…", action: () => (newClFile = file.depotFile) });
     return [
       { label: "View diff", action: () => openLocalDiff(file.depotFile) },
