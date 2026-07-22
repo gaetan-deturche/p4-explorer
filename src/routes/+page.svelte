@@ -1159,6 +1159,7 @@
           onOpenShelvedDiff={openShelvedDiff}
           onContext={onPendingContext}
           onFileContext={onPendingFileContext}
+          onMoveFile={reopenFile}
         />
       {:else}
         <div class="hsplit">

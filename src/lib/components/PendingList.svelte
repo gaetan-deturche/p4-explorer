@@ -14,6 +14,7 @@
     onOpenShelvedDiff,
     onContext,
     onFileContext,
+    onMoveFile,
   }: {
     rows: P4Record[];
     loading: boolean;
@@ -26,7 +27,12 @@
     onOpenShelvedDiff: (depotFile: string, rev: number, change: string) => void;
     onContext: (cl: P4Record, e: MouseEvent) => void; // right-click a changelist
     onFileContext: (file: P4Record, change: string, e: MouseEvent) => void; // right-click a file
+    onMoveFile: (file: string, toChange: string) => void; // drag a file onto another CL
   } = $props();
+
+  // Drag-and-drop: move an opened file from one changelist to another.
+  let drag = $state<{ file: string; from: string } | null>(null);
+  let dragOver = $state<string | null>(null); // CL currently hovered as a drop target
 
   type CL = {
     open: boolean;
@@ -119,7 +125,27 @@
     {:else}
       {#each rows as r (r.change)}
         {@const s = cls[r.change]}
-        <button class="cl" onclick={() => toggleCL(r.change)} oncontextmenu={(e) => onContext(r, e)}>
+        <button
+          class="cl"
+          class:dropinto={dragOver === r.change}
+          onclick={() => toggleCL(r.change)}
+          oncontextmenu={(e) => onContext(r, e)}
+          ondragover={(e) => {
+            if (drag && drag.from !== r.change) {
+              e.preventDefault();
+              dragOver = r.change;
+            }
+          }}
+          ondragleave={() => {
+            if (dragOver === r.change) dragOver = null;
+          }}
+          ondrop={(e) => {
+            e.preventDefault();
+            if (drag && drag.from !== r.change) onMoveFile(drag.file, r.change);
+            drag = null;
+            dragOver = null;
+          }}
+        >
           <span class="tw">{s?.open ? "▾" : "▸"}</span>
           <span class="cnum mono">{r.change === "default" ? "Default" : "@" + r.change}</span>
           <span class="desc" title={r.desc}>
@@ -162,14 +188,28 @@
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div
     class="frow mono"
+    class:dragging={drag?.file === f.depotFile}
     style="padding-left:{depth * 16 + 4}px"
     title={"Double-click to open in external diff\n" + f.depotFile}
+    draggable={kind === "local"}
     ondblclick={() => openExt(change, kind, f)}
     oncontextmenu={(e) => {
       if (kind === "local") {
         e.preventDefault();
         onFileContext(f, change, e);
       }
+    }}
+    ondragstart={(e) => {
+      if (kind !== "local") return;
+      drag = { file: f.depotFile, from: change };
+      if (e.dataTransfer) {
+        e.dataTransfer.effectAllowed = "move";
+        e.dataTransfer.setData("text/plain", f.depotFile);
+      }
+    }}
+    ondragend={() => {
+      drag = null;
+      dragOver = null;
     }}
   >
     <button
@@ -230,6 +270,11 @@
   .cl:hover {
     background: var(--bg-hover);
   }
+  .cl.dropinto {
+    background: var(--bg-sel);
+    outline: 1px dashed var(--accent);
+    outline-offset: -2px;
+  }
   .tw {
     flex: none;
     width: 12px;
@@ -284,6 +329,12 @@
   }
   .frow:hover {
     background: var(--bg-hover);
+  }
+  .frow[draggable="true"] {
+    cursor: grab;
+  }
+  .frow.dragging {
+    opacity: 0.4;
   }
   .fchev {
     flex: none;
