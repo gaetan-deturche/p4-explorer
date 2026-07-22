@@ -608,3 +608,11 @@ pub async fn list_local_dir(path: String) -> Result<LocalDir, String> {
     .await
     .map_err(|e| format!("list_local_dir task failed: {e}"))?
 }
+
+/// True only for tagged release builds: the release workflow compiles with the
+/// AUGER_RELEASE env set. Dev/local (`--no-bundle`) builds return false so the
+/// front-end skips the auto-update check (they carry a placeholder version).
+#[tauri::command]
+pub fn is_release_build() -> bool {
+    option_env!("AUGER_RELEASE").is_some()
+}

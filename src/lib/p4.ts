@@ -34,6 +34,11 @@ export function listLocalDir(path: string): Promise<LocalDir> {
   return invoke<LocalDir>("list_local_dir", { path });
 }
 
+/** True only for tagged release builds (dev/local builds skip the update check). */
+export function isReleaseBuild(): Promise<boolean> {
+  return invoke<boolean>("is_release_build");
+}
+
 async function call(cmd: string, args: Record<string, unknown>): Promise<P4Record[]> {
   return await invoke<P4Record[]>(cmd, args);
 }

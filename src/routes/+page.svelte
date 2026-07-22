@@ -5,7 +5,16 @@
   import { check, type Update } from "@tauri-apps/plugin-updater";
   import { relaunch } from "@tauri-apps/plugin-process";
   import { openUrl } from "@tauri-apps/plugin-opener";
-  import { p4, idx, listLocalDir, emptyConn, firstLine, type P4Conn, type P4Record } from "$lib/p4";
+  import {
+    p4,
+    idx,
+    listLocalDir,
+    isReleaseBuild,
+    emptyConn,
+    firstLine,
+    type P4Conn,
+    type P4Record,
+  } from "$lib/p4";
   import { makeNode, type TreeNode } from "$lib/tree";
   import MenuBar from "$lib/components/MenuBar.svelte";
   import Toolbar from "$lib/components/Toolbar.svelte";
@@ -123,6 +132,7 @@
   let notice = $state(""); // transient info (e.g. sync result)
   let serverVersion = $state("");
   let appVersion = $state("");
+  let isRelease = $state(false); // dev/local builds skip auto-update and show -dev
   let clients = $state<P4Record[]>([]);
 
   // Depot tree
@@ -1012,6 +1022,13 @@
   } | null>(null);
 
   async function checkForUpdates(silent: boolean) {
+    if (!isRelease) {
+      if (!silent) {
+        notice = "This is a development build — auto-update is disabled.";
+        window.setTimeout(() => (notice = ""), 5000);
+      }
+      return;
+    }
     try {
       const update = await check();
       if (update) {
@@ -1059,7 +1076,8 @@
   }
 
   function showAbout() {
-    notice = `Auger${appVersion ? " v" + appVersion : ""}${serverVersion ? " · server " + serverVersion : ""}`;
+    const ver = appVersion ? (isRelease ? " v" + appVersion : " " + appVersion + "-dev") : "";
+    notice = `Auger${ver}${serverVersion ? " · server " + serverVersion : ""}`;
     window.setTimeout(() => (notice = ""), 6000);
   }
 
@@ -1068,7 +1086,12 @@
     getVersion()
       .then((v) => (appVersion = v))
       .catch(() => {});
-    checkForUpdates(true); // silent: only surfaces a dialog if an update exists
+    isReleaseBuild()
+      .then((v) => {
+        isRelease = v;
+        if (v) checkForUpdates(true); // silent check only on release builds
+      })
+      .catch(() => {});
   });
 </script>
 
@@ -1197,7 +1220,7 @@
     </section>
   </div>
 
-  <StatusBar {connected} {serverVersion} {appVersion} {busy} onConnect={connect} />
+  <StatusBar {connected} {serverVersion} {appVersion} {isRelease} {busy} onConnect={connect} />
 </div>
 
 {#if optionsOpen}

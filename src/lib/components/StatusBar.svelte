@@ -3,19 +3,23 @@
     connected,
     serverVersion,
     appVersion,
+    isRelease,
     busy,
     onConnect,
   }: {
     connected: boolean;
     serverVersion: string;
     appVersion: string;
+    isRelease: boolean;
     busy: boolean;
     onConnect: () => void;
   } = $props();
 </script>
 
 <div class="statusbar">
-  <span class="app dim">Auger{appVersion ? ` v${appVersion}` : ""}</span>
+  <span class="app dim">
+    Auger{appVersion ? (isRelease ? ` v${appVersion}` : ` ${appVersion}-dev`) : ""}
+  </span>
   {#if connected}
     <span class="ok">● connected</span>
   {:else}
