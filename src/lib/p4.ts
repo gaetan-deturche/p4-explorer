@@ -79,6 +79,12 @@ export const p4 = {
     invoke<string>("p4_diff_local", { conn, depotFile }),
   openDiffLocal: (conn: P4Conn, depotFile: string) =>
     invoke<void>("open_diff_local", { conn, depotFile }),
+  revert: (conn: P4Conn, depotFile: string) => call("p4_revert", { conn, depotFile }),
+  revertKeep: (conn: P4Conn, depotFile: string) => call("p4_revert_keep", { conn, depotFile }),
+  reopen: (conn: P4Conn, depotFile: string, change: string) =>
+    call("p4_reopen", { conn, depotFile, change }),
+  newChangelist: (conn: P4Conn, description: string) =>
+    invoke<string>("p4_new_changelist", { conn, description }),
 };
 
 /** Last path segment of a depot path. */

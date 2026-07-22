@@ -13,6 +13,7 @@
     onOpenLocalDiff,
     onOpenShelvedDiff,
     onContext,
+    onFileContext,
   }: {
     rows: P4Record[];
     loading: boolean;
@@ -24,6 +25,7 @@
     onOpenLocalDiff: (depotFile: string) => void;
     onOpenShelvedDiff: (depotFile: string, rev: number, change: string) => void;
     onContext: (cl: P4Record, e: MouseEvent) => void; // right-click a changelist
+    onFileContext: (file: P4Record, change: string, e: MouseEvent) => void; // right-click a file
   } = $props();
 
   type CL = {
@@ -163,6 +165,12 @@
     style="padding-left:{depth * 16 + 4}px"
     title={"Double-click to open in external diff\n" + f.depotFile}
     ondblclick={() => openExt(change, kind, f)}
+    oncontextmenu={(e) => {
+      if (kind === "local") {
+        e.preventDefault();
+        onFileContext(f, change, e);
+      }
+    }}
   >
     <button
       class="fchev"

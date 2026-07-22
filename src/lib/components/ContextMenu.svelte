@@ -1,5 +1,10 @@
 <script lang="ts">
-  export type MenuItem = { label: string; action: () => void; disabled?: boolean };
+  export type MenuItem = {
+    label: string;
+    action?: () => void;
+    disabled?: boolean;
+    submenu?: MenuItem[];
+  };
 
   let {
     x,
@@ -13,8 +18,12 @@
     onClose: () => void;
   } = $props();
 
+  let openSub = $state<number | null>(null);
+  // Open submenus to the left when the menu is near the right edge.
+  const flipLeft = $derived(typeof window !== "undefined" && x > window.innerWidth * 0.6);
+
   function run(it: MenuItem) {
-    if (it.disabled) return;
+    if (it.disabled || !it.action) return;
     onClose();
     it.action();
   }
@@ -33,8 +42,24 @@
 ></button>
 
 <div class="menu" style="left:{x}px; top:{y}px">
-  {#each items as it (it.label)}
-    <button class="item" disabled={it.disabled} onclick={() => run(it)}>{it.label}</button>
+  {#each items as it, i (it.label)}
+    {#if it.submenu}
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div class="mi" onpointerenter={() => (openSub = i)} onpointerleave={() => (openSub = null)}>
+        <button class="item sub" disabled={it.disabled}>
+          <span>{it.label}</span><span class="chev">▸</span>
+        </button>
+        {#if openSub === i}
+          <div class="submenu" class:left={flipLeft}>
+            {#each it.submenu as s (s.label)}
+              <button class="item" disabled={s.disabled} onclick={() => run(s)}>{s.label}</button>
+            {/each}
+          </div>
+        {/if}
+      </div>
+    {:else}
+      <button class="item" disabled={it.disabled} onclick={() => run(it)}>{it.label}</button>
+    {/if}
   {/each}
 </div>
 
@@ -58,8 +83,14 @@
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
     padding: 4px 0;
   }
+  .mi {
+    position: relative;
+  }
   .item {
-    display: block;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
     width: 100%;
     text-align: left;
     border: none;
@@ -77,5 +108,29 @@
   .item:disabled {
     color: var(--text-dim);
     opacity: 0.6;
+  }
+  .chev {
+    color: var(--text-dim);
+    font-size: 10px;
+  }
+  .item:hover .chev {
+    color: #fff;
+  }
+  .submenu {
+    position: absolute;
+    top: -4px;
+    left: 100%;
+    min-width: 12rem;
+    max-height: 60vh;
+    overflow-y: auto;
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+    padding: 4px 0;
+  }
+  .submenu.left {
+    left: auto;
+    right: 100%;
   }
 </style>

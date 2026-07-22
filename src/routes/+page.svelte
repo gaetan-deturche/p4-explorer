@@ -12,6 +12,7 @@
   import StatusBar from "$lib/components/StatusBar.svelte";
   import OptionsDialog from "$lib/components/OptionsDialog.svelte";
   import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
+  import InputDialog from "$lib/components/InputDialog.svelte";
   import SyncProgressDialog from "$lib/components/SyncProgressDialog.svelte";
   import UpdateDialog from "$lib/components/UpdateDialog.svelte";
   import DepotTree from "$lib/components/DepotTree.svelte";
@@ -619,16 +620,9 @@
     pendingCtx = { x: e.clientX, y: e.clientY, cl };
   }
 
-  // Wrap a workspace-mutating pending action with confirm + notice + reload.
-  async function pendingAction(
-    run: () => Promise<unknown>,
-    confirmMsg: string,
-    confirmTitle: string,
-    okLabel: string,
-    okNotice: string,
-  ) {
+  // Run a workspace-mutating pending action, then refresh + reload the list.
+  async function pendingMutate(run: () => Promise<unknown>, okNotice: string) {
     if (!connected || syncing) return;
-    if (!(await askConfirm(confirmMsg, confirmTitle, okLabel))) return;
     syncing = true;
     error = "";
     notice = "";
@@ -643,6 +637,19 @@
     } finally {
       syncing = false;
     }
+  }
+
+  // Wrap a workspace-mutating pending action with a confirm prompt.
+  async function pendingAction(
+    run: () => Promise<unknown>,
+    confirmMsg: string,
+    confirmTitle: string,
+    okLabel: string,
+    okNotice: string,
+  ) {
+    if (!connected || syncing) return;
+    if (!(await askConfirm(confirmMsg, confirmTitle, okLabel))) return;
+    await pendingMutate(run, okNotice);
   }
   function submitCL(change: string) {
     const what = change === "default" ? "the default changelist" : `changelist @${change}`;
@@ -716,6 +723,65 @@
       items.push({ label: "Delete shelf", action: () => deleteShelfCL(cl.change) });
     }
     return items;
+  }
+
+  // --- pending FILE context actions (local/opened files) ---------------------
+  let fileCtx = $state<{ x: number; y: number; file: P4Record; change: string } | null>(null);
+  let newClFile = $state<string | null>(null); // a file awaiting a new-changelist name
+
+  function onPendingFileContext(file: P4Record, change: string, e: MouseEvent) {
+    fileCtx = { x: e.clientX, y: e.clientY, file, change };
+  }
+  function revertFile(depotFile: string) {
+    pendingAction(
+      () => p4.revert(conn, depotFile),
+      `${depotFile}\n\nRevert this file? Your local changes will be discarded.`,
+      "Revert file",
+      "Revert",
+      "File reverted.",
+    );
+  }
+  function revertKeepFile(depotFile: string) {
+    pendingAction(
+      () => p4.revertKeep(conn, depotFile),
+      `${depotFile}\n\nRemove from its changelist but keep your local edits on disk?`,
+      "Remove from changelist",
+      "Remove",
+      "File removed from changelist (changes kept).",
+    );
+  }
+  function reopenFile(depotFile: string, change: string) {
+    const label = change === "default" ? "Default" : "@" + change;
+    pendingMutate(() => p4.reopen(conn, depotFile, change), `Moved to ${label}.`);
+  }
+  function submitNewChangelist(desc: string) {
+    const file = newClFile;
+    newClFile = null;
+    if (!file) return;
+    pendingMutate(async () => {
+      const ch = await p4.newChangelist(conn, desc);
+      await p4.reopen(conn, file, ch);
+    }, "Moved to a new changelist.");
+  }
+
+  // Right-click menu for a pending file: view/revert, un-open, or move to a CL.
+  function fileMenuItems(file: P4Record, change: string) {
+    const targets = pendingRows
+      .filter((cl) => cl.change !== change)
+      .map((cl) => ({
+        label: cl.change === "default" ? "Default" : "@" + cl.change,
+        action: () => reopenFile(file.depotFile, cl.change),
+      }));
+    targets.push({ label: "New changelist…", action: () => (newClFile = file.depotFile) });
+    return [
+      { label: "View diff", action: () => openLocalDiff(file.depotFile) },
+      { label: "Revert file…", action: () => revertFile(file.depotFile) },
+      {
+        label: "Remove from changelist (keep changes)…",
+        action: () => revertKeepFile(file.depotFile),
+      },
+      { label: "Move to changelist", submenu: targets },
+    ];
   }
 
   async function loadPending() {
@@ -1089,6 +1155,7 @@
           onOpenLocalDiff={openLocalDiff}
           onOpenShelvedDiff={openShelvedDiff}
           onContext={onPendingContext}
+          onFileContext={onPendingFileContext}
         />
       {:else}
         <div class="hsplit">
@@ -1182,6 +1249,26 @@
   {#if items.length}
     <ContextMenu x={pendingCtx.x} y={pendingCtx.y} {items} onClose={() => (pendingCtx = null)} />
   {/if}
+{/if}
+
+{#if fileCtx}
+  <ContextMenu
+    x={fileCtx.x}
+    y={fileCtx.y}
+    items={fileMenuItems(fileCtx.file, fileCtx.change)}
+    onClose={() => (fileCtx = null)}
+  />
+{/if}
+
+{#if newClFile !== null}
+  <InputDialog
+    title="New changelist"
+    label="Description"
+    placeholder="Describe the change…"
+    okLabel="Create & move"
+    onSubmit={submitNewChangelist}
+    onCancel={() => (newClFile = null)}
+  />
 {/if}
 
 {#if updateState}

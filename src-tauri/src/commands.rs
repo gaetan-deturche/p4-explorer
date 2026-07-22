@@ -500,6 +500,51 @@ pub async fn p4_request_review(conn: P4Conn, change: String) -> Result<(), Strin
     .map_err(|e| format!("review task failed: {e}"))?
 }
 
+/// Revert an opened file, discarding local changes (`p4 revert <file>`).
+#[tauri::command]
+pub async fn p4_revert(conn: P4Conn, depot_file: String) -> Res {
+    run(conn, v(&["revert", &depot_file])).await
+}
+
+/// Un-open a file while keeping the workspace content (`p4 revert -k <file>`):
+/// drops it from its changelist but leaves your local edits on disk.
+#[tauri::command]
+pub async fn p4_revert_keep(conn: P4Conn, depot_file: String) -> Res {
+    run(conn, v(&["revert", "-k", &depot_file])).await
+}
+
+/// Move an opened file to another pending changelist (`p4 reopen -c <change>`);
+/// `change` may be "default".
+#[tauri::command]
+pub async fn p4_reopen(conn: P4Conn, depot_file: String, change: String) -> Res {
+    run(conn, v(&["reopen", "-c", &change, &depot_file])).await
+}
+
+/// Create a new empty pending changelist with `description`; returns its number.
+/// The `change -o` form's Files section is stripped so currently-open files are
+/// NOT swept into the new changelist.
+#[tauri::command]
+pub async fn p4_new_changelist(conn: P4Conn, description: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let field = format!("Description={description}");
+        let form = p4::run_raw(&conn, &["--field", &field, "change", "-o"])?;
+        let form = match form.find("\nFiles:") {
+            Some(i) => format!("{}\n", &form[..i]),
+            None => form,
+        };
+        let out = p4::run_raw_stdin(&conn, &["change", "-i"], &form)?;
+        // Output looks like: "Change 12345 created."
+        out.split_whitespace()
+            .skip_while(|w| *w != "Change")
+            .nth(1)
+            .map(|s| s.trim_end_matches('.').to_string())
+            .filter(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit()))
+            .ok_or_else(|| format!("could not parse new change number from: {}", out.trim()))
+    })
+    .await
+    .map_err(|e| format!("new-changelist task failed: {e}"))?
+}
+
 /// The configured Swarm base URL (`p4 property -l -n P4.Swarm.URL`), or empty.
 #[tauri::command]
 pub async fn swarm_url(conn: P4Conn) -> Result<String, String> {
