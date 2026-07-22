@@ -14,6 +14,12 @@ edition = "2021"
 name = "p4gui_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+# Name the binary "Auger" so every build (incl. --no-bundle) yields Auger.exe,
+# matching productName. Package/lib stay p4gui to keep the app-data path stable.
+[[bin]]
+name = "Auger"
+path = "src/main.rs"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
