@@ -149,16 +149,26 @@ fn sync_run(
     pids: &std::sync::Mutex<Vec<u32>>,
     path: Option<&str>,
     preview: bool,
+    parallel: bool,
     window: Option<&tauri::Window>,
 ) -> Result<usize, String> {
-    use std::io::{BufRead, BufReader, Read};
+    use std::io::{BufRead, BufReader};
     use std::process::Stdio;
     use tauri::Emitter;
 
     let mut cmd = p4::base_command(conn);
+    // Bound network waits (seconds of silence) so a hung connection — a real
+    // risk with parallel transfer on a flaky link — aborts with an error
+    // instead of stalling the sync forever, like P4V's timeout.
+    cmd.arg("-vnet.maxwait=120");
     cmd.arg("sync");
     if preview {
         cmd.arg("-n");
+    } else if parallel {
+        // Parallel file transfer, like P4V. The server caps it at
+        // net.parallel.max; where it's disabled p4 may error, and the caller
+        // then retries without it.
+        cmd.arg("--parallel=threads=4");
     }
     if let Some(p) = path {
         if !p.is_empty() {
@@ -169,6 +179,32 @@ fn sync_run(
     let mut child = cmd.spawn().map_err(|e| format!("failed to launch p4: {e}"))?;
     let id = child.id();
     pids.lock().unwrap().push(id);
+
+    // Drain stderr on its own thread (so a full stderr pipe can't deadlock the
+    // stdout loop) and surface each error line live via a `sync-issue` event —
+    // so problems like files locked by the editor show up as they happen
+    // instead of looking like a hang.
+    let stderr = child.stderr.take();
+    let issue_win = window.cloned();
+    let err_handle = std::thread::spawn(move || {
+        let mut all = String::new();
+        let mut n = 0usize;
+        if let Some(se) = stderr {
+            for line in BufReader::new(se).lines() {
+                let Ok(line) = line else { break };
+                if line.trim().is_empty() {
+                    continue;
+                }
+                n += 1;
+                all.push_str(&line);
+                all.push('\n');
+                if let Some(w) = &issue_win {
+                    let _ = w.emit("sync-issue", serde_json::json!({ "count": n, "line": line }));
+                }
+            }
+        }
+        (n, all)
+    });
 
     let stdout = child.stdout.take().ok_or("no stdout")?;
     let mut count = 0usize;
@@ -191,14 +227,12 @@ fn sync_run(
     if let Some(w) = window {
         let _ = w.emit("sync-progress", serde_json::json!({ "count": count, "line": last }));
     }
-    if !status.success() {
-        let mut err = String::new();
-        if let Some(mut se) = child.stderr.take() {
-            let _ = se.read_to_string(&mut err);
-        }
-        if !err.trim().is_empty() {
-            return Err(err.trim().to_string());
-        }
+    let (_issues, err) = err_handle.join().unwrap_or((0, String::new()));
+    // Fatal only when nothing synced (parallel-not-enabled, auth, connection).
+    // Per-file issues (e.g. locked files) still synced the rest and are shown
+    // live via `sync-issue` + summarised by the caller, so they aren't fatal.
+    if !status.success() && count == 0 && !err.trim().is_empty() {
+        return Err(err.trim().to_string());
     }
     Ok(count)
 }
@@ -221,7 +255,14 @@ pub async fn p4_sync_stream(
     abort.store(false, Ordering::SeqCst);
 
     let count = tauri::async_runtime::spawn_blocking(move || {
-        sync_run(&conn, &pids, path.as_deref(), false, Some(&window))
+        let p = path.as_deref();
+        // Try a parallel sync; if the server rejects parallel, retry sequentially.
+        match sync_run(&conn, &pids, p, false, true, Some(&window)) {
+            Err(e) if e.to_lowercase().contains("parallel") => {
+                sync_run(&conn, &pids, p, false, false, Some(&window))
+            }
+            other => other,
+        }
     })
     .await
     .map_err(|e| format!("sync task failed: {e}"))??;
@@ -262,6 +303,19 @@ pub async fn p4_sync(conn: P4Conn, path: Option<String>) -> Res {
         }
     }
     run(conn, args).await
+}
+
+/// Reconcile offline work under `path` (`p4 reconcile <path>/...`): open files
+/// that were changed / added / deleted outside Perforce, into the default
+/// changelist. Returns the opened files (empty when there's nothing to do).
+#[tauri::command]
+pub async fn p4_reconcile(conn: P4Conn, path: String) -> Res {
+    let spec = if path.is_empty() {
+        "...".to_string()
+    } else {
+        format!("{}/...", path.trim_end_matches('/'))
+    };
+    run(conn, v(&["reconcile", &spec])).await
 }
 
 /// Depot-wide filename search under `root`: `p4 files //root/.../*term*`.
@@ -498,6 +552,24 @@ pub async fn p4_request_review(conn: P4Conn, change: String) -> Result<(), Strin
     })
     .await
     .map_err(|e| format!("review task failed: {e}"))?
+}
+
+/// Set a numbered pending changelist's description (`change -o | change -i`).
+/// This is the closest thing to "renaming" a changelist in Perforce.
+#[tauri::command]
+pub async fn p4_set_description(
+    conn: P4Conn,
+    change: String,
+    description: String,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let field = format!("Description={description}");
+        let form = p4::run_raw(&conn, &["--field", &field, "change", "-o", &change])?;
+        p4::run_raw_stdin(&conn, &["change", "-i"], &form)?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("rename task failed: {e}"))?
 }
 
 /// Revert an opened file, discarding local changes (`p4 revert <file>`).

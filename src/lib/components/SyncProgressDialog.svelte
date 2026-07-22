@@ -3,6 +3,8 @@
     title,
     count,
     current,
+    issues,
+    issueLine,
     phase,
     message,
     onCancel,
@@ -11,7 +13,9 @@
     title: string;
     count: number;
     current: string;
-    phase: "running" | "error";
+    issues: number;
+    issueLine: string;
+    phase: "running" | "warn" | "error";
     message: string;
     onCancel: () => void;
     onClose: () => void;
@@ -28,12 +32,33 @@
       <div class="actions">
         <button class="primary" onclick={onClose}>Close</button>
       </div>
+    {:else if phase === "warn"}
+      <div class="warnhead">
+        ⚠ Synced {count} file{count === 1 ? "" : "s"}, but {issues} could not be synced.
+      </div>
+      <div class="warnmsg">
+        Those files are open in another app (e.g. the Unreal editor). Close it and re-sync.
+      </div>
+      {#if issueLine}<div class="cur mono dim" title={issueLine}>{issueLine}</div>{/if}
+      <div class="actions">
+        <button class="primary" onclick={onClose}>Close</button>
+      </div>
     {:else}
       <div class="line">
         <span class="spin"></span>
-        <span class="cnt mono">{count} file{count === 1 ? "" : "s"} synced</span>
+        {#if count === 0}
+          <span class="cnt mono">Preparing… (scanning the workspace)</span>
+        {:else}
+          <span class="cnt mono">{count} file{count === 1 ? "" : "s"} synced</span>
+        {/if}
       </div>
       {#if current}<div class="cur mono dim" title={current}>{current}</div>{/if}
+      {#if issues > 0}
+        <div class="warnhead mono">
+          ⚠ {issues} file{issues === 1 ? "" : "s"} couldn't be synced (open in another app)
+        </div>
+        {#if issueLine}<div class="cur mono dim" title={issueLine}>{issueLine}</div>{/if}
+      {/if}
       <div class="actions">
         <button onclick={onCancel}>Cancel</button>
       </div>
@@ -62,11 +87,11 @@
     border-radius: 8px;
     box-shadow: 0 10px 40px rgba(0, 0, 0, 0.4);
     padding: 16px 18px;
-    width: 30rem;
+    width: 32rem;
     max-width: 92vw;
     display: flex;
     flex-direction: column;
-    gap: 10px;
+    gap: 8px;
   }
   .dtitle {
     font-size: 13px;
@@ -92,17 +117,30 @@
       transform: rotate(360deg);
     }
   }
+  .cnt {
+    font-size: 12px;
+  }
   .cur {
     font-size: 11px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
+  .warnhead {
+    font-size: 12px;
+    color: var(--warn);
+  }
+  .warnmsg {
+    font-size: 12px;
+    color: var(--text);
+  }
   .err {
     font-size: 12px;
     color: var(--warn);
     white-space: pre-wrap;
     word-break: break-word;
+    max-height: 40vh;
+    overflow: auto;
   }
   .actions {
     display: flex;

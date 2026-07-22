@@ -8,12 +8,14 @@
     connected,
     refreshing,
     syncing,
+    reconciling,
     onClientChange,
     onServerChange,
     onAddServer,
     onServerContext,
     onRefresh,
     onSync,
+    onReconcile,
   }: {
     conn: P4Conn;
     clients: P4Record[];
@@ -21,15 +23,17 @@
     connected: boolean;
     refreshing: boolean;
     syncing: boolean;
+    reconciling: boolean;
     onClientChange: () => void;
     onServerChange: (port: string) => void;
     onAddServer: () => void;
     onServerContext: (e: MouseEvent) => void;
     onRefresh: () => void;
     onSync: () => void;
+    onReconcile: () => void;
   } = $props();
 
-  const busy = $derived(!connected || refreshing || syncing);
+  const busy = $derived(!connected || refreshing || syncing || reconciling);
 
   const ADD = "__add__";
   function onServerPick(e: Event) {
@@ -91,6 +95,13 @@
     </button>
     <button class="sync" onclick={onSync} disabled={busy} title="Sync the entire workspace to latest">
       ⤓ {syncing ? "Syncing…" : "Global sync"}
+    </button>
+    <button
+      onclick={onReconcile}
+      disabled={busy || !conn.client}
+      title="Open files changed, added, or deleted outside Perforce (offline work)"
+    >
+      ⟲ {reconciling ? "Reconciling…" : "Reconcile"}
     </button>
   </div>
 </div>

@@ -56,6 +56,7 @@ export const p4 = {
   filelog: (conn: P4Conn, file: string, max = 100) => call("p4_filelog", { conn, file, max }),
   fstat: (conn: P4Conn, file: string) => call("p4_fstat", { conn, file }),
   sync: (conn: P4Conn, path?: string) => call("p4_sync", { conn, path: path ?? null }),
+  reconcile: (conn: P4Conn, path: string) => call("p4_reconcile", { conn, path }),
   syncStream: (conn: P4Conn, path?: string) =>
     invoke<number>("p4_sync_stream", { conn, path: path ?? null }),
   syncCancel: () => invoke<void>("sync_cancel"),
@@ -91,6 +92,8 @@ export const p4 = {
   newChangelist: (conn: P4Conn, description: string) =>
     invoke<string>("p4_new_changelist", { conn, description }),
   envPort: (conn: P4Conn) => invoke<string>("p4_env_port", { conn }),
+  setDescription: (conn: P4Conn, change: string, description: string) =>
+    invoke<void>("p4_set_description", { conn, change, description }),
 };
 
 /** Last path segment of a depot path. */

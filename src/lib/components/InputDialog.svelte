@@ -1,23 +1,29 @@
 <script lang="ts">
+  import { untrack } from "svelte";
+
   let {
     title,
     label,
     placeholder = "",
+    initial = "",
     okLabel = "OK",
+    multiline = false,
     onSubmit,
     onCancel,
   }: {
     title: string;
     label: string;
     placeholder?: string;
+    initial?: string;
     okLabel?: string;
+    multiline?: boolean;
     onSubmit: (value: string) => void;
     onCancel: () => void;
   } = $props();
 
-  let value = $state("");
-  let inputEl: HTMLInputElement | undefined = $state();
-  $effect(() => inputEl?.focus());
+  let value = $state(untrack(() => initial));
+  let el: HTMLInputElement | HTMLTextAreaElement | undefined = $state();
+  $effect(() => el?.focus());
 
   function submit() {
     const v = value.trim();
@@ -31,17 +37,31 @@
     <div class="dtitle">{title}</div>
     <label class="lbl">
       <span>{label}</span>
-      <input
-        bind:this={inputEl}
-        bind:value
-        type="text"
-        {placeholder}
-        onkeydown={(e) => {
-          if (e.key === "Enter") submit();
-          else if (e.key === "Escape") onCancel();
-        }}
-      />
+      {#if multiline}
+        <textarea
+          bind:this={el}
+          bind:value
+          rows="4"
+          {placeholder}
+          onkeydown={(e) => {
+            if (e.key === "Escape") onCancel();
+            else if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) submit();
+          }}
+        ></textarea>
+      {:else}
+        <input
+          bind:this={el}
+          bind:value
+          type="text"
+          {placeholder}
+          onkeydown={(e) => {
+            if (e.key === "Enter") submit();
+            else if (e.key === "Escape") onCancel();
+          }}
+        />
+      {/if}
     </label>
+    {#if multiline}<span class="hint">Ctrl+Enter to save</span>{/if}
     <div class="actions">
       <button onclick={onCancel}>Cancel</button>
       <button class="primary" disabled={!value.trim()} onclick={submit}>{okLabel}</button>
@@ -70,11 +90,11 @@
     border-radius: 8px;
     box-shadow: 0 10px 40px rgba(0, 0, 0, 0.4);
     padding: 16px 18px;
-    width: 26rem;
+    width: 28rem;
     max-width: 92vw;
     display: flex;
     flex-direction: column;
-    gap: 12px;
+    gap: 10px;
   }
   .dtitle {
     font-size: 13px;
@@ -87,7 +107,8 @@
     font-size: 12px;
     color: var(--text-dim);
   }
-  .lbl input {
+  .lbl input,
+  .lbl textarea {
     font: inherit;
     font-size: 13px;
     color: var(--text);
@@ -95,10 +116,17 @@
     border: 1px solid var(--border);
     border-radius: 5px;
     padding: 6px 8px;
+    resize: vertical;
   }
-  .lbl input:focus {
+  .lbl input:focus,
+  .lbl textarea:focus {
     outline: none;
     border-color: var(--accent);
+  }
+  .hint {
+    font-size: 11px;
+    color: var(--text-dim);
+    margin-top: -4px;
   }
   .actions {
     display: flex;

@@ -36,6 +36,7 @@
   let busy = $state(false);
   let refreshing = $state(false);
   let syncing = $state(false);
+  let reconciling = $state(false);
   let optionsOpen = $state(false);
   let ctxMenu = $state<{ x: number; y: number; change: string } | null>(null);
   let streamCtx = $state<{ x: number; y: number; stream: string } | null>(null);
@@ -63,7 +64,9 @@
     title: string;
     count: number;
     current: string;
-    phase: "running" | "error";
+    issues: number;
+    issueLine: string;
+    phase: "running" | "warn" | "error";
     message: string;
   } | null>(null);
 
@@ -71,16 +74,28 @@
   // Auto-closes on success; keeps the dialog open on error; cancellable.
   async function runSyncWithProgress(title: string, path: string | undefined): Promise<number | null> {
     syncCancelled = false;
-    syncProgress = { title, count: 0, current: "", phase: "running", message: "" };
+    syncProgress = { title, count: 0, current: "", issues: 0, issueLine: "", phase: "running", message: "" };
     const un1 = await listen<{ count: number; line: string }>("sync-progress", (e) => {
       if (syncProgress) {
         syncProgress.count = e.payload.count;
         syncProgress.current = e.payload.line;
       }
     });
+    const un2 = await listen<{ count: number; line: string }>("sync-issue", (e) => {
+      if (syncProgress) {
+        syncProgress.issues = e.payload.count;
+        syncProgress.issueLine = e.payload.line;
+      }
+    });
     try {
       const n = await p4.syncStream(conn, path);
-      syncProgress = null; // auto-close on success
+      if (syncProgress && syncProgress.issues > 0) {
+        // Completed, but some files couldn't be synced (e.g. open in the editor).
+        syncProgress.count = n;
+        syncProgress.phase = "warn";
+        return n;
+      }
+      syncProgress = null; // clean success → auto-close
       notice = n > 0 ? `Synced ${n} file${n === 1 ? "" : "s"}.` : "Already up to date.";
       window.setTimeout(() => (notice = ""), 4000);
       return n;
@@ -98,6 +113,7 @@
       return null;
     } finally {
       un1();
+      un2();
     }
   }
   function cancelSync() {
@@ -775,6 +791,12 @@
       });
     }
     if (own && !isDefault) {
+      items.push({
+        label: "Rename…",
+        action: () => (renameCl = { change: cl.change, desc: (cl.desc ?? "").trim() }),
+      });
+    }
+    if (own && !isDefault) {
       if (hasReview) items.push({ label: "Update review", action: () => updateReviewCL(cl.change) });
       else items.push({ label: "Request review", action: () => requestReviewCL(cl.change) });
     }
@@ -790,6 +812,7 @@
   // --- pending FILE context actions (local/opened files) ---------------------
   let fileCtx = $state<{ x: number; y: number; file: P4Record; change: string } | null>(null);
   let newClFile = $state<string | null>(null); // a file awaiting a new-changelist name
+  let renameCl = $state<{ change: string; desc: string } | null>(null); // CL being renamed
 
   function onPendingFileContext(file: P4Record, change: string, e: MouseEvent) {
     fileCtx = { x: e.clientX, y: e.clientY, file, change };
@@ -824,6 +847,12 @@
       const ch = await p4.newChangelist(conn, desc);
       await p4.reopen(conn, file, ch);
     }, "Moved to a new changelist.");
+  }
+  function submitRename(desc: string) {
+    const target = renameCl;
+    renameCl = null;
+    if (!target) return;
+    pendingMutate(() => p4.setDescription(conn, target.change, desc), "Changelist renamed.");
   }
 
   // Right-click menu for a pending file: view/revert, un-open, or move to a CL.
@@ -933,6 +962,35 @@
       if (n !== null) await refresh(); // have-revs changed → update markers
     } finally {
       syncing = false;
+    }
+  }
+
+  // Reconcile offline work: open files changed outside Perforce into Default.
+  async function reconcileWorkspace() {
+    if (!connected || syncing || refreshing || reconciling || !rootPath) return;
+    if (
+      !(await askConfirm(
+        `${rootPath}\n\nReconcile offline work? This opens files changed, added, or deleted outside Perforce into the default changelist.`,
+        "Reconcile offline work",
+        "Reconcile",
+      ))
+    ) {
+      return;
+    }
+    reconciling = true;
+    error = "";
+    notice = "";
+    try {
+      const rows = await p4.reconcile(conn, rootPath);
+      const n = rows.length;
+      notice = n > 0 ? `Reconciled ${n} file${n === 1 ? "" : "s"} into the default changelist.` : "Nothing to reconcile.";
+      window.setTimeout(() => (notice = ""), 5000);
+      await refresh();
+      loadPending();
+    } catch (e) {
+      error = String(e);
+    } finally {
+      reconciling = false;
     }
   }
 
@@ -1168,6 +1226,7 @@
     {connected}
     {refreshing}
     {syncing}
+    {reconciling}
     onClientChange={selectClient}
     onServerChange={switchServerTo}
     onAddServer={() => (addServerOpen = true)}
@@ -1176,6 +1235,7 @@
     }}
     onRefresh={refresh}
     onSync={globalSync}
+    onReconcile={reconcileWorkspace}
   />
 
   {#if error}
@@ -1301,6 +1361,8 @@
     title={syncProgress.title}
     count={syncProgress.count}
     current={syncProgress.current}
+    issues={syncProgress.issues}
+    issueLine={syncProgress.issueLine}
     phase={syncProgress.phase}
     message={syncProgress.message}
     onCancel={cancelSync}
@@ -1354,6 +1416,18 @@
     okLabel="Create & move"
     onSubmit={submitNewChangelist}
     onCancel={() => (newClFile = null)}
+  />
+{/if}
+
+{#if renameCl}
+  <InputDialog
+    title="Rename changelist @{renameCl.change}"
+    label="Description"
+    initial={renameCl.desc}
+    multiline
+    okLabel="Save"
+    onSubmit={submitRename}
+    onCancel={() => (renameCl = null)}
   />
 {/if}
 
