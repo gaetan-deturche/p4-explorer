@@ -26,6 +26,11 @@ pub struct P4Conn {
     /// hybrid git+p4 layouts where the shell cwd is outside the client root.
     #[serde(default)]
     pub cwd: String,
+    /// Per-server character set. "" = ambient (P4CHARSET as-is); "none" = force a
+    /// non-unicode client (clear P4CHARSET); any other value → `-C <charset>`
+    /// (unicode). Lets one server be unicode and another not.
+    #[serde(default)]
+    pub charset: String,
 }
 
 impl P4Conn {
@@ -55,11 +60,23 @@ impl P4Conn {
 const E_WARN: i64 = 2;
 const E_FAILED: i64 = 3;
 
+/// Apply the connection's charset choice to a p4 command via `-C <charset>`.
+/// "" means leave the ambient P4CHARSET alone; any explicit value ("none" for a
+/// non-unicode client, "utf8" for a unicode one, …) overrides it — including a
+/// P4CHARSET set via `p4 set` (registry), which clearing the env would NOT. Must
+/// be called after the global args, before the subcommand.
+fn apply_charset(cmd: &mut Command, conn: &P4Conn) {
+    if !conn.charset.is_empty() {
+        cmd.arg("-C").arg(&conn.charset);
+    }
+}
+
 pub fn base_command(conn: &P4Conn) -> Command {
     let mut cmd = Command::new("p4");
     for g in conn.global_args() {
         cmd.arg(g);
     }
+    apply_charset(&mut cmd, conn);
     // Don't flash a console window when spawning p4 from the GUI process.
     #[cfg(windows)]
     {
@@ -162,6 +179,7 @@ pub fn run(conn: &P4Conn, args: &[&str]) -> Result<Vec<Record>, String> {
     for g in conn.global_args() {
         cmd.arg(g);
     }
+    apply_charset(&mut cmd, conn);
     for a in args {
         cmd.arg(a);
     }
@@ -233,6 +251,7 @@ pub fn run_strict(conn: &P4Conn, args: &[&str]) -> Result<Vec<Record>, String> {
     for g in conn.global_args() {
         cmd.arg(g);
     }
+    apply_charset(&mut cmd, conn);
     for a in args {
         cmd.arg(a);
     }

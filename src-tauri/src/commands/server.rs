@@ -106,6 +106,69 @@ pub async fn swarm_review(conn: P4Conn, change: String) -> Result<Option<ReviewI
     .map_err(|e| format!("swarm-review task failed: {e}"))?
 }
 
+/// Whether the connection is currently authenticated (`p4 login -s` exits 0).
+/// True also when the server needs no login (security level 0).
+#[tauri::command]
+pub async fn p4_login_status(conn: P4Conn) -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut cmd = p4::base_command(&conn);
+        cmd.arg("login").arg("-s");
+        let out = cmd
+            .output()
+            .map_err(|e| format!("failed to launch p4: {e} (is p4 on PATH?)"))?;
+        Ok(out.status.success())
+    })
+    .await
+    .map_err(|e| format!("login-status task failed: {e}"))?
+}
+
+/// Log in with a password (`p4 login`, password fed on stdin). Errors on bad
+/// credentials. The password is used only to obtain a p4 ticket; it is never
+/// stored — only p4's own ticket persists.
+#[tauri::command]
+pub async fn p4_login(conn: P4Conn, password: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        p4::run_raw_stdin(&conn, &["login"], &format!("{password}\n"))?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("login task failed: {e}"))?
+}
+
+/// Which of `paths` exist as directories on this machine — used to flag which
+/// workspaces are actually checked out here vs bound to another machine.
+#[tauri::command]
+pub async fn paths_exist(paths: Vec<String>) -> Vec<bool> {
+    tauri::async_runtime::spawn_blocking(move || {
+        paths
+            .iter()
+            .map(|p| !p.is_empty() && std::path::Path::new(p).is_dir())
+            .collect()
+    })
+    .await
+    .unwrap_or_default()
+}
+
+/// Trust an SSL server's fingerprint (`p4 trust -y -f`) so subsequent commands
+/// don't fail on an unknown/changed fingerprint — needed on first connect to an
+/// `ssl:` server.
+#[tauri::command]
+pub async fn p4_trust(conn: P4Conn) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut cmd = p4::base_command(&conn);
+        cmd.arg("trust").arg("-y").arg("-f");
+        let out = cmd
+            .output()
+            .map_err(|e| format!("failed to launch p4: {e} (is p4 on PATH?)"))?;
+        if !out.status.success() {
+            return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("trust task failed: {e}"))?
+}
+
 /// All streams on the server (`p4 streams`).
 #[tauri::command]
 pub async fn p4_streams(conn: P4Conn) -> Res {
