@@ -149,6 +149,7 @@ export const browse = {
   // Single click: select (dir → history, file → details) — does NOT fold.
   selectNode(node: TreeNode) {
     selectedTreePath = node.path;
+    h?.setTab("history"); // explicit user navigation → show History
     if (node.isDir) history.loadFolder(node.path);
     else history.selectFile(node.path);
   },
@@ -204,6 +205,7 @@ export const browse = {
   },
   openResult(depotFile: string) {
     selectedTreePath = depotFile;
+    h?.setTab("history"); // explicit user navigation → show History
     history.selectFile(depotFile);
   },
 

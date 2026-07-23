@@ -1,11 +1,13 @@
 <script lang="ts">
-  import { fmtTime, firstLine, type P4Record } from "$lib/p4";
+  import { fmtTime, firstLine, type P4Record, type ReviewInfo } from "$lib/p4";
   import DiffView from "$lib/components/DiffView.svelte";
 
   let {
     rows,
     loading,
     client,
+    refreshKey,
+    reviews,
     onLocalFiles,
     onShelvedFiles,
     onLocalDiff,
@@ -19,6 +21,8 @@
     rows: P4Record[];
     loading: boolean;
     client: string; // resets the per-CL cache when the workspace changes
+    refreshKey: number; // bumps when pending data changes → refetch open CLs' files
+    reviews: Record<string, ReviewInfo | null>; // change → Swarm review status
     onLocalFiles: (change: string) => Promise<P4Record[]>; // opened (workspace) files
     onShelvedFiles: (change: string) => Promise<P4Record[]>; // shelved files
     onLocalDiff: (depotFile: string) => Promise<string>; // local vs server
@@ -46,8 +50,17 @@
   // Per-file inline diff, keyed by "<change>|<kind>|<depotFile>".
   let fdiff = $state<Record<string, { open: boolean; loading: boolean; text: string }>>({});
 
+  // Stale-while-revalidate: keep any existing files visible during a refetch so
+  // a refresh (e.g. after moving a file) doesn't flash "Loading…".
   async function loadCL(change: string) {
-    cls[change] = { open: true, loading: true, local: [], shelved: [], shelvedOpen: false };
+    const prev = cls[change];
+    cls[change] = {
+      open: prev?.open ?? true,
+      loading: !prev, // only the very first load shows the spinner
+      local: prev?.local ?? [],
+      shelved: prev?.shelved ?? [],
+      shelvedOpen: prev?.shelvedOpen ?? false,
+    };
     const [local, shelved] = await Promise.all([onLocalFiles(change), onShelvedFiles(change)]);
     const local2 = local.filter((f) => f.depotFile);
     const shelved2 = shelved.filter((f) => f.depotFile);
@@ -58,6 +71,21 @@
       shelved: shelved2,
       shelvedOpen: cls[change]?.shelvedOpen ?? false,
     };
+  }
+
+  // Optimistic move: reflect the move in the UI immediately (we already have the
+  // file record), then fire the p4 command. The reload it triggers reconciles —
+  // and rolls back — once p4 answers, so a failed move snaps back on its own.
+  // Exported so the right-click "Move to changelist" menu shares this one path.
+  export function moveFile(file: string, from: string, to: string) {
+    const src = cls[from];
+    const rec = src?.local.find((f) => f.depotFile === file);
+    if (src && rec) {
+      cls[from] = { ...src, local: src.local.filter((f) => f.depotFile !== file) };
+      const dst = cls[to];
+      if (dst) cls[to] = { ...dst, local: [...dst.local, { ...rec }] };
+    }
+    onMoveFile(file, to);
   }
 
   function toggleCL(change: string) {
@@ -74,16 +102,23 @@
   }
 
   // Expand every changelist by default. Reset the cache when the workspace
-  // changes — CL keys like "default" are reused across workspaces.
+  // changes — CL keys like "default" are reused across workspaces. When
+  // refreshKey bumps (a pending mutation reloaded the list), refetch the files
+  // of every already-open changelist so moved/reverted files show immediately.
   let lastClient = "";
+  let lastKey = -1;
   $effect(() => {
+    const key = refreshKey;
     if (client !== lastClient) {
       lastClient = client;
       cls = {};
       fdiff = {};
     }
+    const forced = key !== lastKey;
+    lastKey = key;
     for (const r of rows) {
       if (!cls[r.change]) loadCL(r.change);
+      else if (forced && cls[r.change].open) loadCL(r.change);
     }
   });
 
@@ -125,6 +160,7 @@
     {:else}
       {#each rows as r (r.change)}
         {@const s = cls[r.change]}
+        {@const rv = reviews[r.change]}
         <button
           class="cl"
           class:dropinto={dragOver === r.change}
@@ -141,7 +177,7 @@
           }}
           ondrop={(e) => {
             e.preventDefault();
-            if (drag && drag.from !== r.change) onMoveFile(drag.file, r.change);
+            if (drag && drag.from !== r.change) moveFile(drag.file, drag.from, r.change);
             drag = null;
             dragOver = null;
           }}
@@ -151,6 +187,14 @@
           <span class="desc" title={r.desc}>
             {r.change === "default" ? "" : firstLine(r.desc) || "(no description)"}
           </span>
+          {#if rv}
+            <span
+              class="review rv-{rv.state}"
+              title={"Swarm review" + (rv.id ? " #" + rv.id : "") + ": " + rv.stateLabel}
+            >
+              {rv.stateLabel}
+            </span>
+          {/if}
           <span class="user dim">{r.user}</span>
           <span class="date dim">{fmtTime(r.time)}</span>
         </button>
@@ -295,6 +339,31 @@
   .date {
     flex: none;
     font-size: 11px;
+  }
+  .review {
+    flex: none;
+    font-size: 10px;
+    font-weight: 600;
+    padding: 1px 6px;
+    border-radius: 10px;
+    border: 1px solid currentColor;
+    white-space: nowrap;
+    color: var(--text-dim);
+  }
+  .rv-needsReview {
+    color: var(--accent);
+  }
+  .rv-approved {
+    color: var(--have);
+  }
+  .rv-needsRevision,
+  .rv-rejected {
+    color: var(--warn);
+  }
+  .rv-requested,
+  .rv-archived {
+    color: var(--text-dim);
+    font-style: italic;
   }
   .subfolder {
     display: flex;

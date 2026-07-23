@@ -3,7 +3,7 @@
 //! file-content providers for PendingList. Shared bits come via `init()`.
 
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { p4, type P4Conn, type P4Record } from "$lib/p4";
+import { p4, type P4Conn, type P4Record, type ReviewInfo } from "$lib/p4";
 
 type Hooks = {
   conn: () => P4Conn;
@@ -20,6 +20,8 @@ let h: Hooks | null = null;
 let swarmBase = "";
 let rows = $state<P4Record[]>([]);
 let loading = $state(false);
+let version = $state(0); // bumps on every (re)load so views refetch file lists
+let reviews = $state<Record<string, ReviewInfo | null>>({}); // change → Swarm review status
 
 export const pending = {
   init(hooks: Hooks) {
@@ -31,11 +33,18 @@ export const pending = {
   get loading() {
     return loading;
   },
+  get version() {
+    return version;
+  },
+  get reviews() {
+    return reviews;
+  },
 
   /** Drop the current list (on disconnect / workspace switch). */
   clear() {
     rows = [];
     loading = false;
+    reviews = {};
   },
 
   /** (Re)load the client's pending changelists (Default prepended). */
@@ -44,6 +53,7 @@ export const pending = {
     if (!h.connected() || !h.conn().client) {
       rows = [];
       loading = false;
+      reviews = {};
       return;
     }
     if (rows.length === 0) loading = true; // keep previous list otherwise
@@ -51,20 +61,45 @@ export const pending = {
     loading = false;
     const def = { change: "default", desc: "", user: h.conn().user, time: "" } as P4Record;
     rows = [def, ...r];
+    version++; // signal open changelists to refetch their (now-stale) file lists
+    pending.loadReviews(); // fire-and-forget: populate Swarm review badges
   },
 
-  /** Run a workspace-mutating action, then refresh + reload. */
-  async mutate(runFn: () => Promise<unknown>, okNotice: string) {
+  /** Fetch the Swarm review status for every numbered changelist (the review is
+   *  linked by change, so we can't pre-filter on a description marker). Builds a
+   *  fresh map so statuses for removed changelists are pruned. */
+  async loadReviews() {
+    if (!h || !h.connected() || !h.conn().client) return;
+    const conn = h.conn();
+    const targets = rows.filter((r) => r.change !== "default");
+    const next: Record<string, ReviewInfo | null> = {};
+    await Promise.all(
+      targets.map(async (r) => {
+        try {
+          next[r.change] = await p4.swarmReview(conn, r.change);
+        } catch {
+          /* leave this CL without a badge */
+        }
+      }),
+    );
+    reviews = next;
+  },
+
+  /** Run a workspace-mutating action, then reload. `refresh` (default true) also
+   *  reloads the depot tree + history; skip it for CL-only moves that change no
+   *  synced content. Pending is always reloaded in `finally`, so an optimistic UI
+   *  update reconciles with the truth on success AND rolls back on error. */
+  async mutate(runFn: () => Promise<unknown>, okNotice: string, opts?: { refresh?: boolean }) {
     if (!h || !h.connected() || h.syncing()) return;
     h.setSyncing(true);
     try {
       await runFn();
       h.setNotice(okNotice);
-      await h.refresh();
-      pending.load();
+      if (opts?.refresh !== false) await h.refresh();
     } catch (e) {
       h.setError(String(e));
     } finally {
+      pending.load();
       h.setSyncing(false);
     }
   },
@@ -145,13 +180,18 @@ export const pending = {
   },
   reopen(file: string, change: string) {
     const label = change === "default" ? "Default" : "@" + change;
-    pending.mutate(() => p4.reopen(h!.conn(), file, change), `Moved to ${label}.`);
+    // CL move only — no synced content changes, so skip the tree/history refresh.
+    pending.mutate(() => p4.reopen(h!.conn(), file, change), `Moved to ${label}.`, { refresh: false });
   },
   moveToNew(file: string, desc: string) {
-    pending.mutate(async () => {
-      const ch = await p4.newChangelist(h!.conn(), desc);
-      await p4.reopen(h!.conn(), file, ch);
-    }, "Moved to a new changelist.");
+    pending.mutate(
+      async () => {
+        const ch = await p4.newChangelist(h!.conn(), desc);
+        await p4.reopen(h!.conn(), file, ch);
+      },
+      "Moved to a new changelist.",
+      { refresh: false },
+    );
   },
   rename(change: string, desc: string) {
     pending.mutate(() => p4.setDescription(h!.conn(), change, desc), "Changelist renamed.");

@@ -109,7 +109,9 @@
   function pendingMenuItems(cl: P4Record) {
     const own = cl.user === conn.user;
     const isDefault = cl.change === "default";
-    const hasReview = (cl.desc ?? "").includes("#review");
+    // Real Swarm review status (the #review description marker is unreliable —
+    // Swarm links by change and doesn't rewrite the pending CL's description).
+    const hasReview = !!pending.reviews[cl.change];
     const items: { label: string; action: () => void }[] = [];
     if (own) {
       items.push({
@@ -141,8 +143,17 @@
   let newClFile = $state<string | null>(null); // a file awaiting a new-changelist name
   let renameCl = $state<{ change: string; desc: string } | null>(null); // CL being renamed
 
+  // PendingList instance, for the optimistic file move shared with drag-and-drop.
+  let pendingList = $state<{ moveFile: (file: string, from: string, to: string) => void }>();
+
   function onPendingFileContext(file: P4Record, change: string, e: MouseEvent) {
     fileCtx = { x: e.clientX, y: e.clientY, file, change };
+  }
+  // Move via the context menu, optimistically (falls back to a plain reopen if
+  // the list isn't mounted for some reason).
+  function moveFileTo(file: string, from: string, to: string) {
+    if (pendingList) pendingList.moveFile(file, from, to);
+    else pending.reopen(file, to);
   }
   function submitNewChangelist(desc: string) {
     const file = newClFile;
@@ -164,7 +175,7 @@
         const short = desc.length > 32 ? desc.slice(0, 31) + "…" : desc;
         const label =
           cl.change === "default" ? "Default" : short ? `@${cl.change}  ${short}` : "@" + cl.change;
-        return { label, action: () => pending.reopen(file.depotFile, cl.change) };
+        return { label, action: () => moveFileTo(file.depotFile, change, cl.change) };
       });
     targets.push({ label: "New changelist…", action: () => (newClFile = file.depotFile) });
     return [
@@ -211,7 +222,6 @@
   onMount(() => {
     history.init({
       conn: () => conn,
-      showHistoryTab: () => (centerTab = "history"),
       setNotice,
     });
     browse.init({
@@ -360,9 +370,12 @@
         />
       {:else if centerTab === "pending"}
         <PendingList
+          bind:this={pendingList}
           rows={pending.rows}
           loading={pending.loading}
           client={conn.client}
+          refreshKey={pending.version}
+          reviews={pending.reviews}
           onLocalFiles={pending.localFiles}
           onShelvedFiles={pending.shelvedFiles}
           onLocalDiff={pending.localDiff}

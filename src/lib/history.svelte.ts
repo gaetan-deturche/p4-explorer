@@ -7,7 +7,6 @@ import { loadHist, saveHist, type HistEntry } from "$lib/cache";
 
 type Hooks = {
   conn: () => P4Conn;
-  showHistoryTab: () => void; // flip the center tab to History
   setNotice: (m: string, ms?: number) => void;
 };
 
@@ -131,7 +130,6 @@ export const history = {
 
   async loadFolder(path: string, seq: number = ++loadSeq) {
     if (!h) return;
-    h.showHistoryTab();
     const id = "F:" + path;
 
     const cached = memCache.get(id) ?? loadHist(h.conn().client, id);
@@ -182,7 +180,6 @@ export const history = {
   async selectFile(depotFile: string) {
     if (!h) return;
     const seq = ++loadSeq;
-    h.showHistoryTab();
     const id = "R:" + depotFile;
 
     const cached = memCache.get(id) ?? loadHist(h.conn().client, id);
