@@ -3,27 +3,18 @@
   import { getVersion } from "@tauri-apps/api/app";
   import {
     p4,
-    idx,
     isReleaseBuild,
     emptyConn,
     firstLine,
     type P4Conn,
     type P4Record,
   } from "$lib/p4";
-  import { makeNode, type TreeNode } from "$lib/tree";
   import { loadServers, saveServers, withServer, withoutServer } from "$lib/servers";
-  import {
-    loadFolder,
-    saveFolder,
-    clearClientCache,
-    buildChildren,
-    localChildren,
-    type FolderContents,
-  } from "$lib/cache";
   import { updates } from "$lib/updates.svelte";
   import { sync } from "$lib/sync.svelte";
   import { pending } from "$lib/pending.svelte";
   import { history } from "$lib/history.svelte";
+  import { browse } from "$lib/browse.svelte";
   import MenuBar from "$lib/components/MenuBar.svelte";
   import Toolbar from "$lib/components/Toolbar.svelte";
   import StatusBar from "$lib/components/StatusBar.svelte";
@@ -43,7 +34,6 @@
   let conn = $state<P4Conn>(emptyConn());
   let connected = $state(false);
   let busy = $state(false);
-  let refreshing = $state(false);
   let syncing = $state(false);
   let reconciling = $state(false);
   let optionsOpen = $state(false);
@@ -76,10 +66,8 @@
     window.setTimeout(() => (error = ""), ms);
   }
 
-  // Sync feature (progress, per-file error report, reconcile, update-to-CL)
-  // lives in $lib/sync.svelte.ts — wired via sync.init() in onMount.
-  let indexing = $state(false);
-  let indexCount = $state(0);
+  // Feature stores wired in onMount: sync ($lib/sync.svelte.ts), history, browse,
+  // pending, updates. Depot tree / streams / repo / index state lives in browse.
 
   // Resizable widths: tree pane (left) and the changelist-details pane that
   // lives on the right INSIDE the History tab.
@@ -128,7 +116,7 @@
     if (port === conn.port) return;
     conn.port = port;
     conn.client = "";
-    resetBrowse();
+    browse.reset();
     await connect();
   }
   function submitAddServer(port: string) {
@@ -139,29 +127,11 @@
     switchServerTo(v);
   }
 
-  // Depot tree
-  let rootPath = $state(""); // stream root, e.g. //Curiosity/main
-  let clientRoot = $state(""); // local workspace root, e.g. H:\Dev\...\Curiosity
-  let tree = $state<TreeNode | null>(null);
-  let selectedTreePath = $state("");
-
-  // Center tab. History/details pane state lives in $lib/history.svelte.ts.
+  // Center tab. History/details pane lives in $lib/history.svelte.ts; the depot
+  // tree, streams/repo tabs and index live in $lib/browse.svelte.ts.
   let centerTab = $state<"history" | "pending" | "streams" | "repo">("pending");
-  // Streams / Repo browser tabs
-  let streamRows = $state<P4Record[]>([]);
-  let streamsLoading = $state(false);
-  let repoTree = $state<TreeNode | null>(null);
-  let repoSelected = $state("");
 
   const centerRows = $derived(centerTab === "pending" ? pending.rows : history.rows);
-
-  async function safe<T>(fn: () => Promise<T[]>): Promise<T[]> {
-    try {
-      return await fn();
-    } catch {
-      return [];
-    }
-  }
 
   // --- connection warm-keeping ------------------------------------------------
   // Each `p4` CLI call reconnects; the first `dirs` on a huge stream root is a
@@ -180,7 +150,7 @@
           connected = true; // recovered
           error = "";
         }
-        if (rootPath) p4.dirs(conn, rootPath).catch(() => {}); // keep cache warm
+        if (browse.rootPath) p4.dirs(conn, browse.rootPath).catch(() => {}); // keep cache warm
       } catch (e) {
         if (connected) {
           connected = false;
@@ -192,89 +162,6 @@
   onDestroy(() => {
     if (keepAliveId !== null) clearInterval(keepAliveId);
   });
-
-  // --- folder-contents cache (in-memory; persistence + helpers in $lib/cache) -
-  const browCache = new Map<string, FolderContents>();
-
-  // Populate a directory node's children: instant from cache/local disk, then
-  // the authoritative p4 listing replaces it (stale-while-revalidate).
-  async function loadNode(node: TreeNode) {
-    if (node.loading) return;
-    node.loading = true;
-    const path = node.path;
-
-    const mem = browCache.get(path);
-    const cached = mem ?? loadFolder(conn.client, path);
-    if (cached) {
-      node.children = buildChildren(cached);
-    } else {
-      const local = await localChildren(clientRoot, rootPath, path);
-      if (local && node.children.length === 0) node.children = buildChildren(local);
-    }
-
-    // Refresh unless we already have it fresh in memory this session.
-    if (!mem) {
-      const [d, f] = await Promise.all([
-        safe(() => p4.dirs(conn, path)),
-        safe(() => p4.files(conn, path)),
-      ]);
-      const c = { dirs: d, files: f };
-      node.children = buildChildren(c);
-      browCache.set(path, c);
-      saveFolder(conn.client, path, c);
-    }
-    node.loaded = true;
-    node.loading = false;
-  }
-
-  // Single click: select (dir → history, file → details) — does NOT fold.
-  function selectNode(node: TreeNode) {
-    selectedTreePath = node.path;
-    if (node.isDir) history.loadFolder(node.path);
-    else history.selectFile(node.path);
-  }
-
-  // Triangle / double click: toggle fold state, loading children on first open.
-  function expandNode(node: TreeNode) {
-    node.expanded = !node.expanded;
-    if (node.expanded && !node.loaded) loadNode(node);
-  }
-
-  // Build (or rebuild) the local fuzzy-search index for the current workspace.
-  async function buildIndex() {
-    if (!connected || !conn.client || !rootPath || indexing) return;
-    indexing = true;
-    try {
-      indexCount = await idx.build(conn, conn.client, rootPath);
-    } catch {
-      /* leave count as-is */
-    } finally {
-      indexing = false;
-    }
-  }
-
-  // Ensure an index exists (build in the background if this workspace is new).
-  async function ensureIndex() {
-    if (!connected || !conn.client) return;
-    try {
-      indexCount = await idx.status(conn.client);
-    } catch {
-      indexCount = 0;
-    }
-    if (indexCount === 0) buildIndex();
-  }
-
-  // Per-keystroke fuzzy search over the local index (case-insensitive, no p4).
-  async function searchDepot(term: string): Promise<P4Record[]> {
-    if (!term.trim() || !conn.client) return [];
-    const paths = await idx.search(conn.client, term.trim(), 200);
-    return paths.map((p) => ({ depotFile: p }) as P4Record);
-  }
-
-  function openResult(depotFile: string) {
-    selectedTreePath = depotFile;
-    history.selectFile(depotFile);
-  }
 
   // --- connection / workspace -------------------------------------------------
   async function connect() {
@@ -311,40 +198,14 @@
   async function selectClient() {
     const tab = centerTab; // keep the user's current tab across the workspace change
     error = "";
-    resetBrowse();
+    browse.reset();
     const rec = clients.find((c) => c.client === conn.client);
     if (!rec) return;
-    clientRoot = rec.Root ?? "";
-    if (rec.Stream) {
-      rootPath = rec.Stream;
-    } else {
+    if (!rec.Stream) {
       error = "This workspace has no stream. Depot browsing currently requires a stream client.";
       return;
     }
-    tree = makeNode(rootPath, true);
-    tree.expanded = true;
-    selectedTreePath = rootPath;
-    // Load each tab's data (the loaders each flip centerTab); restore it after.
-    history.loadFolder(rootPath);
-    pending.load();
-    if (tab === "streams") loadStreams();
-    else if (tab === "repo") openRepo();
-    ensureIndex(); // background: build the fuzzy-search index if this ws is new
-    centerTab = tab; // restore the tab the user was on
-    await loadNode(tree); // `tree` is the reactive proxy — mutate through it
-  }
-
-  function resetBrowse() {
-    browCache.clear();
-    rootPath = "";
-    clientRoot = "";
-    tree = null;
-    selectedTreePath = "";
-    history.reset();
-    pending.clear();
-    streamRows = [];
-    repoTree = null;
-    repoSelected = "";
+    await browse.openWorkspace(rec.Stream, rec.Root ?? "", tab);
   }
 
   // --- pending: context/dialog glue over the `pending` store -----------------
@@ -431,59 +292,16 @@
     pending.load();
   }
 
-  // --- refresh / global sync -------------------------------------------------
-  // Re-fetch an expanded node's children, preserving which descendants were open.
-  async function reloadNode(node: TreeNode) {
-    if (!node.isDir || !node.expanded) return;
-    const openPaths = new Set(node.children.filter((c) => c.isDir && c.expanded).map((c) => c.path));
-    node.loaded = false;
-    await loadNode(node);
-    for (const child of node.children) {
-      if (openPaths.has(child.path)) {
-        child.expanded = true;
-        await reloadNode(child);
-      }
-    }
-  }
-
-  async function refresh() {
-    if (!connected || refreshing) return;
-    refreshing = true;
-    try {
-      browCache.clear();
-      history.clearMemCache();
-      clearClientCache(conn.client);
-      if (tree) {
-        tree.expanded = true;
-        await reloadNode(tree);
-      }
-      if (selectedTreePath && history.mode === "file") await history.selectFile(selectedTreePath);
-      else if (selectedTreePath) await history.loadFolder(selectedTreePath);
-      buildIndex(); // rebuild the fuzzy-search index in the background
-    } finally {
-      refreshing = false;
-    }
-  }
-
   // --- history row context menu: "update to this changelist" ----------------
   function openHistContext(change: string, e: MouseEvent) {
     if (!change || centerTab !== "history") return;
     ctxMenu = { x: e.clientX, y: e.clientY, change };
   }
 
-  // --- Streams tab ------------------------------------------------------------
-  async function loadStreams() {
-    centerTab = "streams";
-    if (!connected) return;
-    if (streamRows.length === 0) streamsLoading = true;
-    const rows = await safe(() => p4.streams(conn));
-    streamsLoading = false;
-    streamRows = rows;
-  }
-
+  // --- Streams tab: switching reconfigures the current workspace --------------
   function onStreamContext(stream: string, e: MouseEvent) {
-    if (!connected || !conn.client) return; // switching reconfigures the current workspace
-    if (!stream || stream === rootPath) return; // already on it
+    if (!connected || !conn.client) return;
+    if (!stream || stream === browse.rootPath) return; // already on it
     streamCtx = { x: e.clientX, y: e.clientY, stream };
   }
   async function switchStream(stream: string) {
@@ -513,52 +331,6 @@
     }
   }
 
-  // --- Repo (all-depots) browser tab -----------------------------------------
-  function openRepo() {
-    centerTab = "repo";
-    if (!connected) return;
-    if (!repoTree) {
-      repoTree = {
-        path: "//",
-        name: "Depots",
-        isDir: true,
-        expanded: true,
-        loaded: false,
-        loading: false,
-        children: [],
-      };
-      loadRepoNode(repoTree);
-    }
-  }
-  async function loadRepoNode(node: TreeNode) {
-    if (node.loading) return;
-    node.loading = true;
-    if (node.path === "//") {
-      const depots = await safe(() => p4.depots(conn));
-      node.children = depots.filter((d) => d.name).map((d) => makeNode("//" + d.name, true));
-    } else {
-      const [d, f] = await Promise.all([
-        safe(() => p4.dirs(conn, node.path)),
-        safe(() => p4.files(conn, node.path)),
-      ]);
-      node.children = buildChildren({ dirs: d, files: f });
-    }
-    node.loaded = true;
-    node.loading = false;
-  }
-  function repoExpand(node: TreeNode) {
-    node.expanded = !node.expanded;
-    if (node.expanded && !node.loaded) loadRepoNode(node);
-  }
-  function repoSelect(node: TreeNode) {
-    repoSelected = node.path;
-    if (node.isDir) repoExpand(node);
-    else {
-      history.selectFile(node.path);
-      centerTab = "history"; // jump to History showing this file's revisions
-    }
-  }
-
   async function exitApp() {
     const { getCurrentWindow } = await import("@tauri-apps/api/window");
     await getCurrentWindow().close();
@@ -577,6 +349,12 @@
       showHistoryTab: () => (centerTab = "history"),
       setNotice,
     });
+    browse.init({
+      conn: () => conn,
+      connected: () => connected,
+      getTab: () => centerTab,
+      setTab: (t) => (centerTab = t),
+    });
     updates.init({
       isRelease: () => isRelease,
       appVersion: () => appVersion,
@@ -591,7 +369,7 @@
       setNotice,
       setError,
       askConfirm,
-      refresh,
+      refresh: () => browse.refresh(),
     });
     sync.init({
       conn: () => conn,
@@ -602,9 +380,9 @@
       setNotice,
       setError,
       askConfirm,
-      refresh,
+      refresh: () => browse.refresh(),
       loadPending: () => pending.load(),
-      rootPath: () => rootPath,
+      rootPath: () => browse.rootPath,
       histSubject: () => history.subject,
       histMode: () => history.mode,
     });
@@ -624,12 +402,12 @@
 <div class="app">
   <MenuBar
     {connected}
-    {refreshing}
+    refreshing={browse.refreshing}
     {syncing}
     onOptions={() => (optionsOpen = true)}
     onReconnect={connect}
     onExit={exitApp}
-    onRefresh={refresh}
+    onRefresh={() => browse.refresh()}
     onSync={() => sync.globalSync()}
     onAbout={showAbout}
     onCheckUpdates={() => updates.check(false)}
@@ -639,7 +417,7 @@
     {clients}
     {servers}
     {connected}
-    {refreshing}
+    refreshing={browse.refreshing}
     {syncing}
     {reconciling}
     onClientChange={selectClient}
@@ -648,7 +426,7 @@
     onServerContext={(e) => {
       if (conn.port) serverCtx = { x: e.clientX, y: e.clientY };
     }}
-    onRefresh={refresh}
+    onRefresh={() => browse.refresh()}
     onSync={() => sync.globalSync()}
     onReconcile={() => sync.reconcile()}
   />
@@ -663,13 +441,13 @@
   <div class="cols">
     <section class="col left" style="width:{leftW}px">
       <DepotTree
-        root={tree}
-        selectedPath={selectedTreePath}
-        {indexing}
-        onSelect={selectNode}
-        onExpand={expandNode}
-        onSearch={searchDepot}
-        onOpenResult={openResult}
+        root={browse.tree}
+        selectedPath={browse.selectedTreePath}
+        indexing={browse.indexing}
+        onSelect={(n) => browse.selectNode(n)}
+        onExpand={(n) => browse.expandNode(n)}
+        onSearch={(t) => browse.searchDepot(t)}
+        onOpenResult={(f) => browse.openResult(f)}
       />
     </section>
 
@@ -686,22 +464,24 @@
           History
         </button>
         <button class:active={centerTab === "pending"} onclick={openPending}>Pending</button>
-        <button class:active={centerTab === "streams"} onclick={loadStreams}>Streams</button>
-        <button class:active={centerTab === "repo"} onclick={openRepo}>Repo</button>
+        <button class:active={centerTab === "streams"} onclick={() => browse.loadStreams()}>
+          Streams
+        </button>
+        <button class:active={centerTab === "repo"} onclick={() => browse.openRepo()}>Repo</button>
       </div>
       {#if centerTab === "streams"}
         <StreamsBrowser
-          rows={streamRows}
-          loading={streamsLoading}
-          currentStream={rootPath}
+          rows={browse.streamRows}
+          loading={browse.streamsLoading}
+          currentStream={browse.rootPath}
           onContext={onStreamContext}
         />
       {:else if centerTab === "repo"}
         <DepotTree
-          root={repoTree}
-          selectedPath={repoSelected}
-          onSelect={repoSelect}
-          onExpand={repoExpand}
+          root={browse.repoTree}
+          selectedPath={browse.repoSelected}
+          onSelect={(n) => browse.repoSelect(n)}
+          onExpand={(n) => browse.repoExpand(n)}
         />
       {:else if centerTab === "pending"}
         <PendingList
