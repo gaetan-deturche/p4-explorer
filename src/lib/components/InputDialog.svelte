@@ -8,6 +8,7 @@
     initial = "",
     okLabel = "OK",
     multiline = false,
+    password = false,
     onSubmit,
     onCancel,
   }: {
@@ -17,6 +18,7 @@
     initial?: string;
     okLabel?: string;
     multiline?: boolean;
+    password?: boolean; // mask input and don't trim (for credentials)
     onSubmit: (value: string) => void;
     onCancel: () => void;
   } = $props();
@@ -25,9 +27,9 @@
   let el: HTMLInputElement | HTMLTextAreaElement | undefined = $state();
   $effect(() => el?.focus());
 
+  const cleaned = $derived(password ? value : value.trim());
   function submit() {
-    const v = value.trim();
-    if (v) onSubmit(v);
+    if (cleaned) onSubmit(cleaned);
   }
 </script>
 
@@ -52,7 +54,7 @@
         <input
           bind:this={el}
           bind:value
-          type="text"
+          type={password ? "password" : "text"}
           {placeholder}
           onkeydown={(e) => {
             if (e.key === "Enter") submit();
@@ -64,7 +66,7 @@
     {#if multiline}<span class="hint">Ctrl+Enter to save</span>{/if}
     <div class="actions">
       <button onclick={onCancel}>Cancel</button>
-      <button class="primary" disabled={!value.trim()} onclick={submit}>{okLabel}</button>
+      <button class="primary" disabled={!cleaned} onclick={submit}>{okLabel}</button>
     </div>
   </div>
 </div>

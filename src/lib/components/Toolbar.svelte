@@ -4,6 +4,7 @@
   let {
     conn = $bindable(),
     clients,
+    localClients,
     servers,
     connected,
     refreshing,
@@ -19,6 +20,7 @@
   }: {
     conn: P4Conn;
     clients: P4Record[];
+    localClients: Set<string>; // clients whose Root exists on this machine
     servers: string[];
     connected: boolean;
     refreshing: boolean;
@@ -76,7 +78,7 @@
       </select>
     </label>
 
-    <label class="ws">
+    <label class="ws" title="● workspace checked out on this machine   ○ elsewhere">
       Workspace
       <select
         class="mono"
@@ -87,7 +89,9 @@
         <option value="">— select —</option>
         {#each clients as c (c.client)}
           <option value={c.client}>
-            {c.client}{c.Root ? "  —  " + c.Root : ""}{c.Stream ? "  ·  " + c.Stream : ""}
+            {localClients.has(c.client) ? "● " : "○ "}{c.client}{c.Root ? "  —  " + c.Root : ""}{c.Stream
+              ? "  ·  " + c.Stream
+              : ""}
           </option>
         {/each}
       </select>
@@ -134,6 +138,11 @@
     gap: 6px;
     color: var(--text-dim);
     font-size: 12px;
+  }
+  .srv select,
+  .ws select {
+    padding-right: 1.6rem; /* keep the text clear of the native dropdown arrow */
+    text-overflow: ellipsis;
   }
   .srv select {
     min-width: 16rem;

@@ -73,6 +73,9 @@
     font-size: 12px;
     line-height: 1.5;
     white-space: pre-wrap;
+    overflow-wrap: anywhere; /* break long depot paths instead of overflowing */
+    max-height: 50vh;
+    overflow-y: auto;
     color: var(--text);
   }
   .actions {

@@ -8,13 +8,14 @@
   import { history } from "$lib/history.svelte";
   import { browse } from "$lib/browse.svelte";
   import { connection } from "$lib/connection.svelte";
-  import { loadLastServer, saveView } from "$lib/nav";
+  import { loadLastServer, loadUserFor, loadCharsetFor, saveView } from "$lib/nav";
   import MenuBar from "$lib/components/MenuBar.svelte";
   import Toolbar from "$lib/components/Toolbar.svelte";
   import StatusBar from "$lib/components/StatusBar.svelte";
   import OptionsDialog from "$lib/components/OptionsDialog.svelte";
   import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
   import InputDialog from "$lib/components/InputDialog.svelte";
+  import LoginDialog from "$lib/components/LoginDialog.svelte";
   import SyncProgressDialog from "$lib/components/SyncProgressDialog.svelte";
   import SyncErrorDialog from "$lib/components/SyncErrorDialog.svelte";
   import UpdateDialog from "$lib/components/UpdateDialog.svelte";
@@ -49,6 +50,21 @@
   function resolveConfirm(v: boolean) {
     confirmState?.resolve(v);
     confirmState = null;
+  }
+
+  // Login prompt (user + password), promise-based like askConfirm.
+  type Cred = { user: string; password: string };
+  let loginState = $state<{
+    user: string;
+    port: string;
+    resolve: (v: Cred | null) => void;
+  } | null>(null);
+  function promptLogin(port: string, user: string): Promise<Cred | null> {
+    return new Promise((resolve) => (loginState = { user, port, resolve }));
+  }
+  function resolveLogin(v: Cred | null) {
+    loginState?.resolve(v);
+    loginState = null;
   }
 
   // Transient status helpers (auto-clear).
@@ -256,6 +272,7 @@
       getSyncing: () => syncing,
       setSyncing: (v) => (syncing = v),
       askConfirm,
+      promptLogin,
     });
     updates.init({
       isRelease: () => isRelease,
@@ -288,10 +305,14 @@
       histSubject: () => history.subject,
       histMode: () => history.mode,
     });
-    // Reconnect to the server used last session; connect() then restores that
-    // server's last workspace and its saved view.
+    // Reconnect to the server used last session (with its remembered user);
+    // connect() then restores that server's last workspace and saved view.
     const last = loadLastServer();
-    if (last) conn.port = last;
+    if (last) {
+      conn.port = last;
+      conn.user = loadUserFor(last);
+      conn.charset = loadCharsetFor(last);
+    }
     connection.connect();
     getVersion()
       .then((v) => (appVersion = v))
@@ -321,6 +342,7 @@
   <Toolbar
     bind:conn
     clients={connection.clients}
+    localClients={connection.localClients}
     servers={connection.servers}
     connected={connection.connected}
     refreshing={browse.refreshing}
@@ -458,8 +480,22 @@
   <OptionsDialog
     bind:conn
     busy={connection.busy}
+    servers={connection.servers}
     onConnect={() => connection.connect()}
+    onSelectServer={(p) => connection.switchServerTo(p)}
+    onRelogin={(p) => connection.relogin(p)}
+    onForget={(p) => connection.forgetServer(p)}
+    onAdd={(p) => connection.addAndSwitch(p)}
     onClose={() => (optionsOpen = false)}
+  />
+{/if}
+
+{#if loginState}
+  <LoginDialog
+    port={loginState.port}
+    user={loginState.user}
+    onSubmit={(c) => resolveLogin(c)}
+    onCancel={() => resolveLogin(null)}
   />
 {/if}
 

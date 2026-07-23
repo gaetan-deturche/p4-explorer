@@ -3,9 +3,19 @@
 //! and the keep-alive/health-check poll. The `conn` object itself stays in the
 //! page (it is two-way bound by dialogs); this store drives everything around it.
 
-import { p4, type P4Conn, type P4Record } from "$lib/p4";
+import { p4, pathsExist, type P4Conn, type P4Record } from "$lib/p4";
 import { loadServers, saveServers, withServer, withoutServer } from "$lib/servers";
-import { loadClientFor, saveClientFor, saveLastServer, loadView, saveView } from "$lib/nav";
+import {
+  loadClientFor,
+  saveClientFor,
+  saveLastServer,
+  loadView,
+  saveView,
+  loadUserFor,
+  saveUserFor,
+  loadCharsetFor,
+  saveCharsetFor,
+} from "$lib/nav";
 import { browse } from "$lib/browse.svelte";
 import { history } from "$lib/history.svelte";
 
@@ -19,16 +29,43 @@ type Hooks = {
   getSyncing: () => boolean;
   setSyncing: (v: boolean) => void;
   askConfirm: (msg: string, title?: string, ok?: string) => Promise<boolean>;
+  // Ask for login credentials (user + password). Resolves null if cancelled.
+  promptLogin: (port: string, user: string) => Promise<{ user: string; password: string } | null>;
 };
 
 let h: Hooks | null = null;
 let keepAliveId: number | null = null;
+
+/** Prepend the `ssl:` prefix Perforce needs when the user omits a protocol —
+ *  most servers are SSL and typing a bare host:port otherwise fails to connect. */
+function normalizePort(port: string): string {
+  const v = port.trim();
+  if (!v) return v;
+  return /^(ssl|tcp)[46]?:/i.test(v) ? v : "ssl:" + v;
+}
+
+/** If `msg` is a unicode-mismatch error, flip conn.charset to the fix and return
+ *  true (so the caller retries). A unicode client hitting a non-unicode server
+ *  drops its charset ("none"); a plain client hitting a unicode server enables
+ *  one ("utf8"). Returns false for unrelated errors. */
+function adjustCharset(conn: P4Conn, msg: string): boolean {
+  if (/unicode clients? require|requires? a unicode enabled server/i.test(msg) && conn.charset !== "none") {
+    conn.charset = "none";
+    return true;
+  }
+  if (/only unicode enabled clients|unicode enabled client/i.test(msg) && conn.charset !== "utf8") {
+    conn.charset = "utf8";
+    return true;
+  }
+  return false;
+}
 
 let connected = $state(false);
 let busy = $state(false);
 let serverVersion = $state("");
 let clients = $state<P4Record[]>([]);
 let servers = $state<string[]>([]);
+let localClients = $state<Set<string>>(new Set()); // clients whose Root exists here
 
 // Each `p4` CLI call reconnects; the first `dirs` on a huge stream root is a
 // ~2.7s server-side cold disk read of db.rev. Re-running it periodically keeps
@@ -73,6 +110,9 @@ export const connection = {
   get servers() {
     return servers;
   },
+  get localClients() {
+    return localClients;
+  },
 
   stopKeepAlive() {
     if (keepAliveId !== null) clearInterval(keepAliveId);
@@ -97,20 +137,87 @@ export const connection = {
     busy = true;
     h.setConnError("");
     try {
-      const info = await p4.info(conn);
-      const i = info[0] ?? {};
-      serverVersion = i.serverVersion ?? "";
-      if (!conn.user && i.userName) conn.user = i.userName;
       // Seed the server dropdown: adopt the ambient P4PORT if none was set.
       if (!conn.port) {
         const env = await p4.envPort(conn).catch(() => "");
         if (env) conn.port = env;
       }
+      if (conn.port) conn.port = normalizePort(conn.port); // ssl: prefix if omitted
+      conn.charset = loadCharsetFor(conn.port); // this server's remembered charset
+      const origPort = conn.port;
+      // Connect, auto-fixing first-connect papercuts: a server that needs the
+      // `ssl:` prefix, an untrusted fingerprint (`p4 trust`), and a unicode
+      // client/server charset mismatch.
+      let info: P4Record[] | null = null;
+      for (let attempt = 0; attempt < 5 && !info; attempt++) {
+        try {
+          info = await p4.info(conn);
+        } catch (e) {
+          const msg = String(e);
+          if (/SSL/i.test(msg) && conn.port && !conn.port.startsWith("ssl:")) {
+            conn.port = "ssl:" + conn.port;
+          } else if (/trust|fingerprint|authenticity|P4TRUST/i.test(msg)) {
+            await p4.trust(conn).catch(() => {});
+          } else if (adjustCharset(conn, msg)) {
+            // charset flipped; retry
+          } else {
+            throw e;
+          }
+        }
+      }
+      if (!info) info = await p4.info(conn); // last try; throws → outer catch
+      const i = info[0] ?? {};
+      serverVersion = i.serverVersion ?? "";
+      if (!conn.user && i.userName) conn.user = i.userName;
+      // If we corrected the port (e.g. added ssl:), replace the remembered entry.
+      if (conn.port !== origPort && origPort) connection.forgetServer(origPort);
       connection.rememberServer(conn.port);
+      // Ensure this server's session is authenticated; prompt for a password and
+      // log in on demand (per-server tickets can be missing or expired).
+      const authed = await p4.loginStatus(conn).catch(() => true);
+      if (!authed) {
+        const cred = await h.promptLogin(conn.port, conn.user);
+        if (!cred) {
+          connected = false;
+          h.setNotice("Login cancelled.");
+          return;
+        }
+        conn.user = cred.user;
+        let loggedIn = false;
+        for (let attempt = 0; attempt < 3 && !loggedIn; attempt++) {
+          try {
+            await p4.login(conn, cred.password);
+            loggedIn = true;
+          } catch (e) {
+            // A unicode charset mismatch surfaces here (info doesn't negotiate
+            // charset, login does); flip charset and retry, else fail.
+            if (!adjustCharset(conn, String(e))) {
+              connected = false;
+              h.setConnError(`Login failed: ${String(e)}`);
+              return;
+            }
+          }
+        }
+        if (!loggedIn) {
+          connected = false;
+          h.setConnError("Login failed.");
+          return;
+        }
+      }
       connected = true;
       h.setOptionsOpen(false);
       startKeepAlive();
-      clients = await p4.clients(conn);
+      saveUserFor(conn.port, conn.user); // remember this server's user
+      saveCharsetFor(conn.port, conn.charset); // and its charset choice
+      const list = await p4.clients(conn);
+      // Flag workspaces whose Root exists on this machine, and sort those first.
+      const exist = await pathsExist(list.map((c) => c.Root ?? "")).catch(() => []);
+      localClients = new Set(list.filter((_, idx) => exist[idx]).map((c) => c.client));
+      clients = [...list].sort((a, b) => {
+        const la = localClients.has(a.client) ? 0 : 1;
+        const lb = localClients.has(b.client) ? 0 : 1;
+        return la - lb || a.client.localeCompare(b.client);
+      });
       // Prefer the workspace the user last used on this server; fall back to the
       // client reported by `p4 info`.
       const saved = loadClientFor(conn.port);
@@ -166,16 +273,41 @@ export const connection = {
     const conn = h.conn();
     if (port === conn.port) return;
     conn.port = port;
+    conn.user = loadUserFor(port); // this server's remembered user ("" → ambient)
     conn.client = "";
     browse.reset();
     await connection.connect();
   },
   /** Remember `port` and switch to it (from the "add server" dialog). */
   async addAndSwitch(port: string) {
-    const v = port.trim();
+    const v = normalizePort(port);
     if (!v) return;
     connection.rememberServer(v);
     await connection.switchServerTo(v);
+  },
+  /** Force a fresh login to `port` (from Options → Re-login): point at that
+   *  server, prompt for a password, log in, then connect with the new ticket. */
+  async relogin(port: string) {
+    if (!h) return;
+    const conn = h.conn();
+    if (port && port !== conn.port) {
+      conn.port = port;
+      conn.user = loadUserFor(port);
+      conn.charset = loadCharsetFor(port);
+      conn.client = "";
+      browse.reset();
+    }
+    const cred = await h.promptLogin(conn.port, conn.user);
+    if (!cred) return;
+    conn.user = cred.user;
+    try {
+      await p4.login(conn, cred.password);
+    } catch (e) {
+      h.setConnError(`Login failed: ${String(e)}`);
+      return;
+    }
+    h.setNotice("Logged in.");
+    await connection.connect(); // fresh ticket → connect won't re-prompt
   },
 
   async switchStream(stream: string) {

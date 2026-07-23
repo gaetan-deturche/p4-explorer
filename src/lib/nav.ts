@@ -11,6 +11,8 @@ export interface ViewState {
 
 const LAST_SERVER = "nav:lastServer";
 const clientKey = (server: string) => `nav:client:${server}`;
+const userKey = (server: string) => `nav:user:${server}`;
+const charsetKey = (server: string) => `nav:charset:${server}`;
 const viewKey = (client: string) => `nav:view:${client}`;
 
 function get(key: string): string | null {
@@ -41,6 +43,22 @@ export function loadClientFor(server: string): string {
 }
 export function saveClientFor(server: string, client: string): void {
   if (server && client) set(clientKey(server), client);
+}
+
+/** The user (P4USER) last used on `server`, or "" if none. Servers can differ. */
+export function loadUserFor(server: string): string {
+  return server ? (get(userKey(server)) ?? "") : "";
+}
+export function saveUserFor(server: string, user: string): void {
+  if (server && user) set(userKey(server), user);
+}
+
+/** The charset chosen for `server` ("" ambient, "none", or e.g. "utf8"). */
+export function loadCharsetFor(server: string): string {
+  return server ? (get(charsetKey(server)) ?? "") : "";
+}
+export function saveCharsetFor(server: string, charset: string): void {
+  if (server) set(charsetKey(server), charset);
 }
 
 /** The last view (tab + selection) for `client`, or null. */

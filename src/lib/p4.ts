@@ -9,10 +9,11 @@ export interface P4Conn {
   user: string;
   client: string;
   cwd: string;
+  charset: string; // "" ambient, "none" (force non-unicode), or e.g. "utf8"
 }
 
 export function emptyConn(): P4Conn {
-  return { port: "", user: "", client: "", cwd: "" };
+  return { port: "", user: "", client: "", cwd: "", charset: "" };
 }
 
 /** Local SQLite file index for fuzzy search. */
@@ -39,6 +40,11 @@ export interface ReviewInfo {
 /** List a local filesystem directory (names only). */
 export function listLocalDir(path: string): Promise<LocalDir> {
   return invoke<LocalDir>("list_local_dir", { path });
+}
+
+/** Which of `paths` exist as directories on this machine (parallel to input). */
+export function pathsExist(paths: string[]): Promise<boolean[]> {
+  return invoke<boolean[]>("paths_exist", { paths });
 }
 
 /** True only for tagged release builds (dev/local builds skip the update check). */
@@ -91,6 +97,9 @@ export const p4 = {
   swarmUrl: (conn: P4Conn) => invoke<string>("swarm_url", { conn }),
   swarmReview: (conn: P4Conn, change: string) =>
     invoke<ReviewInfo | null>("swarm_review", { conn, change }),
+  loginStatus: (conn: P4Conn) => invoke<boolean>("p4_login_status", { conn }),
+  login: (conn: P4Conn, password: string) => invoke<void>("p4_login", { conn, password }),
+  trust: (conn: P4Conn) => invoke<void>("p4_trust", { conn }),
   opened: (conn: P4Conn, change: string) => call("p4_opened", { conn, change }),
   diffLocal: (conn: P4Conn, depotFile: string) =>
     invoke<string>("p4_diff_local", { conn, depotFile }),
