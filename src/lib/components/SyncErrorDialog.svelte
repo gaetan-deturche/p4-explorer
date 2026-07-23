@@ -5,6 +5,7 @@
     busyFile,
     onFixFile,
     onRetryAll,
+    onForceAll,
     onClose,
   }: {
     title: string;
@@ -12,6 +13,7 @@
     busyFile: string | null;
     onFixFile: (file: string, force: boolean) => void;
     onRetryAll: () => void;
+    onForceAll: () => void;
     onClose: () => void;
   } = $props();
 
@@ -59,25 +61,26 @@
       <div class="grid">
         <div class="hdr">File</div>
         <div class="hdr">Error</div>
-        <div class="hdr"></div>
         {#each items as it (it.line)}
           {@const cat = categorize(it.line)}
           <div class="fcell mono" title={it.file ?? it.line}>{it.file ?? "(unknown)"}</div>
-          <div class="ecell">{errText(it)}</div>
-          <div class="acell">
-            {#if !it.file}
-              <span class="dim">—</span>
-            {:else if cat === "resolve"}
-              <button disabled title="Resolve in P4V / p4 resolve">Resolve</button>
-            {:else if cat === "clobber"}
-              <button class="danger-btn" disabled={busy} onclick={() => onFixFile(it.file!, true)}>
-                {busyFile === it.file ? "…" : "Force"}
-              </button>
-            {:else}
-              <button class="primary" disabled={busy} onclick={() => onFixFile(it.file!, false)}>
-                {busyFile === it.file ? "…" : "Retry"}
-              </button>
-            {/if}
+          <div class="ecell">
+            <span class="etext mono">{errText(it)}</span>
+            <span class="act">
+              {#if !it.file}
+                <span class="dim">—</span>
+              {:else if cat === "resolve"}
+                <button disabled title="Resolve in P4V / p4 resolve">Resolve</button>
+              {:else if cat === "clobber"}
+                <button class="danger-btn" disabled={busy} onclick={() => onFixFile(it.file!, true)}>
+                  {busyFile === it.file ? "…" : "Force"}
+                </button>
+              {:else}
+                <button class="primary" disabled={busy} onclick={() => onFixFile(it.file!, false)}>
+                  {busyFile === it.file ? "…" : "Retry"}
+                </button>
+              {/if}
+            </span>
           </div>
         {/each}
       </div>
@@ -85,8 +88,9 @@
 
     <div class="actions">
       <button onclick={onClose}>Close</button>
+      <button class="danger-btn" disabled={busy} onclick={onForceAll}>Force overwrite all</button>
       <button class="primary" disabled={busy} onclick={onRetryAll}>
-        {busyFile === "*" ? "Retrying…" : "Retry all"}
+        {busyFile === "*" ? "Working…" : "Retry all"}
       </button>
     </div>
   </div>
@@ -136,9 +140,8 @@
   }
   .grid {
     display: grid;
-    grid-template-columns: minmax(0, 1.2fr) minmax(0, 1.4fr) auto;
-    align-items: baseline;
-    column-gap: 12px;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    align-items: stretch;
   }
   .hdr {
     position: sticky;
@@ -147,29 +150,37 @@
     font-size: 11px;
     font-weight: 600;
     color: var(--text-dim);
-    padding: 5px 8px;
+    padding: 6px 8px;
     border-bottom: 1px solid var(--border);
-  }
-  .fcell,
-  .ecell,
-  .acell {
-    padding: 4px 8px;
-    font-size: 11px;
-    border-bottom: 1px solid var(--border);
-    min-width: 0;
-    overflow-wrap: anywhere;
   }
   .fcell {
+    padding: 6px 8px;
+    font-size: 11px;
     color: var(--text);
+    border-bottom: 1px solid var(--border);
+    border-right: 1px solid var(--border);
+    overflow-wrap: anywhere;
+    min-width: 0;
   }
   .ecell {
+    padding: 6px 8px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 10px;
+    min-width: 0;
+  }
+  .etext {
+    font-size: 11px;
     color: var(--warn);
+    overflow-wrap: anywhere;
+    min-width: 0;
   }
-  .acell {
-    justify-self: end;
-    white-space: nowrap;
+  .act {
+    flex: none;
   }
-  .acell button {
+  .act button {
     font-size: 11px;
     padding: 2px 10px;
   }

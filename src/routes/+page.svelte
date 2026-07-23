@@ -2,13 +2,10 @@
   import { onMount, onDestroy } from "svelte";
   import { listen } from "@tauri-apps/api/event";
   import { getVersion } from "@tauri-apps/api/app";
-  import { check, type Update } from "@tauri-apps/plugin-updater";
-  import { relaunch } from "@tauri-apps/plugin-process";
   import { openUrl } from "@tauri-apps/plugin-opener";
   import {
     p4,
     idx,
-    listLocalDir,
     isReleaseBuild,
     emptyConn,
     firstLine,
@@ -16,6 +13,19 @@
     type P4Record,
   } from "$lib/p4";
   import { makeNode, type TreeNode } from "$lib/tree";
+  import { loadServers, saveServers, withServer, withoutServer } from "$lib/servers";
+  import {
+    loadFolder,
+    saveFolder,
+    loadHist,
+    saveHist,
+    clearClientCache,
+    buildChildren,
+    localChildren,
+    type FolderContents,
+    type HistEntry,
+  } from "$lib/cache";
+  import { updates } from "$lib/updates.svelte";
   import MenuBar from "$lib/components/MenuBar.svelte";
   import Toolbar from "$lib/components/Toolbar.svelte";
   import StatusBar from "$lib/components/StatusBar.svelte";
@@ -57,6 +67,16 @@
   function resolveConfirm(v: boolean) {
     confirmState?.resolve(v);
     confirmState = null;
+  }
+
+  // Transient status helpers (auto-clear).
+  function setNotice(m: string, ms = 4000) {
+    notice = m;
+    window.setTimeout(() => (notice = ""), ms);
+  }
+  function setError(m: string, ms = 6000) {
+    error = m;
+    window.setTimeout(() => (error = ""), ms);
   }
 
   // Live sync progress dialog.
@@ -165,16 +185,26 @@
       busyFile = null;
     }
   }
-  // Retry all affected files at once (non-destructive).
-  async function retryAllErrors() {
+  // Retry (force optional) all affected files at once.
+  async function resyncAllErrors(force: boolean) {
     if (!syncErrors || busyFile) return;
+    if (
+      force &&
+      !(await askConfirm(
+        "Force-overwrite ALL affected files with the depot version?\nLocal changes will be DISCARDED. Conflicts must be resolved separately (p4 resolve / P4V).",
+        "Force overwrite all",
+        "Overwrite all",
+      ))
+    ) {
+      return;
+    }
     const targets = syncErrorTargets();
     busyFile = "*";
     error = "";
     try {
-      await p4.resync(conn, targets, false);
+      await p4.resync(conn, targets, force);
       syncErrors = null;
-      notice = "Re-synced the affected files.";
+      notice = force ? "Force re-synced the affected files." : "Re-synced the affected files.";
       window.setTimeout(() => (notice = ""), 4000);
       await refresh();
       loadPending();
@@ -219,32 +249,16 @@
   let servers = $state<string[]>([]);
   let serverCtx = $state<{ x: number; y: number } | null>(null);
   let addServerOpen = $state(false);
-  const SERVERS_KEY = "p4:servers";
-  function loadServers(): string[] {
-    try {
-      const s = localStorage.getItem(SERVERS_KEY);
-      return s ? (JSON.parse(s) as string[]) : [];
-    } catch {
-      return [];
-    }
-  }
-  function saveServers() {
-    try {
-      localStorage.setItem(SERVERS_KEY, JSON.stringify(servers));
-    } catch {
-      /* ignore */
-    }
-  }
   function rememberServer(port: string) {
-    const v = port.trim();
-    if (v && !servers.includes(v)) {
-      servers = [...servers, v];
-      saveServers();
+    const next = withServer(servers, port);
+    if (next !== servers) {
+      servers = next;
+      saveServers(servers);
     }
   }
   function forgetServer(port: string) {
-    servers = servers.filter((s) => s !== port);
-    saveServers();
+    servers = withoutServer(servers, port);
+    saveServers(servers);
   }
   async function switchServerTo(port: string) {
     if (port === conn.port) return;
@@ -353,57 +367,8 @@
     if (keepAliveId !== null) clearInterval(keepAliveId);
   });
 
-  // --- folder-contents cache (mem + persistent, stale-while-revalidate) -------
-  type FolderContents = { dirs: P4Record[]; files: P4Record[] };
+  // --- folder-contents cache (in-memory; persistence + helpers in $lib/cache) -
   const browCache = new Map<string, FolderContents>();
-
-  function cacheKey(path: string): string {
-    return `p4tree:${conn.client}:${path}`;
-  }
-  function loadPersisted(path: string): FolderContents | null {
-    try {
-      const s = localStorage.getItem(cacheKey(path));
-      return s ? (JSON.parse(s) as FolderContents) : null;
-    } catch {
-      return null;
-    }
-  }
-  function persist(path: string, c: FolderContents) {
-    try {
-      localStorage.setItem(cacheKey(path), JSON.stringify(c));
-    } catch {
-      /* quota / disabled: ignore */
-    }
-  }
-
-  // Map a depot path under the current stream to its local workspace path, so we
-  // can show the synced contents from disk instantly while p4 is still scanning.
-  function localPathFor(depotPath: string): string | null {
-    if (!clientRoot || !rootPath) return null;
-    if (depotPath === rootPath) return clientRoot;
-    if (!depotPath.startsWith(rootPath + "/")) return null;
-    const rel = depotPath.slice(rootPath.length + 1).split("/").join("\\");
-    return `${clientRoot}\\${rel}`;
-  }
-  async function localChildren(path: string): Promise<FolderContents | null> {
-    const lp = localPathFor(path);
-    if (!lp) return null;
-    try {
-      const ld = await listLocalDir(lp);
-      return {
-        dirs: ld.dirs.map((n) => ({ dir: `${path}/${n}` }) as P4Record),
-        files: ld.files.map((n) => ({ depotFile: `${path}/${n}` }) as P4Record),
-      };
-    } catch {
-      return null;
-    }
-  }
-
-  function buildChildren(c: FolderContents): TreeNode[] {
-    const dirNodes = c.dirs.filter((d) => d.dir).map((d) => makeNode(d.dir, true));
-    const fileNodes = c.files.filter((f) => f.depotFile).map((f) => makeNode(f.depotFile, false, f));
-    return [...dirNodes, ...fileNodes];
-  }
 
   // Populate a directory node's children: instant from cache/local disk, then
   // the authoritative p4 listing replaces it (stale-while-revalidate).
@@ -413,11 +378,11 @@
     const path = node.path;
 
     const mem = browCache.get(path);
-    const cached = mem ?? loadPersisted(path);
+    const cached = mem ?? loadFolder(conn.client, path);
     if (cached) {
       node.children = buildChildren(cached);
     } else {
-      const local = await localChildren(path);
+      const local = await localChildren(clientRoot, rootPath, path);
       if (local && node.children.length === 0) node.children = buildChildren(local);
     }
 
@@ -430,7 +395,7 @@
       const c = { dirs: d, files: f };
       node.children = buildChildren(c);
       browCache.set(path, c);
-      persist(path, c);
+      saveFolder(conn.client, path, c);
     }
     node.loaded = true;
     node.loading = false;
@@ -579,30 +544,14 @@
   const CHUNK = 50;
   const CAP = 400;
 
-  // History cache (mem + persistent, stale-while-revalidate): switching to a
-  // previously-viewed file/folder shows its history instantly, then refreshes.
-  type HistEntry = { mode: "folder" | "file"; subject: string; rows: P4Record[]; have: string };
+  // History cache: in-memory (session) + persistent (via $lib/cache). Switching
+  // to a previously-viewed file/folder shows its history instantly, then refreshes.
   const histMemCache = new Map<string, HistEntry>();
 
-  function histKey(id: string): string {
-    return `p4hist:${conn.client}:${id}`;
-  }
-  function loadHistPersisted(id: string): HistEntry | null {
-    try {
-      const s = localStorage.getItem(histKey(id));
-      return s ? (JSON.parse(s) as HistEntry) : null;
-    } catch {
-      return null;
-    }
-  }
+  // Persist a history entry to both the session map and localStorage.
   function cacheHist(id: string, e: HistEntry) {
     histMemCache.set(id, e);
-    try {
-      // Bound persisted size: keep the newest 100 rows.
-      localStorage.setItem(histKey(id), JSON.stringify({ ...e, rows: e.rows.slice(0, 100) }));
-    } catch {
-      /* quota / disabled: ignore */
-    }
+    saveHist(conn.client, id, e);
   }
   function applyHist(e: HistEntry) {
     histMode = e.mode;
@@ -623,7 +572,7 @@
     const id = "F:" + path;
 
     // Instant from cache.
-    const cached = histMemCache.get(id) ?? loadHistPersisted(id);
+    const cached = histMemCache.get(id) ?? loadHist(conn.client, id);
     if (cached) {
       endHistLoad();
       applyHist(cached);
@@ -673,7 +622,7 @@
     centerTab = "history";
     const id = "R:" + depotFile;
 
-    const cached = histMemCache.get(id) ?? loadHistPersisted(id);
+    const cached = histMemCache.get(id) ?? loadHist(conn.client, id);
     if (cached) {
       endHistLoad();
       applyHist(cached);
@@ -960,20 +909,6 @@
   }
 
   // --- refresh / global sync -------------------------------------------------
-  function clearPersistedForClient() {
-    try {
-      const prefixes = [`p4tree:${conn.client}:`, `p4hist:${conn.client}:`];
-      const keys: string[] = [];
-      for (let i = 0; i < localStorage.length; i++) {
-        const k = localStorage.key(i);
-        if (k && prefixes.some((p) => k.startsWith(p))) keys.push(k);
-      }
-      keys.forEach((k) => localStorage.removeItem(k));
-    } catch {
-      /* ignore */
-    }
-  }
-
   // Re-fetch an expanded node's children, preserving which descendants were open.
   async function reloadNode(node: TreeNode) {
     if (!node.isDir || !node.expanded) return;
@@ -994,7 +929,7 @@
     try {
       browCache.clear();
       histMemCache.clear();
-      clearPersistedForClient();
+      clearClientCache(conn.client);
       if (tree) {
         tree.expanded = true;
         await reloadNode(tree);
@@ -1184,71 +1119,6 @@
     await getCurrentWindow().close();
   }
 
-  // --- auto-update -----------------------------------------------------------
-  let pendingUpdate: Update | null = null;
-  let updateState = $state<{
-    version: string;
-    notes: string;
-    phase: "available" | "downloading" | "error";
-    downloaded: number;
-    total: number;
-    message: string;
-  } | null>(null);
-
-  async function checkForUpdates(silent: boolean) {
-    if (!isRelease) {
-      if (!silent) {
-        notice = "This is a development build — auto-update is disabled.";
-        window.setTimeout(() => (notice = ""), 5000);
-      }
-      return;
-    }
-    try {
-      const update = await check();
-      if (update) {
-        pendingUpdate = update;
-        updateState = {
-          version: update.version,
-          notes: update.body ?? "",
-          phase: "available",
-          downloaded: 0,
-          total: 0,
-          message: "",
-        };
-      } else if (!silent) {
-        notice = `You're on the latest version (v${appVersion}).`;
-        window.setTimeout(() => (notice = ""), 4000);
-      }
-    } catch (e) {
-      if (!silent) {
-        error = `Update check failed: ${e}`;
-        window.setTimeout(() => (error = ""), 6000);
-      }
-    }
-  }
-
-  async function installUpdate() {
-    if (!pendingUpdate || !updateState) return;
-    updateState.phase = "downloading";
-    let downloaded = 0;
-    try {
-      await pendingUpdate.downloadAndInstall((event) => {
-        if (!updateState) return;
-        if (event.event === "Started") updateState.total = event.data.contentLength ?? 0;
-        else if (event.event === "Progress") {
-          downloaded += event.data.chunkLength;
-          updateState.downloaded = downloaded;
-        }
-      });
-      await relaunch();
-    } catch (e) {
-      if (updateState) {
-        updateState.phase = "error";
-        updateState.message = String(e);
-      }
-    }
-  }
-
   function showAbout() {
     const ver = appVersion ? (isRelease ? " v" + appVersion : " " + appVersion + "-dev") : "";
     notice = `Auger${ver}${serverVersion ? " · server " + serverVersion : ""}`;
@@ -1257,6 +1127,12 @@
 
   onMount(() => {
     servers = loadServers();
+    updates.init({
+      isRelease: () => isRelease,
+      appVersion: () => appVersion,
+      notify: (m) => setNotice(m),
+      warn: (m) => setError(m),
+    });
     connect();
     getVersion()
       .then((v) => (appVersion = v))
@@ -1264,7 +1140,7 @@
     isReleaseBuild()
       .then((v) => {
         isRelease = v;
-        if (v) checkForUpdates(true); // silent check only on release builds
+        if (v) updates.check(true); // silent check only on release builds
       })
       .catch(() => {});
   });
@@ -1281,7 +1157,7 @@
     onRefresh={refresh}
     onSync={globalSync}
     onAbout={showAbout}
-    onCheckUpdates={() => checkForUpdates(false)}
+    onCheckUpdates={() => updates.check(false)}
   />
   <Toolbar
     bind:conn
@@ -1440,7 +1316,8 @@
     items={syncErrors.items}
     {busyFile}
     onFixFile={resyncFile}
-    onRetryAll={retryAllErrors}
+    onRetryAll={() => resyncAllErrors(false)}
+    onForceAll={() => resyncAllErrors(true)}
     onClose={() => (syncErrors = null)}
   />
 {/if}
@@ -1526,16 +1403,16 @@
   />
 {/if}
 
-{#if updateState}
+{#if updates.state}
   <UpdateDialog
-    version={updateState.version}
-    notes={updateState.notes}
-    phase={updateState.phase}
-    downloaded={updateState.downloaded}
-    total={updateState.total}
-    message={updateState.message}
-    onInstall={installUpdate}
-    onDismiss={() => (updateState = null)}
+    version={updates.state.version}
+    notes={updates.state.notes}
+    phase={updates.state.phase}
+    downloaded={updates.state.downloaded}
+    total={updates.state.total}
+    message={updates.state.message}
+    onInstall={() => updates.install()}
+    onDismiss={() => updates.dismiss()}
   />
 {/if}
 
