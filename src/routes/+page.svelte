@@ -15,17 +15,15 @@
   import {
     loadFolder,
     saveFolder,
-    loadHist,
-    saveHist,
     clearClientCache,
     buildChildren,
     localChildren,
     type FolderContents,
-    type HistEntry,
   } from "$lib/cache";
   import { updates } from "$lib/updates.svelte";
   import { sync } from "$lib/sync.svelte";
   import { pending } from "$lib/pending.svelte";
+  import { history } from "$lib/history.svelte";
   import MenuBar from "$lib/components/MenuBar.svelte";
   import Toolbar from "$lib/components/Toolbar.svelte";
   import StatusBar from "$lib/components/StatusBar.svelte";
@@ -147,51 +145,15 @@
   let tree = $state<TreeNode | null>(null);
   let selectedTreePath = $state("");
 
-  // Center: history / pending
+  // Center tab. History/details pane state lives in $lib/history.svelte.ts.
   let centerTab = $state<"history" | "pending" | "streams" | "repo">("pending");
-  let histMode = $state<"folder" | "file">("folder");
-  let histSubject = $state("");
-  let histRows = $state<P4Record[]>([]);
-  let histLoading = $state(false);
-  let haveChange = $state("");
-  let haveRev = $state("");
   // Streams / Repo browser tabs
   let streamRows = $state<P4Record[]>([]);
   let streamsLoading = $state(false);
   let repoTree = $state<TreeNode | null>(null);
   let repoSelected = $state("");
-  let histMore = $state(false); // background paging of older changelists in flight
 
-  // Right: changelist details
-  let selectedChange = $state("");
-  let descRows = $state<P4Record[]>([]);
-  let descLoading = $state(false);
-
-  // Monotonic token so stale center-pane loads are dropped when selection changes.
-  let loadSeq = 0;
-
-  // Delayed loading indicator: keep the previous history visible and only show
-  // "Loading…" if fresh data hasn't arrived within 2s (nothing to keep → now).
-  let histLoadTimer: number | null = null;
-  function beginHistLoad(seq: number) {
-    if (histLoadTimer !== null) clearTimeout(histLoadTimer);
-    if (histRows.length === 0) {
-      histLoading = true;
-      return;
-    }
-    histLoadTimer = window.setTimeout(() => {
-      if (seq === loadSeq) histLoading = true;
-    }, 2000);
-  }
-  function endHistLoad() {
-    if (histLoadTimer !== null) {
-      clearTimeout(histLoadTimer);
-      histLoadTimer = null;
-    }
-    histLoading = false;
-  }
-
-  const centerRows = $derived(centerTab === "pending" ? pending.rows : histRows);
+  const centerRows = $derived(centerTab === "pending" ? pending.rows : history.rows);
 
   async function safe<T>(fn: () => Promise<T[]>): Promise<T[]> {
     try {
@@ -268,8 +230,8 @@
   // Single click: select (dir → history, file → details) — does NOT fold.
   function selectNode(node: TreeNode) {
     selectedTreePath = node.path;
-    if (node.isDir) loadFolderHistory(node.path);
-    else selectFile(node.path);
+    if (node.isDir) history.loadFolder(node.path);
+    else history.selectFile(node.path);
   }
 
   // Triangle / double click: toggle fold state, loading children on first open.
@@ -311,20 +273,7 @@
 
   function openResult(depotFile: string) {
     selectedTreePath = depotFile;
-    selectFile(depotFile);
-  }
-
-  // Changelist file diffs.
-  function fileDiff(depotFile: string, rev: number): Promise<string> {
-    return p4.diff2(conn, depotFile, rev);
-  }
-  async function openFileDiff(depotFile: string, rev: number) {
-    try {
-      await p4.openDiff(conn, depotFile, rev);
-    } catch (e) {
-      notice = String(e);
-      window.setTimeout(() => (notice = ""), 5000);
-    }
+    history.selectFile(depotFile);
   }
 
   // --- connection / workspace -------------------------------------------------
@@ -376,7 +325,7 @@
     tree.expanded = true;
     selectedTreePath = rootPath;
     // Load each tab's data (the loaders each flip centerTab); restore it after.
-    loadFolderHistory(rootPath);
+    history.loadFolder(rootPath);
     pending.load();
     if (tab === "streams") loadStreams();
     else if (tab === "repo") openRepo();
@@ -387,155 +336,15 @@
 
   function resetBrowse() {
     browCache.clear();
-    histMemCache.clear();
     rootPath = "";
     clientRoot = "";
     tree = null;
     selectedTreePath = "";
-    histRows = [];
-    histSubject = "";
-    haveChange = "";
-    haveRev = "";
-    selectedChange = "";
-    descRows = [];
+    history.reset();
     pending.clear();
     streamRows = [];
     repoTree = null;
     repoSelected = "";
-  }
-
-  // --- center pane: history / pending / details ------------------------------
-  const CHUNK = 50;
-  const CAP = 400;
-
-  // History cache: in-memory (session) + persistent (via $lib/cache). Switching
-  // to a previously-viewed file/folder shows its history instantly, then refreshes.
-  const histMemCache = new Map<string, HistEntry>();
-
-  // Persist a history entry to both the session map and localStorage.
-  function cacheHist(id: string, e: HistEntry) {
-    histMemCache.set(id, e);
-    saveHist(conn.client, id, e);
-  }
-  function applyHist(e: HistEntry) {
-    histMode = e.mode;
-    histSubject = e.subject;
-    if (e.mode === "folder") {
-      haveChange = e.have;
-      haveRev = "";
-    } else {
-      haveRev = e.have;
-      haveChange = "";
-    }
-    histRows = e.rows;
-    histMore = false;
-  }
-
-  async function loadFolderHistory(path: string, seq: number = ++loadSeq) {
-    centerTab = "history";
-    const id = "F:" + path;
-
-    // Instant from cache.
-    const cached = histMemCache.get(id) ?? loadHist(conn.client, id);
-    if (cached) {
-      endHistLoad();
-      applyHist(cached);
-      autoSelectHave();
-    } else {
-      beginHistLoad(seq);
-    }
-
-    // Fetch the first chunk AND the synced-CL together so the list appears with
-    // its greying/bold already correct — no ungreyed-then-greyed flash.
-    const [firstBatch, have] = await Promise.all([
-      safe(() => p4.changes(conn, path, CHUNK)),
-      safe(() => p4.haveChange(conn, path)),
-    ]);
-    if (seq !== loadSeq) return; // selection changed; keep whatever's shown
-    endHistLoad();
-    const haveCl = have[0]?.change ?? "";
-
-    // If we showed cached data, refresh fully into an accumulator and swap once
-    // (no shrink-then-grow flicker). Otherwise paint progressively.
-    let rows = firstBatch;
-    if (!cached) applyHist({ mode: "folder", subject: path, rows, have: haveCl });
-
-    if (firstBatch.length === CHUNK) {
-      let before = Math.min(...firstBatch.map((b) => Number(b.change))) - 1;
-      while (rows.length < CAP && Number.isFinite(before) && before > 0) {
-        if (!cached) histMore = true;
-        const batch = await safe(() => p4.changes(conn, path, CHUNK, before));
-        if (seq !== loadSeq) return;
-        if (batch.length === 0) break;
-        rows = [...rows, ...batch];
-        if (!cached) histRows = rows; // progressive when nothing was shown
-        const min = Math.min(...batch.map((b) => Number(b.change)));
-        if (batch.length < CHUNK || !Number.isFinite(min) || min <= 1) break;
-        before = min - 1;
-      }
-    }
-    histMore = false;
-    const fresh: HistEntry = { mode: "folder", subject: path, rows, have: haveCl };
-    applyHist(fresh); // single atomic swap (covers the cached-refresh case)
-    autoSelectHave();
-    cacheHist(id, fresh);
-  }
-
-  async function selectFile(depotFile: string) {
-    const seq = ++loadSeq;
-    centerTab = "history";
-    const id = "R:" + depotFile;
-
-    const cached = histMemCache.get(id) ?? loadHist(conn.client, id);
-    if (cached) {
-      endHistLoad();
-      applyHist(cached);
-      autoSelectHave();
-    } else {
-      beginHistLoad(seq);
-    }
-
-    const [rows, fs] = await Promise.all([
-      safe(() => p4.filelog(conn, depotFile, 200)),
-      safe(() => p4.fstat(conn, depotFile)),
-    ]);
-    if (seq !== loadSeq) return;
-    endHistLoad();
-    const fresh: HistEntry = {
-      mode: "file",
-      subject: depotFile,
-      rows,
-      have: fs[0]?.haveRev ?? "",
-    };
-    applyHist(fresh);
-    autoSelectHave();
-    cacheHist(id, fresh);
-  }
-
-  async function selectChange(change: string) {
-    if (!change || change === selectedChange) return;
-    selectedChange = change;
-    descLoading = true;
-    descRows = await safe(() => p4.describe(conn, change));
-    descLoading = false;
-  }
-
-  // Auto-select the changelist the workspace is currently synced to.
-  function autoSelectHave() {
-    if (histMode === "folder") {
-      if (haveChange) selectChange(haveChange);
-      else {
-        selectedChange = "";
-        descRows = [];
-      }
-    } else {
-      const row = histRows.find((r) => r.rev === haveRev);
-      if (row?.change) selectChange(row.change);
-      else {
-        selectedChange = "";
-        descRows = [];
-      }
-    }
   }
 
   // --- pending: context/dialog glue over the `pending` store -----------------
@@ -642,14 +451,14 @@
     refreshing = true;
     try {
       browCache.clear();
-      histMemCache.clear();
+      history.clearMemCache();
       clearClientCache(conn.client);
       if (tree) {
         tree.expanded = true;
         await reloadNode(tree);
       }
-      if (selectedTreePath && histMode === "file") await selectFile(selectedTreePath);
-      else if (selectedTreePath) await loadFolderHistory(selectedTreePath);
+      if (selectedTreePath && history.mode === "file") await history.selectFile(selectedTreePath);
+      else if (selectedTreePath) await history.loadFolder(selectedTreePath);
       buildIndex(); // rebuild the fuzzy-search index in the background
     } finally {
       refreshing = false;
@@ -745,7 +554,7 @@
     repoSelected = node.path;
     if (node.isDir) repoExpand(node);
     else {
-      selectFile(node.path);
+      history.selectFile(node.path);
       centerTab = "history"; // jump to History showing this file's revisions
     }
   }
@@ -763,6 +572,11 @@
 
   onMount(() => {
     servers = loadServers();
+    history.init({
+      conn: () => conn,
+      showHistoryTab: () => (centerTab = "history"),
+      setNotice,
+    });
     updates.init({
       isRelease: () => isRelease,
       appVersion: () => appVersion,
@@ -791,8 +605,8 @@
       refresh,
       loadPending: () => pending.load(),
       rootPath: () => rootPath,
-      histSubject: () => histSubject,
-      histMode: () => histMode,
+      histSubject: () => history.subject,
+      histMode: () => history.mode,
     });
     connect();
     getVersion()
@@ -908,15 +722,15 @@
         <div class="hsplit">
           <div class="hlist">
             <HistoryTable
-              mode={histMode}
-              subject={histSubject}
+              mode={history.mode}
+              subject={history.subject}
               rows={centerRows}
-              loading={histLoading}
-              more={histMore}
-              {haveChange}
-              {haveRev}
-              {selectedChange}
-              onSelectChange={selectChange}
+              loading={history.loading}
+              more={history.more}
+              haveChange={history.haveChange}
+              haveRev={history.haveRev}
+              selectedChange={history.selectedChange}
+              onSelectChange={(c) => history.selectChange(c)}
               onContextMenu={openHistContext}
             />
           </div>
@@ -928,11 +742,11 @@
           ></div>
           <div class="hdetails" style="width:{detailsW}px">
             <ChangeDetails
-              change={selectedChange}
-              rows={descRows}
-              loading={descLoading}
-              onDiff={fileDiff}
-              onOpenDiff={openFileDiff}
+              change={history.selectedChange}
+              rows={history.descRows}
+              loading={history.descLoading}
+              onDiff={(f, r) => history.fileDiff(f, r)}
+              onOpenDiff={(f, r) => history.openFileDiff(f, r)}
             />
           </div>
         </div>
