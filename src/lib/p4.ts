@@ -57,6 +57,8 @@ export const p4 = {
   fstat: (conn: P4Conn, file: string) => call("p4_fstat", { conn, file }),
   sync: (conn: P4Conn, path?: string) => call("p4_sync", { conn, path: path ?? null }),
   reconcile: (conn: P4Conn, path: string) => call("p4_reconcile", { conn, path }),
+  resync: (conn: P4Conn, files: string[], force: boolean) =>
+    call("p4_resync", { conn, files, force }),
   syncStream: (conn: P4Conn, path?: string) =>
     invoke<number>("p4_sync_stream", { conn, path: path ?? null }),
   syncCancel: () => invoke<void>("sync_cancel"),

@@ -23,6 +23,7 @@
   import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
   import InputDialog from "$lib/components/InputDialog.svelte";
   import SyncProgressDialog from "$lib/components/SyncProgressDialog.svelte";
+  import SyncErrorDialog from "$lib/components/SyncErrorDialog.svelte";
   import UpdateDialog from "$lib/components/UpdateDialog.svelte";
   import DepotTree from "$lib/components/DepotTree.svelte";
   import HistoryTable from "$lib/components/HistoryTable.svelte";
@@ -66,14 +67,23 @@
     current: string;
     issues: number;
     issueLine: string;
-    phase: "running" | "warn" | "error";
+    phase: "running" | "error";
     message: string;
   } | null>(null);
+  // Full per-file error report shown after a sync that had issues.
+  let syncErrorItems: { line: string; file: string | null }[] = [];
+  let syncErrors = $state<{
+    title: string;
+    items: { line: string; file: string | null }[];
+    path: string | undefined;
+  } | null>(null);
+  let busyFile = $state<string | null>(null); // file being fixed ("*" = retry-all)
 
   // Run a streaming sync with a live progress dialog (live file count).
   // Auto-closes on success; keeps the dialog open on error; cancellable.
   async function runSyncWithProgress(title: string, path: string | undefined): Promise<number | null> {
     syncCancelled = false;
+    syncErrorItems = [];
     syncProgress = { title, count: 0, current: "", issues: 0, issueLine: "", phase: "running", message: "" };
     const un1 = await listen<{ count: number; line: string }>("sync-progress", (e) => {
       if (syncProgress) {
@@ -81,7 +91,8 @@
         syncProgress.current = e.payload.line;
       }
     });
-    const un2 = await listen<{ count: number; line: string }>("sync-issue", (e) => {
+    const un2 = await listen<{ count: number; line: string; file: string | null }>("sync-issue", (e) => {
+      syncErrorItems.push({ line: e.payload.line, file: e.payload.file });
       if (syncProgress) {
         syncProgress.issues = e.payload.count;
         syncProgress.issueLine = e.payload.line;
@@ -89,15 +100,14 @@
     });
     try {
       const n = await p4.syncStream(conn, path);
-      if (syncProgress && syncProgress.issues > 0) {
-        // Completed, but some files couldn't be synced (e.g. open in the editor).
-        syncProgress.count = n;
-        syncProgress.phase = "warn";
-        return n;
+      syncProgress = null; // close the progress dialog
+      if (syncErrorItems.length > 0) {
+        // Completed, but some files errored — show the full report + Fix.
+        syncErrors = { title, items: [...syncErrorItems], path };
+      } else {
+        notice = n > 0 ? `Synced ${n} file${n === 1 ? "" : "s"}.` : "Already up to date.";
+        window.setTimeout(() => (notice = ""), 4000);
       }
-      syncProgress = null; // clean success → auto-close
-      notice = n > 0 ? `Synced ${n} file${n === 1 ? "" : "s"}.` : "Already up to date.";
-      window.setTimeout(() => (notice = ""), 4000);
       return n;
     } catch (e) {
       if (syncCancelled) {
@@ -119,6 +129,60 @@
   function cancelSync() {
     syncCancelled = true;
     p4.syncCancel().catch(() => {});
+  }
+
+  function syncErrorTargets(): string[] {
+    if (!syncErrors) return [];
+    const files = Array.from(
+      new Set(syncErrors.items.map((i) => i.file).filter((f): f is string => !!f)),
+    );
+    return files.length ? files : [syncErrors.path ?? (rootPath ? `${rootPath}/...` : "...")];
+  }
+  // Fix a single errored file: plain re-sync, or force (confirmed) to overwrite.
+  async function resyncFile(file: string, force: boolean) {
+    if (!syncErrors || busyFile) return;
+    if (
+      force &&
+      !(await askConfirm(
+        `${file}\n\nForce-overwrite with the depot version? Local changes will be DISCARDED.`,
+        "Force overwrite",
+        "Overwrite",
+      ))
+    ) {
+      return;
+    }
+    busyFile = file;
+    error = "";
+    try {
+      await p4.resync(conn, [file], force);
+      const rest = syncErrors.items.filter((i) => i.file !== file);
+      syncErrors = rest.length ? { ...syncErrors, items: rest } : null;
+      await refresh();
+      loadPending();
+    } catch (e) {
+      error = String(e);
+    } finally {
+      busyFile = null;
+    }
+  }
+  // Retry all affected files at once (non-destructive).
+  async function retryAllErrors() {
+    if (!syncErrors || busyFile) return;
+    const targets = syncErrorTargets();
+    busyFile = "*";
+    error = "";
+    try {
+      await p4.resync(conn, targets, false);
+      syncErrors = null;
+      notice = "Re-synced the affected files.";
+      window.setTimeout(() => (notice = ""), 4000);
+      await refresh();
+      loadPending();
+    } catch (e) {
+      error = String(e);
+    } finally {
+      busyFile = null;
+    }
   }
   let indexing = $state(false);
   let indexCount = $state(0);
@@ -1367,6 +1431,17 @@
     message={syncProgress.message}
     onCancel={cancelSync}
     onClose={() => (syncProgress = null)}
+  />
+{/if}
+
+{#if syncErrors}
+  <SyncErrorDialog
+    title={syncErrors.title}
+    items={syncErrors.items}
+    {busyFile}
+    onFixFile={resyncFile}
+    onRetryAll={retryAllErrors}
+    onClose={() => (syncErrors = null)}
   />
 {/if}
 

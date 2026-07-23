@@ -31,6 +31,7 @@ pub fn run() {
             commands::p4_filelog,
             commands::p4_fstat,
             commands::p4_sync,
+            commands::p4_resync,
             commands::p4_reconcile,
             commands::p4_sync_stream,
             commands::sync_cancel,

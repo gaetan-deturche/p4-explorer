@@ -15,7 +15,7 @@
     current: string;
     issues: number;
     issueLine: string;
-    phase: "running" | "warn" | "error";
+    phase: "running" | "error";
     message: string;
     onCancel: () => void;
     onClose: () => void;
@@ -29,17 +29,6 @@
 
     {#if phase === "error"}
       <div class="err mono">{message}</div>
-      <div class="actions">
-        <button class="primary" onclick={onClose}>Close</button>
-      </div>
-    {:else if phase === "warn"}
-      <div class="warnhead">
-        ⚠ Synced {count} file{count === 1 ? "" : "s"}, but {issues} could not be synced.
-      </div>
-      <div class="warnmsg">
-        Those files are open in another app (e.g. the Unreal editor). Close it and re-sync.
-      </div>
-      {#if issueLine}<div class="cur mono dim" title={issueLine}>{issueLine}</div>{/if}
       <div class="actions">
         <button class="primary" onclick={onClose}>Close</button>
       </div>
@@ -129,10 +118,6 @@
   .warnhead {
     font-size: 12px;
     color: var(--warn);
-  }
-  .warnmsg {
-    font-size: 12px;
-    color: var(--text);
   }
   .err {
     font-size: 12px;

@@ -199,7 +199,11 @@ fn sync_run(
                 all.push_str(&line);
                 all.push('\n');
                 if let Some(w) = &issue_win {
-                    let _ = w.emit("sync-issue", serde_json::json!({ "count": n, "line": line }));
+                    let file = error_file(&line);
+                    let _ = w.emit(
+                        "sync-issue",
+                        serde_json::json!({ "count": n, "line": line, "file": file }),
+                    );
                 }
             }
         }
@@ -302,6 +306,50 @@ pub async fn p4_sync(conn: P4Conn, path: Option<String>) -> Res {
             args.push(p);
         }
     }
+    run(conn, args).await
+}
+
+/// Best-effort extract of the file path from a p4 sync error line, for the
+/// "fix" (force-sync). Prefers a depot path (`//…`), else a Windows client
+/// path (`X:\…`), trimmed of any trailing `: <error text>`.
+fn error_file(line: &str) -> Option<String> {
+    if let Some(i) = line.find("//") {
+        let rest = &line[i..];
+        let end = rest.find(|c: char| c.is_whitespace() || c == '#').unwrap_or(rest.len());
+        if end > 2 {
+            return Some(rest[..end].to_string());
+        }
+    }
+    let b = line.as_bytes();
+    for i in 0..b.len().saturating_sub(2) {
+        if b[i].is_ascii_alphabetic() && b[i + 1] == b':' && b[i + 2] == b'\\' {
+            let rest = &line[i..];
+            let path = match rest.find(": ") {
+                Some(j) => &rest[..j],
+                None => rest,
+            }
+            .trim();
+            if !path.is_empty() {
+                return Some(path.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Re-sync specific files. Plain retry (for files that were locked and are now
+/// free) unless `force` is set, in which case `-f` overwrites writable/stuck
+/// files — DISCARDING local changes (caller must confirm).
+#[tauri::command]
+pub async fn p4_resync(conn: P4Conn, files: Vec<String>, force: bool) -> Res {
+    if files.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut args = vec!["sync".to_string()];
+    if force {
+        args.push("-f".to_string());
+    }
+    args.extend(files);
     run(conn, args).await
 }
 
