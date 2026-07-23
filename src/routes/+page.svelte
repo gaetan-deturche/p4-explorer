@@ -1,7 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import { getVersion } from "@tauri-apps/api/app";
-  import { openUrl } from "@tauri-apps/plugin-opener";
   import {
     p4,
     idx,
@@ -26,6 +25,7 @@
   } from "$lib/cache";
   import { updates } from "$lib/updates.svelte";
   import { sync } from "$lib/sync.svelte";
+  import { pending } from "$lib/pending.svelte";
   import MenuBar from "$lib/components/MenuBar.svelte";
   import Toolbar from "$lib/components/Toolbar.svelte";
   import StatusBar from "$lib/components/StatusBar.svelte";
@@ -52,7 +52,6 @@
   let ctxMenu = $state<{ x: number; y: number; change: string } | null>(null);
   let streamCtx = $state<{ x: number; y: number; stream: string } | null>(null);
   let pendingCtx = $state<{ x: number; y: number; cl: P4Record } | null>(null);
-  let swarmBase = ""; // cached Swarm URL
 
   // In-app confirm dialog (replaces window.confirm).
   let confirmState = $state<{
@@ -156,8 +155,6 @@
   let histLoading = $state(false);
   let haveChange = $state("");
   let haveRev = $state("");
-  let pendingRows = $state<P4Record[]>([]);
-  let pendingLoading = $state(false);
   // Streams / Repo browser tabs
   let streamRows = $state<P4Record[]>([]);
   let streamsLoading = $state(false);
@@ -194,7 +191,7 @@
     histLoading = false;
   }
 
-  const centerRows = $derived(centerTab === "pending" ? pendingRows : histRows);
+  const centerRows = $derived(centerTab === "pending" ? pending.rows : histRows);
 
   async function safe<T>(fn: () => Promise<T[]>): Promise<T[]> {
     try {
@@ -380,7 +377,7 @@
     selectedTreePath = rootPath;
     // Load each tab's data (the loaders each flip centerTab); restore it after.
     loadFolderHistory(rootPath);
-    loadPending();
+    pending.load();
     if (tab === "streams") loadStreams();
     else if (tab === "repo") openRepo();
     ensureIndex(); // background: build the fuzzy-search index if this ws is new
@@ -401,7 +398,7 @@
     haveRev = "";
     selectedChange = "";
     descRows = [];
-    pendingRows = [];
+    pending.clear();
     streamRows = [];
     repoTree = null;
     repoSelected = "";
@@ -541,123 +538,11 @@
     }
   }
 
-  function pendingLocalFiles(change: string): Promise<P4Record[]> {
-    return safe(() => p4.opened(conn, change));
-  }
-  function pendingShelvedFiles(change: string): Promise<P4Record[]> {
-    if (change === "default") return Promise.resolve([]); // default CL can't be shelved
-    return safe(() => p4.describeShelved(conn, change));
-  }
-  function localDiff(depotFile: string): Promise<string> {
-    return p4.diffLocal(conn, depotFile);
-  }
-  function shelvedDiff(depotFile: string, rev: number, change: string): Promise<string> {
-    return p4.diffShelved(conn, depotFile, rev, change);
-  }
-  async function openLocalDiff(depotFile: string) {
-    try {
-      await p4.openDiffLocal(conn, depotFile);
-    } catch (e) {
-      notice = String(e);
-      window.setTimeout(() => (notice = ""), 5000);
-    }
-  }
-  async function openShelvedDiff(depotFile: string, rev: number, change: string) {
-    try {
-      await p4.openDiffShelved(conn, depotFile, rev, change);
-    } catch (e) {
-      notice = String(e);
-      window.setTimeout(() => (notice = ""), 5000);
-    }
-  }
-
-  // Pending has its own loading flag (independent of the history seq/cancel), so
-  // loading it alongside the History tab doesn't cancel the history load.
-  // --- pending changelist context actions ------------------------------------
+  // --- pending: context/dialog glue over the `pending` store -----------------
   function onPendingContext(cl: P4Record, e: MouseEvent) {
     pendingCtx = { x: e.clientX, y: e.clientY, cl };
   }
 
-  // Run a workspace-mutating pending action, then refresh + reload the list.
-  async function pendingMutate(run: () => Promise<unknown>, okNotice: string) {
-    if (!connected || syncing) return;
-    syncing = true;
-    error = "";
-    notice = "";
-    try {
-      await run();
-      notice = okNotice;
-      window.setTimeout(() => (notice = ""), 4000);
-      await refresh();
-      loadPending();
-    } catch (e) {
-      error = String(e);
-    } finally {
-      syncing = false;
-    }
-  }
-
-  // Wrap a workspace-mutating pending action with a confirm prompt.
-  async function pendingAction(
-    run: () => Promise<unknown>,
-    confirmMsg: string,
-    confirmTitle: string,
-    okLabel: string,
-    okNotice: string,
-  ) {
-    if (!connected || syncing) return;
-    if (!(await askConfirm(confirmMsg, confirmTitle, okLabel))) return;
-    await pendingMutate(run, okNotice);
-  }
-  function submitCL(change: string) {
-    const what = change === "default" ? "the default changelist" : `changelist @${change}`;
-    pendingAction(
-      () => p4.submit(conn, change),
-      `Submit ${what}?\nThis commits the files to the depot and cannot be undone.`,
-      "Submit changelist",
-      "Submit",
-      "Changelist submitted.",
-    );
-  }
-  function requestReviewCL(change: string) {
-    pendingAction(
-      () => p4.requestReview(conn, change),
-      `Request a Swarm review for @${change}?\nThis adds #review to the description and shelves the files.`,
-      "Request review",
-      "Request",
-      "Review requested.",
-    );
-  }
-  function updateReviewCL(change: string) {
-    pendingAction(
-      () => p4.shelveUpdate(conn, change),
-      `Update the review for @${change} by re-shelving its files?`,
-      "Update review",
-      "Update",
-      "Review updated.",
-    );
-  }
-  function deleteShelfCL(change: string) {
-    pendingAction(
-      () => p4.shelveDelete(conn, change),
-      `Delete the shelved files of @${change}?`,
-      "Delete shelf",
-      "Delete",
-      "Shelf deleted.",
-    );
-  }
-  async function openReviewCL(change: string) {
-    try {
-      if (!swarmBase) swarmBase = await p4.swarmUrl(conn).catch(() => "");
-      if (!swarmBase) {
-        error = "Swarm URL is not configured on the server.";
-        return;
-      }
-      await openUrl(`${swarmBase.replace(/\/$/, "")}/changes/${change}`);
-    } catch (e) {
-      error = String(e);
-    }
-  }
   // Build the context-menu items for a pending changelist.
   function pendingMenuItems(cl: P4Record) {
     const own = cl.user === conn.user;
@@ -667,7 +552,7 @@
     if (own) {
       items.push({
         label: isDefault ? "Submit default changelist…" : `Submit @${cl.change}…`,
-        action: () => submitCL(cl.change),
+        action: () => pending.submit(cl.change),
       });
     }
     if (own && !isDefault) {
@@ -677,19 +562,19 @@
       });
     }
     if (own && !isDefault) {
-      if (hasReview) items.push({ label: "Update review", action: () => updateReviewCL(cl.change) });
-      else items.push({ label: "Request review", action: () => requestReviewCL(cl.change) });
+      if (hasReview) items.push({ label: "Update review", action: () => pending.updateReview(cl.change) });
+      else items.push({ label: "Request review", action: () => pending.requestReview(cl.change) });
     }
     if (!isDefault) {
-      items.push({ label: "Open review in browser", action: () => openReviewCL(cl.change) });
+      items.push({ label: "Open review in browser", action: () => pending.openReview(cl.change) });
     }
     if (own && !isDefault) {
-      items.push({ label: "Delete shelf", action: () => deleteShelfCL(cl.change) });
+      items.push({ label: "Delete shelf", action: () => pending.deleteShelf(cl.change) });
     }
     return items;
   }
 
-  // --- pending FILE context actions (local/opened files) ---------------------
+  // --- pending FILE context (local/opened files) -----------------------------
   let fileCtx = $state<{ x: number; y: number; file: P4Record; change: string } | null>(null);
   let newClFile = $state<string | null>(null); // a file awaiting a new-changelist name
   let renameCl = $state<{ change: string; desc: string } | null>(null); // CL being renamed
@@ -697,82 +582,44 @@
   function onPendingFileContext(file: P4Record, change: string, e: MouseEvent) {
     fileCtx = { x: e.clientX, y: e.clientY, file, change };
   }
-  function revertFile(depotFile: string) {
-    pendingAction(
-      () => p4.revert(conn, depotFile),
-      `${depotFile}\n\nRevert this file? Your local changes will be discarded.`,
-      "Revert file",
-      "Revert",
-      "File reverted.",
-    );
-  }
-  function revertKeepFile(depotFile: string) {
-    pendingAction(
-      () => p4.revertKeep(conn, depotFile),
-      `${depotFile}\n\nRemove from its changelist but keep your local edits on disk?`,
-      "Remove from changelist",
-      "Remove",
-      "File removed from changelist (changes kept).",
-    );
-  }
-  function reopenFile(depotFile: string, change: string) {
-    const label = change === "default" ? "Default" : "@" + change;
-    pendingMutate(() => p4.reopen(conn, depotFile, change), `Moved to ${label}.`);
-  }
   function submitNewChangelist(desc: string) {
     const file = newClFile;
     newClFile = null;
-    if (!file) return;
-    pendingMutate(async () => {
-      const ch = await p4.newChangelist(conn, desc);
-      await p4.reopen(conn, file, ch);
-    }, "Moved to a new changelist.");
+    if (file) pending.moveToNew(file, desc);
   }
   function submitRename(desc: string) {
     const target = renameCl;
     renameCl = null;
-    if (!target) return;
-    pendingMutate(() => p4.setDescription(conn, target.change, desc), "Changelist renamed.");
+    if (target) pending.rename(target.change, desc);
   }
 
   // Right-click menu for a pending file: view/revert, un-open, or move to a CL.
   function fileMenuItems(file: P4Record, change: string) {
-    const targets = pendingRows
+    const targets = pending.rows
       .filter((cl) => cl.change !== change)
       .map((cl) => {
         const desc = firstLine(cl.desc);
         const short = desc.length > 32 ? desc.slice(0, 31) + "…" : desc;
         const label =
           cl.change === "default" ? "Default" : short ? `@${cl.change}  ${short}` : "@" + cl.change;
-        return { label, action: () => reopenFile(file.depotFile, cl.change) };
+        return { label, action: () => pending.reopen(file.depotFile, cl.change) };
       });
     targets.push({ label: "New changelist…", action: () => (newClFile = file.depotFile) });
     return [
-      { label: "View diff", action: () => openLocalDiff(file.depotFile) },
-      { label: "Revert file…", action: () => revertFile(file.depotFile) },
+      { label: "View diff", action: () => pending.openLocalDiff(file.depotFile) },
+      { label: "Revert file…", action: () => pending.revert(file.depotFile) },
       {
         label: "Remove from changelist (keep changes)…",
-        action: () => revertKeepFile(file.depotFile),
+        action: () => pending.revertKeep(file.depotFile),
       },
       { label: "Move to changelist", submenu: targets },
     ];
   }
 
-  async function loadPending() {
+  // Switch to the Pending tab and (re)load it.
+  function openPending() {
     centerTab = "pending";
-    // Workspace-scoped: no client selected → nothing to show (don't list the
-    // user's pending CLs from other workspaces).
-    if (!connected || !conn.client) {
-      pendingRows = [];
-      pendingLoading = false;
-      return;
-    }
-    if (pendingRows.length === 0) pendingLoading = true; // keep previous list otherwise
-    const rows = await safe(() => p4.pending(conn, 100));
-    pendingLoading = false;
-    // Prepend the client's Default changelist (opened files not in a numbered CL).
-    const def = { change: "default", desc: "", user: conn.user, time: "" } as P4Record;
-    pendingRows = [def, ...rows];
+    pending.load();
   }
 
   // --- refresh / global sync -------------------------------------------------
@@ -922,6 +769,16 @@
       notify: (m) => setNotice(m),
       warn: (m) => setError(m),
     });
+    pending.init({
+      conn: () => conn,
+      connected: () => connected,
+      syncing: () => syncing,
+      setSyncing: (v) => (syncing = v),
+      setNotice,
+      setError,
+      askConfirm,
+      refresh,
+    });
     sync.init({
       conn: () => conn,
       connected: () => connected,
@@ -932,7 +789,7 @@
       setError,
       askConfirm,
       refresh,
-      loadPending,
+      loadPending: () => pending.load(),
       rootPath: () => rootPath,
       histSubject: () => histSubject,
       histMode: () => histMode,
@@ -1014,7 +871,7 @@
         <button class:active={centerTab === "history"} onclick={() => (centerTab = "history")}>
           History
         </button>
-        <button class:active={centerTab === "pending"} onclick={loadPending}>Pending</button>
+        <button class:active={centerTab === "pending"} onclick={openPending}>Pending</button>
         <button class:active={centerTab === "streams"} onclick={loadStreams}>Streams</button>
         <button class:active={centerTab === "repo"} onclick={openRepo}>Repo</button>
       </div>
@@ -1034,18 +891,18 @@
         />
       {:else if centerTab === "pending"}
         <PendingList
-          rows={pendingRows}
-          loading={pendingLoading}
+          rows={pending.rows}
+          loading={pending.loading}
           client={conn.client}
-          onLocalFiles={pendingLocalFiles}
-          onShelvedFiles={pendingShelvedFiles}
-          onLocalDiff={localDiff}
-          onShelvedDiff={shelvedDiff}
-          onOpenLocalDiff={openLocalDiff}
-          onOpenShelvedDiff={openShelvedDiff}
+          onLocalFiles={pending.localFiles}
+          onShelvedFiles={pending.shelvedFiles}
+          onLocalDiff={pending.localDiff}
+          onShelvedDiff={pending.shelvedDiff}
+          onOpenLocalDiff={pending.openLocalDiff}
+          onOpenShelvedDiff={pending.openShelvedDiff}
           onContext={onPendingContext}
           onFileContext={onPendingFileContext}
-          onMoveFile={reopenFile}
+          onMoveFile={pending.reopen}
         />
       {:else}
         <div class="hsplit">
