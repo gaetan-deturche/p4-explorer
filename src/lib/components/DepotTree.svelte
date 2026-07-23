@@ -10,6 +10,7 @@
     onExpand,
     onSearch,
     onOpenResult,
+    onContext,
   }: {
     root: TreeNode | null;
     selectedPath: string;
@@ -18,6 +19,7 @@
     onExpand: (node: TreeNode) => void; // triangle / double-click: toggle + load
     onSearch?: (term: string) => Promise<P4Record[]>; // fuzzy index search (optional)
     onOpenResult?: (depotFile: string) => void; // click a search result
+    onContext?: (node: TreeNode, e: MouseEvent) => void; // right-click a node (optional)
   } = $props();
 
   let query = $state("");
@@ -184,6 +186,12 @@
       class="main mono"
       onclick={() => onSelect(node)}
       ondblclick={() => node.isDir && onExpand(node)}
+      oncontextmenu={(e) => {
+        if (onContext) {
+          e.preventDefault();
+          onContext(node, e);
+        }
+      }}
     >
       <span class="ic">{node.isDir ? "📁" : "📄"}</span>
       <span class="name">{node.name}</span>

@@ -99,14 +99,14 @@
       ↻ {refreshing ? "Refreshing…" : "Refresh"}
     </button>
     <button class="sync" onclick={onSync} disabled={busy} title="Sync the entire workspace to latest">
-      ⤓ {syncing ? "Syncing…" : "Global sync"}
+      ⤓ {syncing ? "Syncing…" : "Sync workspace"}
     </button>
     <button
       onclick={onReconcile}
       disabled={busy || !conn.client}
       title="Open files changed, added, or deleted outside Perforce (offline work)"
     >
-      ⟲ {reconciling ? "Reconciling…" : "Reconcile"}
+      ⟲ {reconciling ? "Reconciling…" : "Reconcile workspace"}
     </button>
   </div>
 </div>

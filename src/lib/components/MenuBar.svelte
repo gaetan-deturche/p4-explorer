@@ -42,7 +42,7 @@
       name: "Workspace",
       items: [
         { label: "Refresh", action: onRefresh, disabled: busy },
-        { label: "Global sync…", action: onSync, disabled: busy },
+        { label: "Sync workspace…", action: onSync, disabled: busy },
       ],
     },
     {

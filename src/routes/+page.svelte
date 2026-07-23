@@ -34,6 +34,7 @@
   let ctxMenu = $state<{ x: number; y: number; change: string } | null>(null);
   let streamCtx = $state<{ x: number; y: number; stream: string } | null>(null);
   let pendingCtx = $state<{ x: number; y: number; cl: P4Record } | null>(null);
+  let treeCtx = $state<{ x: number; y: number; path: string; isDir: boolean } | null>(null);
 
   // In-app confirm dialog (replaces window.confirm).
   let confirmState = $state<{
@@ -211,6 +212,12 @@
     ctxMenu = { x: e.clientX, y: e.clientY, change };
   }
 
+  // --- depot tree: right-click to sync / reconcile just this path ------------
+  function onTreeContext(path: string, isDir: boolean, e: MouseEvent) {
+    if (!connection.connected || !conn.client) return;
+    treeCtx = { x: e.clientX, y: e.clientY, path, isDir };
+  }
+
   // --- Streams tab: switching reconfigures the current workspace --------------
   function onStreamContext(stream: string, e: MouseEvent) {
     if (!connection.connected || !conn.client) return;
@@ -347,6 +354,7 @@
         onExpand={(n) => browse.expandNode(n)}
         onSearch={(t) => browse.searchDepot(t)}
         onOpenResult={(f) => browse.openResult(f)}
+        onContext={(n, e) => onTreeContext(n.path, n.isDir, e)}
       />
     </section>
 
@@ -510,6 +518,22 @@
     y={streamCtx.y}
     items={[{ label: `Switch workspace to ${stream}`, action: () => connection.switchStream(stream) }]}
     onClose={() => (streamCtx = null)}
+  />
+{/if}
+
+{#if treeCtx}
+  {@const p = treeCtx.path}
+  {@const dir = treeCtx.isDir}
+  {@const kind = dir ? "folder" : "file"}
+  {@const name = p.replace(/\/+$/, "").split("/").pop() || p}
+  <ContextMenu
+    x={treeCtx.x}
+    y={treeCtx.y}
+    items={[
+      { label: `Sync ${kind} “${name}”`, action: () => sync.syncPath(p, dir) },
+      { label: `Reconcile ${kind} “${name}”`, action: () => sync.reconcilePath(p, dir) },
+    ]}
+    onClose={() => (treeCtx = null)}
   />
 {/if}
 

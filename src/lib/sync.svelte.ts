@@ -113,7 +113,7 @@ export const sync = {
     if (
       !(await h.askConfirm(
         "Sync the entire workspace to the latest revision?\nThis may download a lot of files.",
-        "Global sync",
+        "Sync workspace",
         "Sync",
       ))
     ) {
@@ -121,7 +121,7 @@ export const sync = {
     }
     h.setSyncing(true);
     try {
-      const n = await this.run("Global sync", undefined);
+      const n = await this.run("Sync workspace", undefined);
       if (n !== null) await h.refresh();
     } finally {
       h.setSyncing(false);
@@ -150,6 +150,50 @@ export const sync = {
       if (n !== null) await h.refresh();
     } finally {
       h.setSyncing(false);
+    }
+  },
+
+  /** Sync a single depot path (file or folder) to the latest revision. */
+  async syncPath(path: string, isDir: boolean) {
+    if (!h || !h.connected() || h.busy()) return;
+    const spec = isDir ? `${path}/...` : path;
+    const name = path.replace(/\/+$/, "").split("/").pop() || path;
+    h.setSyncing(true);
+    try {
+      const n = await this.run(`Sync ${name}`, spec);
+      if (n !== null) await h.refresh();
+    } finally {
+      h.setSyncing(false);
+    }
+  },
+
+  /** Reconcile offline work under a single depot path (file or folder). */
+  async reconcilePath(path: string, isDir: boolean) {
+    if (!h || !h.connected() || h.busy()) return;
+    const spec = isDir ? `${path}/...` : path;
+    if (
+      !(await h.askConfirm(
+        `${spec}\n\nReconcile offline work under this path? This opens files changed, added, or deleted outside Perforce into the default changelist.`,
+        "Reconcile offline work",
+        "Reconcile",
+      ))
+    ) {
+      return;
+    }
+    h.setReconciling(true);
+    try {
+      const rows = await p4.reconcile(h.conn(), spec);
+      const n = rows.length;
+      h.setNotice(
+        n > 0 ? `Reconciled ${n} file${n === 1 ? "" : "s"} into the default changelist.` : "Nothing to reconcile.",
+        5000,
+      );
+      await h.refresh();
+      h.loadPending();
+    } catch (e) {
+      h.setError(String(e));
+    } finally {
+      h.setReconciling(false);
     }
   },
 
