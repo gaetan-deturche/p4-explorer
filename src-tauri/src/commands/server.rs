@@ -113,9 +113,11 @@ pub async fn p4_login_status(conn: P4Conn) -> Result<bool, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let mut cmd = p4::base_command(&conn);
         cmd.arg("login").arg("-s");
+        let start = std::time::Instant::now();
         let out = cmd
             .output()
             .map_err(|e| format!("failed to launch p4: {e} (is p4 on PATH?)"))?;
+        p4::log_command(&["login", "-s"], start.elapsed().as_millis(), out.status.success());
         Ok(out.status.success())
     })
     .await
@@ -157,9 +159,11 @@ pub async fn p4_trust(conn: P4Conn) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         let mut cmd = p4::base_command(&conn);
         cmd.arg("trust").arg("-y").arg("-f");
+        let start = std::time::Instant::now();
         let out = cmd
             .output()
             .map_err(|e| format!("failed to launch p4: {e} (is p4 on PATH?)"))?;
+        p4::log_command(&["trust", "-y", "-f"], start.elapsed().as_millis(), out.status.success());
         if !out.status.success() {
             return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
         }

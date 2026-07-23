@@ -11,6 +11,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .setup(|app| {
+            p4::set_app_handle(app.handle().clone()); // for p4-command log events
             // SQLite DB in the app data dir: file index (+ future caches).
             let dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&dir).ok();

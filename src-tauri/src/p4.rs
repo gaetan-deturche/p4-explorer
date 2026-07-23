@@ -7,6 +7,26 @@
 use serde::Deserialize;
 use serde_json::{Map, Value};
 use std::process::Command;
+use std::sync::OnceLock;
+use std::time::Instant;
+use tauri::{AppHandle, Emitter};
+
+/// App handle for emitting the p4-command log events (set once at startup).
+static APP: OnceLock<AppHandle> = OnceLock::new();
+pub fn set_app_handle(app: AppHandle) {
+    let _ = APP.set(app);
+}
+
+/// Emit a `p4-command` event describing a command the app just ran, for the
+/// Commands log view. `args` is the subcommand + args (connection globals and
+/// `-ztag -Mj` are omitted for readability; stdin, e.g. a password, is never
+/// included).
+pub fn log_command(args: &[&str], ms: u128, ok: bool) {
+    if let Some(app) = APP.get() {
+        let line = format!("p4 {}", args.join(" "));
+        let _ = app.emit("p4-command", serde_json::json!({ "line": line, "ms": ms, "ok": ok }));
+    }
+}
 
 /// A single tagged output record: a JSON object of field -> value.
 pub type Record = Map<String, Value>;
@@ -94,9 +114,11 @@ pub fn run_raw(conn: &P4Conn, args: &[&str]) -> Result<String, String> {
     for a in args {
         cmd.arg(a);
     }
+    let start = Instant::now();
     let out = cmd
         .output()
         .map_err(|e| format!("failed to launch p4: {e} (is p4 on PATH?)"))?;
+    log_command(args, start.elapsed().as_millis(), out.status.success());
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
@@ -114,7 +136,9 @@ pub fn run_raw_stdin(conn: &P4Conn, args: &[&str], input: &str) -> Result<String
     if let Some(mut si) = child.stdin.take() {
         si.write_all(input.as_bytes()).map_err(|e| e.to_string())?;
     }
+    let start = Instant::now();
     let out = child.wait_with_output().map_err(|e| e.to_string())?;
+    log_command(args, start.elapsed().as_millis(), out.status.success());
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
         if !err.trim().is_empty() {
@@ -163,9 +187,11 @@ pub fn run_raw_stdout_diff(conn: &P4Conn, args: &[&str]) -> Result<String, Strin
     for a in args {
         cmd.arg(a);
     }
+    let start = Instant::now();
     let out = cmd
         .output()
         .map_err(|e| format!("failed to launch p4: {e} (is p4 on PATH?)"))?;
+    log_command(args, start.elapsed().as_millis(), out.status.success());
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
@@ -192,9 +218,11 @@ pub fn run(conn: &P4Conn, args: &[&str]) -> Result<Vec<Record>, String> {
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
 
+    let start = Instant::now();
     let out = cmd
         .output()
         .map_err(|e| format!("failed to launch p4: {e} (is p4 on PATH?)"))?;
+    log_command(args, start.elapsed().as_millis(), out.status.success());
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     let mut records: Vec<Record> = Vec::new();
@@ -262,9 +290,11 @@ pub fn run_strict(conn: &P4Conn, args: &[&str]) -> Result<Vec<Record>, String> {
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
 
+    let start = Instant::now();
     let out = cmd
         .output()
         .map_err(|e| format!("failed to launch p4: {e} (is p4 on PATH?)"))?;
+    log_command(args, start.elapsed().as_millis(), out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
     let mut records: Vec<Record> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
