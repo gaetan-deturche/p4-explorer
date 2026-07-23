@@ -222,6 +222,70 @@ pub fn run(conn: &P4Conn, args: &[&str]) -> Result<Vec<Record>, String> {
     Ok(records)
 }
 
+/// Like `run`, but a failure record (severity >= E_FAILED) is ALWAYS surfaced as
+/// an `Err`, even when the command also emitted data records. `run` lets data
+/// records mask errors (fine for reads); for a mutation like `submit` that hides
+/// real failures — e.g. "change has shelved files" arrives after progress
+/// records, so the submit silently looks successful.
+pub fn run_strict(conn: &P4Conn, args: &[&str]) -> Result<Vec<Record>, String> {
+    let mut cmd = Command::new("p4");
+    cmd.arg("-ztag").arg("-Mj");
+    for g in conn.global_args() {
+        cmd.arg(g);
+    }
+    for a in args {
+        cmd.arg(a);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    let out = cmd
+        .output()
+        .map_err(|e| format!("failed to launch p4: {e} (is p4 on PATH?)"))?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let mut records: Vec<Record> = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
+
+    for line in stdout.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(val) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let Some(obj) = val.as_object() else { continue };
+        if let Some(sev) = obj.get("severity").and_then(value_as_i64) {
+            if sev >= E_FAILED {
+                if let Some(d) = obj.get("data").and_then(|d| d.as_str()) {
+                    errors.push(d.trim().to_string());
+                }
+                continue;
+            }
+            if sev >= E_WARN {
+                continue;
+            }
+        }
+        records.push(obj.clone());
+    }
+
+    if !errors.is_empty() {
+        return Err(errors.join("\n"));
+    }
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let stderr = stderr.trim();
+        if !stderr.is_empty() {
+            return Err(stderr.to_string());
+        }
+    }
+    Ok(records)
+}
+
 /// Accept a severity encoded as either a JSON number or a numeric string.
 fn value_as_i64(v: &Value) -> Option<i64> {
     v.as_i64()

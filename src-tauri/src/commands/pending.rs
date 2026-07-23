@@ -42,15 +42,21 @@ pub async fn p4_describe_shelved(conn: P4Conn, change: String) -> Res {
 }
 
 /// Submit a pending changelist (`p4 submit -c <change>`, or the default CL).
-/// Depot-modifying — call only from an explicit, confirmed user action.
+/// Depot-modifying — call only from an explicit, confirmed user action. Uses the
+/// strict runner so a blocked submit (e.g. shelved files still in the CL)
+/// surfaces its error instead of being masked by submit's progress records.
 #[tauri::command]
 pub async fn p4_submit(conn: P4Conn, change: String) -> Res {
-    let args = if change == "default" {
-        v(&["submit"])
-    } else {
-        v(&["submit", "-c", &change])
-    };
-    run(conn, args).await
+    tauri::async_runtime::spawn_blocking(move || {
+        let args: Vec<&str> = if change == "default" {
+            vec!["submit"]
+        } else {
+            vec!["submit", "-c", &change]
+        };
+        p4::run_strict(&conn, &args)
+    })
+    .await
+    .map_err(|e| format!("submit task failed: {e}"))?
 }
 
 /// Delete the shelved files of a changelist (`p4 shelve -d -c <change>`).
