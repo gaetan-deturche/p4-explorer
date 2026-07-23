@@ -15,6 +15,7 @@ import {
 } from "$lib/cache";
 import { history } from "$lib/history.svelte";
 import { pending } from "$lib/pending.svelte";
+import type { ViewState } from "$lib/nav";
 
 type Tab = "history" | "pending" | "streams" | "repo";
 type Hooks = {
@@ -96,17 +97,29 @@ export const browse = {
     repoSelected = "";
   },
 
-  /** Point the browser at a workspace stream and load every tab's data.
-   *  The loaders flip the center tab; `tab` is restored at the end. */
-  async openWorkspace(stream: string, root: string, tab: Tab) {
+  /** Point the browser at a workspace stream and load its data, restoring the
+   *  workspace's saved view (tab + selection) if any; otherwise land on the
+   *  stream-root folder history under `fallbackTab`. A saved path from a
+   *  different stream (e.g. after a stream switch) is ignored. */
+  async openWorkspace(stream: string, root: string, view: ViewState | null, fallbackTab: Tab) {
     if (!h) return;
     clientRoot = root;
     rootPath = stream;
     tree = makeNode(stream, true);
     tree.expanded = true;
-    selectedTreePath = stream;
-    history.loadFolder(stream);
+
+    const savedPath = view?.treePath && view.treePath.startsWith(stream) ? view.treePath : "";
+    if (savedPath) {
+      selectedTreePath = savedPath;
+      if (view!.histMode === "file") history.selectFile(savedPath);
+      else history.loadFolder(savedPath);
+    } else {
+      selectedTreePath = stream;
+      history.loadFolder(stream);
+    }
     pending.load();
+
+    const tab = view?.tab ?? fallbackTab;
     if (tab === "streams") browse.loadStreams();
     else if (tab === "repo") browse.openRepo();
     browse.ensureIndex(); // background: build the fuzzy-search index if new

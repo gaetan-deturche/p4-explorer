@@ -5,7 +5,9 @@
 
 import { p4, type P4Conn, type P4Record } from "$lib/p4";
 import { loadServers, saveServers, withServer, withoutServer } from "$lib/servers";
+import { loadClientFor, saveClientFor, saveLastServer, loadView, saveView } from "$lib/nav";
 import { browse } from "$lib/browse.svelte";
+import { history } from "$lib/history.svelte";
 
 type Tab = "history" | "pending" | "streams" | "repo";
 type Hooks = {
@@ -109,10 +111,18 @@ export const connection = {
       h.setOptionsOpen(false);
       startKeepAlive();
       clients = await p4.clients(conn);
+      // Prefer the workspace the user last used on this server; fall back to the
+      // client reported by `p4 info`.
+      const saved = loadClientFor(conn.port);
       const cn = i.clientName;
-      if (cn && cn !== "*unknown*" && clients.some((c) => c.client === cn)) {
-        conn.client = cn;
-        await connection.selectClient();
+      const target =
+        saved && clients.some((c) => c.client === saved)
+          ? saved
+          : cn && cn !== "*unknown*" && clients.some((c) => c.client === cn)
+            ? cn
+            : "";
+      if (target) {
+        await connection.selectClient(target);
       }
     } catch (e) {
       connected = false;
@@ -122,19 +132,33 @@ export const connection = {
     }
   },
 
-  async selectClient() {
+  /** Select a workspace. `target` is the incoming client (from the picker);
+   *  omit it to (re)select the current one (e.g. after a stream switch). */
+  async selectClient(target?: string) {
     if (!h) return;
     const conn = h.conn();
-    const tab = h.getTab(); // keep the user's current tab across the workspace change
+    const next = target ?? conn.client;
+    const prev = conn.client;
+    const fallbackTab = h.getTab(); // used only if the incoming ws has no saved view
+    // Persist the OUTGOING workspace's view, and read the INCOMING workspace's
+    // saved view BEFORE conn.client changes — so neither the page's save-effect
+    // nor the reset below can clobber the view we're about to restore.
+    if (prev && prev !== next) {
+      saveView(prev, { tab: fallbackTab, treePath: browse.selectedTreePath, histMode: history.mode });
+    }
+    const saved = loadView(next);
+    conn.client = next;
     h.setConnError("");
     browse.reset();
-    const rec = clients.find((c) => c.client === conn.client);
+    const rec = clients.find((c) => c.client === next);
     if (!rec) return;
     if (!rec.Stream) {
       h.setConnError("This workspace has no stream. Depot browsing currently requires a stream client.");
       return;
     }
-    await browse.openWorkspace(rec.Stream, rec.Root ?? "", tab);
+    saveLastServer(conn.port);
+    saveClientFor(conn.port, next);
+    await browse.openWorkspace(rec.Stream, rec.Root ?? "", saved, fallbackTab);
   },
 
   async switchServerTo(port: string) {

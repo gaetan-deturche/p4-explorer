@@ -24,7 +24,7 @@
     refreshing: boolean;
     syncing: boolean;
     reconciling: boolean;
-    onClientChange: () => void;
+    onClientChange: (client: string) => void;
     onServerChange: (port: string) => void;
     onAddServer: () => void;
     onServerContext: (e: MouseEvent) => void;
@@ -78,7 +78,12 @@
 
     <label class="ws">
       Workspace
-      <select class="mono" bind:value={conn.client} onchange={onClientChange} disabled={!connected}>
+      <select
+        class="mono"
+        value={conn.client}
+        onchange={(e) => onClientChange((e.currentTarget as HTMLSelectElement).value)}
+        disabled={!connected}
+      >
         <option value="">— select —</option>
         {#each clients as c (c.client)}
           <option value={c.client}>

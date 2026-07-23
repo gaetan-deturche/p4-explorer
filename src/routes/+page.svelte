@@ -8,6 +8,7 @@
   import { history } from "$lib/history.svelte";
   import { browse } from "$lib/browse.svelte";
   import { connection } from "$lib/connection.svelte";
+  import { loadLastServer, saveView } from "$lib/nav";
   import MenuBar from "$lib/components/MenuBar.svelte";
   import Toolbar from "$lib/components/Toolbar.svelte";
   import StatusBar from "$lib/components/StatusBar.svelte";
@@ -97,6 +98,15 @@
   let centerTab = $state<"history" | "pending" | "streams" | "repo">("pending");
 
   const centerRows = $derived(centerTab === "pending" ? pending.rows : history.rows);
+
+  // Persist the current workspace's view (tab + selection) on every change, so a
+  // restart / workspace switch returns here. selectClient reads this back before
+  // it mutates state, so the read always beats this save.
+  $effect(() => {
+    const client = conn.client;
+    const view = { tab: centerTab, treePath: browse.selectedTreePath, histMode: history.mode };
+    if (connection.connected && client) saveView(client, view);
+  });
 
   onDestroy(() => connection.stopKeepAlive());
 
@@ -271,6 +281,10 @@
       histSubject: () => history.subject,
       histMode: () => history.mode,
     });
+    // Reconnect to the server used last session; connect() then restores that
+    // server's last workspace and its saved view.
+    const last = loadLastServer();
+    if (last) conn.port = last;
     connection.connect();
     getVersion()
       .then((v) => (appVersion = v))
@@ -305,7 +319,7 @@
     refreshing={browse.refreshing}
     {syncing}
     {reconciling}
-    onClientChange={() => connection.selectClient()}
+    onClientChange={(c) => connection.selectClient(c)}
     onServerChange={(p) => connection.switchServerTo(p)}
     onAddServer={() => (addServerOpen = true)}
     onServerContext={(e) => {
