@@ -24,8 +24,11 @@
 
   function run(it: MenuItem) {
     if (it.disabled || !it.action) return;
-    onClose();
+    // Invoke BEFORE closing: some actions read a value lazily from the context
+    // state (e.g. `() => update(change)` where change comes from the {#if}
+    // block); closing first tears that down and the action would throw.
     it.action();
+    onClose();
   }
 </script>
 
