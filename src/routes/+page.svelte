@@ -1,20 +1,13 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import { getVersion } from "@tauri-apps/api/app";
-  import {
-    p4,
-    isReleaseBuild,
-    emptyConn,
-    firstLine,
-    type P4Conn,
-    type P4Record,
-  } from "$lib/p4";
-  import { loadServers, saveServers, withServer, withoutServer } from "$lib/servers";
+  import { isReleaseBuild, emptyConn, firstLine, type P4Conn, type P4Record } from "$lib/p4";
   import { updates } from "$lib/updates.svelte";
   import { sync } from "$lib/sync.svelte";
   import { pending } from "$lib/pending.svelte";
   import { history } from "$lib/history.svelte";
   import { browse } from "$lib/browse.svelte";
+  import { connection } from "$lib/connection.svelte";
   import MenuBar from "$lib/components/MenuBar.svelte";
   import Toolbar from "$lib/components/Toolbar.svelte";
   import StatusBar from "$lib/components/StatusBar.svelte";
@@ -31,9 +24,9 @@
   import ChangeDetails from "$lib/components/ChangeDetails.svelte";
   import ContextMenu from "$lib/components/ContextMenu.svelte";
 
+  // `conn` stays here (two-way bound by Toolbar/OptionsDialog); all connection
+  // logic + derived state (connected/busy/clients/servers) lives in the store.
   let conn = $state<P4Conn>(emptyConn());
-  let connected = $state(false);
-  let busy = $state(false);
   let syncing = $state(false);
   let reconciling = $state(false);
   let optionsOpen = $state(false);
@@ -92,40 +85,12 @@
   }
   let error = $state("");
   let notice = $state(""); // transient info (e.g. sync result)
-  let serverVersion = $state("");
   let appVersion = $state("");
   let isRelease = $state(false); // dev/local builds skip auto-update and show -dev
-  let clients = $state<P4Record[]>([]);
 
-  // Server selector: remembered connections (localStorage) + seeded from p4 env.
-  let servers = $state<string[]>([]);
+  // Server selector UI (the list + switching live in the connection store).
   let serverCtx = $state<{ x: number; y: number } | null>(null);
   let addServerOpen = $state(false);
-  function rememberServer(port: string) {
-    const next = withServer(servers, port);
-    if (next !== servers) {
-      servers = next;
-      saveServers(servers);
-    }
-  }
-  function forgetServer(port: string) {
-    servers = withoutServer(servers, port);
-    saveServers(servers);
-  }
-  async function switchServerTo(port: string) {
-    if (port === conn.port) return;
-    conn.port = port;
-    conn.client = "";
-    browse.reset();
-    await connect();
-  }
-  function submitAddServer(port: string) {
-    addServerOpen = false;
-    const v = port.trim();
-    if (!v) return;
-    rememberServer(v);
-    switchServerTo(v);
-  }
 
   // Center tab. History/details pane lives in $lib/history.svelte.ts; the depot
   // tree, streams/repo tabs and index live in $lib/browse.svelte.ts.
@@ -133,80 +98,7 @@
 
   const centerRows = $derived(centerTab === "pending" ? pending.rows : history.rows);
 
-  // --- connection warm-keeping ------------------------------------------------
-  // Each `p4` CLI call reconnects; the first `dirs` on a huge stream root is a
-  // ~2.7s server-side cold disk read of db.rev. Re-running it periodically keeps
-  // that cache hot so it doesn't recur mid-session.
-  let keepAliveId: number | null = null;
-  function startKeepAlive() {
-    if (keepAliveId !== null) clearInterval(keepAliveId);
-    // Doubles as a health check: if the server becomes unreachable the status
-    // flips to disconnected (and recovers automatically when it returns), so
-    // the UI never shows a stale "connected" while operations silently fail.
-    keepAliveId = window.setInterval(async () => {
-      try {
-        await p4.info(conn);
-        if (!connected) {
-          connected = true; // recovered
-          error = "";
-        }
-        if (browse.rootPath) p4.dirs(conn, browse.rootPath).catch(() => {}); // keep cache warm
-      } catch (e) {
-        if (connected) {
-          connected = false;
-          error = "Lost connection to the Perforce server. Retrying…";
-        }
-      }
-    }, 20000);
-  }
-  onDestroy(() => {
-    if (keepAliveId !== null) clearInterval(keepAliveId);
-  });
-
-  // --- connection / workspace -------------------------------------------------
-  async function connect() {
-    busy = true;
-    error = "";
-    try {
-      const info = await p4.info(conn);
-      const i = info[0] ?? {};
-      serverVersion = i.serverVersion ?? "";
-      if (!conn.user && i.userName) conn.user = i.userName;
-      // Seed the server dropdown: adopt the ambient P4PORT if none was set.
-      if (!conn.port) {
-        const env = await p4.envPort(conn).catch(() => "");
-        if (env) conn.port = env;
-      }
-      rememberServer(conn.port);
-      connected = true;
-      optionsOpen = false;
-      startKeepAlive();
-      clients = await p4.clients(conn);
-      const cn = i.clientName;
-      if (cn && cn !== "*unknown*" && clients.some((c) => c.client === cn)) {
-        conn.client = cn;
-        await selectClient();
-      }
-    } catch (e) {
-      connected = false;
-      error = String(e);
-    } finally {
-      busy = false;
-    }
-  }
-
-  async function selectClient() {
-    const tab = centerTab; // keep the user's current tab across the workspace change
-    error = "";
-    browse.reset();
-    const rec = clients.find((c) => c.client === conn.client);
-    if (!rec) return;
-    if (!rec.Stream) {
-      error = "This workspace has no stream. Depot browsing currently requires a stream client.";
-      return;
-    }
-    await browse.openWorkspace(rec.Stream, rec.Root ?? "", tab);
-  }
+  onDestroy(() => connection.stopKeepAlive());
 
   // --- pending: context/dialog glue over the `pending` store -----------------
   function onPendingContext(cl: P4Record, e: MouseEvent) {
@@ -300,35 +192,9 @@
 
   // --- Streams tab: switching reconfigures the current workspace --------------
   function onStreamContext(stream: string, e: MouseEvent) {
-    if (!connected || !conn.client) return;
+    if (!connection.connected || !conn.client) return;
     if (!stream || stream === browse.rootPath) return; // already on it
     streamCtx = { x: e.clientX, y: e.clientY, stream };
-  }
-  async function switchStream(stream: string) {
-    if (!connected || syncing) return;
-    if (
-      !(await askConfirm(
-        `${stream}\n\nThis reconfigures the workspace and syncs to that stream. Open files will block the switch — shelve or submit them first.`,
-        "Switch workspace stream",
-        "Switch",
-      ))
-    ) {
-      return;
-    }
-    syncing = true;
-    error = "";
-    notice = "";
-    try {
-      await p4.switch(conn, stream); // throws (surfaced below) if p4 refuses
-      clients = await p4.clients(conn); // pick up the client's new Stream
-      await selectClient();
-      notice = `Switched workspace to ${stream}.`;
-      window.setTimeout(() => (notice = ""), 4000);
-    } catch (e) {
-      error = String(e);
-    } finally {
-      syncing = false;
-    }
   }
 
   async function exitApp() {
@@ -338,12 +204,11 @@
 
   function showAbout() {
     const ver = appVersion ? (isRelease ? " v" + appVersion : " " + appVersion + "-dev") : "";
-    notice = `Auger${ver}${serverVersion ? " · server " + serverVersion : ""}`;
+    notice = `Auger${ver}${connection.serverVersion ? " · server " + connection.serverVersion : ""}`;
     window.setTimeout(() => (notice = ""), 6000);
   }
 
   onMount(() => {
-    servers = loadServers();
     history.init({
       conn: () => conn,
       showHistoryTab: () => (centerTab = "history"),
@@ -351,9 +216,19 @@
     });
     browse.init({
       conn: () => conn,
-      connected: () => connected,
+      connected: () => connection.connected,
       getTab: () => centerTab,
       setTab: (t) => (centerTab = t),
+    });
+    connection.init({
+      conn: () => conn,
+      getTab: () => centerTab,
+      setConnError: (m) => (error = m),
+      setNotice,
+      setOptionsOpen: (v) => (optionsOpen = v),
+      getSyncing: () => syncing,
+      setSyncing: (v) => (syncing = v),
+      askConfirm,
     });
     updates.init({
       isRelease: () => isRelease,
@@ -363,7 +238,7 @@
     });
     pending.init({
       conn: () => conn,
-      connected: () => connected,
+      connected: () => connection.connected,
       syncing: () => syncing,
       setSyncing: (v) => (syncing = v),
       setNotice,
@@ -373,7 +248,7 @@
     });
     sync.init({
       conn: () => conn,
-      connected: () => connected,
+      connected: () => connection.connected,
       busy: () => syncing || reconciling,
       setSyncing: (v) => (syncing = v),
       setReconciling: (v) => (reconciling = v),
@@ -386,7 +261,7 @@
       histSubject: () => history.subject,
       histMode: () => history.mode,
     });
-    connect();
+    connection.connect();
     getVersion()
       .then((v) => (appVersion = v))
       .catch(() => {});
@@ -401,11 +276,11 @@
 
 <div class="app">
   <MenuBar
-    {connected}
+    connected={connection.connected}
     refreshing={browse.refreshing}
     {syncing}
     onOptions={() => (optionsOpen = true)}
-    onReconnect={connect}
+    onReconnect={() => connection.connect()}
     onExit={exitApp}
     onRefresh={() => browse.refresh()}
     onSync={() => sync.globalSync()}
@@ -414,14 +289,14 @@
   />
   <Toolbar
     bind:conn
-    {clients}
-    {servers}
-    {connected}
+    clients={connection.clients}
+    servers={connection.servers}
+    connected={connection.connected}
     refreshing={browse.refreshing}
     {syncing}
     {reconciling}
-    onClientChange={selectClient}
-    onServerChange={switchServerTo}
+    onClientChange={() => connection.selectClient()}
+    onServerChange={(p) => connection.switchServerTo(p)}
     onAddServer={() => (addServerOpen = true)}
     onServerContext={(e) => {
       if (conn.port) serverCtx = { x: e.clientX, y: e.clientY };
@@ -534,11 +409,23 @@
     </section>
   </div>
 
-  <StatusBar {connected} {serverVersion} {appVersion} {isRelease} {busy} onConnect={connect} />
+  <StatusBar
+    connected={connection.connected}
+    serverVersion={connection.serverVersion}
+    {appVersion}
+    {isRelease}
+    busy={connection.busy}
+    onConnect={() => connection.connect()}
+  />
 </div>
 
 {#if optionsOpen}
-  <OptionsDialog bind:conn {busy} onConnect={connect} onClose={() => (optionsOpen = false)} />
+  <OptionsDialog
+    bind:conn
+    busy={connection.busy}
+    onConnect={() => connection.connect()}
+    onClose={() => (optionsOpen = false)}
+  />
 {/if}
 
 {#if confirmState}
@@ -594,7 +481,7 @@
   <ContextMenu
     x={streamCtx.x}
     y={streamCtx.y}
-    items={[{ label: `Switch workspace to ${stream}`, action: () => switchStream(stream) }]}
+    items={[{ label: `Switch workspace to ${stream}`, action: () => connection.switchStream(stream) }]}
     onClose={() => (streamCtx = null)}
   />
 {/if}
@@ -642,7 +529,7 @@
   <ContextMenu
     x={serverCtx.x}
     y={serverCtx.y}
-    items={[{ label: `Forget "${conn.port}"`, action: () => forgetServer(conn.port) }]}
+    items={[{ label: `Forget "${conn.port}"`, action: () => connection.forgetServer(conn.port) }]}
     onClose={() => (serverCtx = null)}
   />
 {/if}
@@ -653,7 +540,10 @@
     label="Server (P4PORT)"
     placeholder="ssl:host:1666"
     okLabel="Connect"
-    onSubmit={submitAddServer}
+    onSubmit={(port) => {
+      addServerOpen = false;
+      connection.addAndSwitch(port);
+    }}
     onCancel={() => (addServerOpen = false)}
   />
 {/if}
