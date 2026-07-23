@@ -161,6 +161,7 @@
       {#each rows as r (r.change)}
         {@const s = cls[r.change]}
         {@const rv = reviews[r.change]}
+        {@const empty = !!s && !s.loading && s.local.length === 0 && s.shelved.length === 0}
         <button
           class="cl"
           class:dropinto={dragOver === r.change}
@@ -182,7 +183,7 @@
             dragOver = null;
           }}
         >
-          <span class="tw">{s?.open ? "▾" : "▸"}</span>
+          <span class="tw">{empty ? "" : s?.open ? "▾" : "▸"}</span>
           <span class="cnum mono">{r.change === "default" ? "Default" : "@" + r.change}</span>
           <span class="desc" title={r.desc}>
             {r.change === "default" ? "" : firstLine(r.desc) || "(no description)"}
@@ -198,11 +199,9 @@
           <span class="user dim">{r.user}</span>
           <span class="date dim">{fmtTime(r.time)}</span>
         </button>
-        {#if s?.open}
+        {#if s?.open && !empty}
           {#if s.loading}
             <div class="finfo dim">Loading files…</div>
-          {:else if s.local.length === 0 && s.shelved.length === 0}
-            <div class="finfo dim">No files.</div>
           {:else}
             {#if s.shelved.length}
               <button class="subfolder" onclick={() => toggleShelved(r.change)}>
