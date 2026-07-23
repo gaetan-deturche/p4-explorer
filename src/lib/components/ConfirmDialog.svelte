@@ -40,7 +40,7 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    z-index: 70;
+    z-index: 120; /* above every other dialog — confirms are raised from within them */
   }
   .backdrop {
     position: absolute;
