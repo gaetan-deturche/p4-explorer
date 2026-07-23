@@ -1,6 +1,5 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
-  import { listen } from "@tauri-apps/api/event";
   import { getVersion } from "@tauri-apps/api/app";
   import { openUrl } from "@tauri-apps/plugin-opener";
   import {
@@ -26,6 +25,7 @@
     type HistEntry,
   } from "$lib/cache";
   import { updates } from "$lib/updates.svelte";
+  import { sync } from "$lib/sync.svelte";
   import MenuBar from "$lib/components/MenuBar.svelte";
   import Toolbar from "$lib/components/Toolbar.svelte";
   import StatusBar from "$lib/components/StatusBar.svelte";
@@ -79,141 +79,8 @@
     window.setTimeout(() => (error = ""), ms);
   }
 
-  // Live sync progress dialog.
-  let syncCancelled = false;
-  let syncProgress = $state<{
-    title: string;
-    count: number;
-    current: string;
-    issues: number;
-    issueLine: string;
-    phase: "running" | "error";
-    message: string;
-  } | null>(null);
-  // Full per-file error report shown after a sync that had issues.
-  let syncErrorItems: { line: string; file: string | null }[] = [];
-  let syncErrors = $state<{
-    title: string;
-    items: { line: string; file: string | null }[];
-    path: string | undefined;
-  } | null>(null);
-  let busyFile = $state<string | null>(null); // file being fixed ("*" = retry-all)
-
-  // Run a streaming sync with a live progress dialog (live file count).
-  // Auto-closes on success; keeps the dialog open on error; cancellable.
-  async function runSyncWithProgress(title: string, path: string | undefined): Promise<number | null> {
-    syncCancelled = false;
-    syncErrorItems = [];
-    syncProgress = { title, count: 0, current: "", issues: 0, issueLine: "", phase: "running", message: "" };
-    const un1 = await listen<{ count: number; line: string }>("sync-progress", (e) => {
-      if (syncProgress) {
-        syncProgress.count = e.payload.count;
-        syncProgress.current = e.payload.line;
-      }
-    });
-    const un2 = await listen<{ count: number; line: string; file: string | null }>("sync-issue", (e) => {
-      syncErrorItems.push({ line: e.payload.line, file: e.payload.file });
-      if (syncProgress) {
-        syncProgress.issues = e.payload.count;
-        syncProgress.issueLine = e.payload.line;
-      }
-    });
-    try {
-      const n = await p4.syncStream(conn, path);
-      syncProgress = null; // close the progress dialog
-      if (syncErrorItems.length > 0) {
-        // Completed, but some files errored — show the full report + Fix.
-        syncErrors = { title, items: [...syncErrorItems], path };
-      } else {
-        notice = n > 0 ? `Synced ${n} file${n === 1 ? "" : "s"}.` : "Already up to date.";
-        window.setTimeout(() => (notice = ""), 4000);
-      }
-      return n;
-    } catch (e) {
-      if (syncCancelled) {
-        syncProgress = null;
-        notice = "Sync cancelled.";
-        window.setTimeout(() => (notice = ""), 4000);
-        return null;
-      }
-      if (syncProgress) {
-        syncProgress.phase = "error";
-        syncProgress.message = String(e);
-      }
-      return null;
-    } finally {
-      un1();
-      un2();
-    }
-  }
-  function cancelSync() {
-    syncCancelled = true;
-    p4.syncCancel().catch(() => {});
-  }
-
-  function syncErrorTargets(): string[] {
-    if (!syncErrors) return [];
-    const files = Array.from(
-      new Set(syncErrors.items.map((i) => i.file).filter((f): f is string => !!f)),
-    );
-    return files.length ? files : [syncErrors.path ?? (rootPath ? `${rootPath}/...` : "...")];
-  }
-  // Fix a single errored file: plain re-sync, or force (confirmed) to overwrite.
-  async function resyncFile(file: string, force: boolean) {
-    if (!syncErrors || busyFile) return;
-    if (
-      force &&
-      !(await askConfirm(
-        `${file}\n\nForce-overwrite with the depot version? Local changes will be DISCARDED.`,
-        "Force overwrite",
-        "Overwrite",
-      ))
-    ) {
-      return;
-    }
-    busyFile = file;
-    error = "";
-    try {
-      await p4.resync(conn, [file], force);
-      const rest = syncErrors.items.filter((i) => i.file !== file);
-      syncErrors = rest.length ? { ...syncErrors, items: rest } : null;
-      await refresh();
-      loadPending();
-    } catch (e) {
-      error = String(e);
-    } finally {
-      busyFile = null;
-    }
-  }
-  // Retry (force optional) all affected files at once.
-  async function resyncAllErrors(force: boolean) {
-    if (!syncErrors || busyFile) return;
-    if (
-      force &&
-      !(await askConfirm(
-        "Force-overwrite ALL affected files with the depot version?\nLocal changes will be DISCARDED. Conflicts must be resolved separately (p4 resolve / P4V).",
-        "Force overwrite all",
-        "Overwrite all",
-      ))
-    ) {
-      return;
-    }
-    const targets = syncErrorTargets();
-    busyFile = "*";
-    error = "";
-    try {
-      await p4.resync(conn, targets, force);
-      syncErrors = null;
-      notice = force ? "Force re-synced the affected files." : "Re-synced the affected files.";
-      window.setTimeout(() => (notice = ""), 4000);
-      await refresh();
-      loadPending();
-    } catch (e) {
-      error = String(e);
-    } finally {
-      busyFile = null;
-    }
-  }
+  // Sync feature (progress, per-file error report, reconcile, update-to-CL)
+  // lives in $lib/sync.svelte.ts — wired via sync.init() in onMount.
   let indexing = $state(false);
   let indexCount = $state(0);
 
@@ -942,88 +809,10 @@
     }
   }
 
-  async function globalSync() {
-    if (!connected || syncing) return;
-    if (
-      !(await askConfirm(
-        "Sync the entire workspace to the latest revision?\nThis may download a lot of files.",
-        "Global sync",
-        "Sync",
-      ))
-    ) {
-      return;
-    }
-    syncing = true;
-    error = "";
-    notice = "";
-    try {
-      const n = await runSyncWithProgress("Global sync", undefined);
-      if (n !== null) await refresh(); // have-revs changed → update markers
-    } finally {
-      syncing = false;
-    }
-  }
-
-  // Reconcile offline work: open files changed outside Perforce into Default.
-  async function reconcileWorkspace() {
-    if (!connected || syncing || refreshing || reconciling || !rootPath) return;
-    if (
-      !(await askConfirm(
-        `${rootPath}\n\nReconcile offline work? This opens files changed, added, or deleted outside Perforce into the default changelist.`,
-        "Reconcile offline work",
-        "Reconcile",
-      ))
-    ) {
-      return;
-    }
-    reconciling = true;
-    error = "";
-    notice = "";
-    try {
-      const rows = await p4.reconcile(conn, rootPath);
-      const n = rows.length;
-      notice = n > 0 ? `Reconciled ${n} file${n === 1 ? "" : "s"} into the default changelist.` : "Nothing to reconcile.";
-      window.setTimeout(() => (notice = ""), 5000);
-      await refresh();
-      loadPending();
-    } catch (e) {
-      error = String(e);
-    } finally {
-      reconciling = false;
-    }
-  }
-
   // --- history row context menu: "update to this changelist" ----------------
   function openHistContext(change: string, e: MouseEvent) {
     if (!change || centerTab !== "history") return;
     ctxMenu = { x: e.clientX, y: e.clientY, change };
-  }
-
-  // Sync the currently-viewed path (folder or file) to a changelist — forward
-  // or backward — like TortoiseSVN's "update to revision".
-  async function updateToChange(change: string) {
-    if (!connected || syncing || !histSubject) return;
-    const spec =
-      histMode === "file" ? `${histSubject}@${change}` : `${histSubject}/...@${change}`;
-    const label = histMode === "file" ? histSubject : `${histSubject}/...`;
-    if (
-      !(await askConfirm(
-        `${label}\n\nFiles will be synced to their state at @${change} (this can move backward).`,
-        `Update to changelist @${change}`,
-        "Update",
-      ))
-    ) {
-      return;
-    }
-    syncing = true;
-    error = "";
-    notice = "";
-    try {
-      const n = await runSyncWithProgress(`Update to @${change}`, spec);
-      if (n !== null) await refresh();
-    } finally {
-      syncing = false;
-    }
   }
 
   // --- Streams tab ------------------------------------------------------------
@@ -1133,6 +922,21 @@
       notify: (m) => setNotice(m),
       warn: (m) => setError(m),
     });
+    sync.init({
+      conn: () => conn,
+      connected: () => connected,
+      busy: () => syncing || reconciling,
+      setSyncing: (v) => (syncing = v),
+      setReconciling: (v) => (reconciling = v),
+      setNotice,
+      setError,
+      askConfirm,
+      refresh,
+      loadPending,
+      rootPath: () => rootPath,
+      histSubject: () => histSubject,
+      histMode: () => histMode,
+    });
     connect();
     getVersion()
       .then((v) => (appVersion = v))
@@ -1155,7 +959,7 @@
     onReconnect={connect}
     onExit={exitApp}
     onRefresh={refresh}
-    onSync={globalSync}
+    onSync={() => sync.globalSync()}
     onAbout={showAbout}
     onCheckUpdates={() => updates.check(false)}
   />
@@ -1174,8 +978,8 @@
       if (conn.port) serverCtx = { x: e.clientX, y: e.clientY };
     }}
     onRefresh={refresh}
-    onSync={globalSync}
-    onReconcile={reconcileWorkspace}
+    onSync={() => sync.globalSync()}
+    onReconcile={() => sync.reconcile()}
   />
 
   {#if error}
@@ -1296,29 +1100,29 @@
   />
 {/if}
 
-{#if syncProgress}
+{#if sync.progress}
   <SyncProgressDialog
-    title={syncProgress.title}
-    count={syncProgress.count}
-    current={syncProgress.current}
-    issues={syncProgress.issues}
-    issueLine={syncProgress.issueLine}
-    phase={syncProgress.phase}
-    message={syncProgress.message}
-    onCancel={cancelSync}
-    onClose={() => (syncProgress = null)}
+    title={sync.progress.title}
+    count={sync.progress.count}
+    current={sync.progress.current}
+    issues={sync.progress.issues}
+    issueLine={sync.progress.issueLine}
+    phase={sync.progress.phase}
+    message={sync.progress.message}
+    onCancel={() => sync.cancel()}
+    onClose={() => sync.dismissProgress()}
   />
 {/if}
 
-{#if syncErrors}
+{#if sync.errors}
   <SyncErrorDialog
-    title={syncErrors.title}
-    items={syncErrors.items}
-    {busyFile}
-    onFixFile={resyncFile}
-    onRetryAll={() => resyncAllErrors(false)}
-    onForceAll={() => resyncAllErrors(true)}
-    onClose={() => (syncErrors = null)}
+    title={sync.errors.title}
+    items={sync.errors.items}
+    busyFile={sync.busyFile}
+    onFixFile={(f, force) => sync.fixFile(f, force)}
+    onRetryAll={() => sync.fixAll(false)}
+    onForceAll={() => sync.fixAll(true)}
+    onClose={() => sync.dismissErrors()}
   />
 {/if}
 
@@ -1328,7 +1132,7 @@
     x={ctxMenu.x}
     y={ctxMenu.y}
     items={[
-      { label: `Update to changelist @${change}`, action: () => updateToChange(change) },
+      { label: `Update to changelist @${change}`, action: () => sync.updateToChange(change) },
     ]}
     onClose={() => (ctxMenu = null)}
   />
