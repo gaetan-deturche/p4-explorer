@@ -54,6 +54,7 @@ pub fn run() {
             commands::p4_reopen,
             commands::p4_new_changelist,
             commands::swarm_url,
+            commands::swarm_review,
             commands::p4_streams,
             commands::p4_depots,
             commands::p4_switch,

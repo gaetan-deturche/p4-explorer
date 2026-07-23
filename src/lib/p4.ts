@@ -29,6 +29,13 @@ export interface LocalDir {
   files: string[];
 }
 
+/** A changelist's Swarm review status (id 0 = requested, not yet created). */
+export interface ReviewInfo {
+  id: number;
+  state: string; // needsReview | needsRevision | approved | rejected | archived | requested
+  stateLabel: string;
+}
+
 /** List a local filesystem directory (names only). */
 export function listLocalDir(path: string): Promise<LocalDir> {
   return invoke<LocalDir>("list_local_dir", { path });
@@ -82,6 +89,8 @@ export const p4 = {
   requestReview: (conn: P4Conn, change: string) =>
     invoke<void>("p4_request_review", { conn, change }),
   swarmUrl: (conn: P4Conn) => invoke<string>("swarm_url", { conn }),
+  swarmReview: (conn: P4Conn, change: string) =>
+    invoke<ReviewInfo | null>("swarm_review", { conn, change }),
   opened: (conn: P4Conn, change: string) => call("p4_opened", { conn, change }),
   diffLocal: (conn: P4Conn, depotFile: string) =>
     invoke<string>("p4_diff_local", { conn, depotFile }),

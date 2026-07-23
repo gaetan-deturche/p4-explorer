@@ -107,6 +107,37 @@ pub fn run_raw_stdin(conn: &P4Conn, args: &[&str], input: &str) -> Result<String
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// The cached P4 ticket for this connection's user (`p4 tickets`), if any.
+/// Used as the password for Swarm REST Basic auth (`user:ticket`). Returns None
+/// when not logged in. Output lines look like: `<address> (<user>) <ticket>`.
+pub fn ticket(conn: &P4Conn) -> Option<String> {
+    let out = run_raw(conn, &["tickets"]).ok()?;
+    let want_user = conn.user.trim();
+    let port_tail = conn.port.trim().trim_start_matches("ssl:");
+    let mut fallback: Option<String> = None;
+    for line in out.lines() {
+        let line = line.trim();
+        let Some((addr, after)) = line.split_once(" (") else { continue };
+        let Some((user, tick)) = after.split_once(") ") else { continue };
+        let tick = tick.trim();
+        if tick.is_empty() {
+            continue;
+        }
+        if !want_user.is_empty() && user.trim() != want_user {
+            continue;
+        }
+        // User matches (or no filter). Prefer the ticket whose address matches
+        // the connection's port; otherwise keep the first as a fallback.
+        if !port_tail.is_empty() && addr.trim().contains(port_tail) {
+            return Some(tick.to_string());
+        }
+        if fallback.is_none() {
+            fallback = Some(tick.to_string());
+        }
+    }
+    fallback
+}
+
 /// Like `run_raw`, but with P4DIFF cleared so `p4 diff` writes the unified diff
 /// to stdout instead of launching the external GUI diff tool.
 pub fn run_raw_stdout_diff(conn: &P4Conn, args: &[&str]) -> Result<String, String> {

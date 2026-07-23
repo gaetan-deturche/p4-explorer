@@ -31,4 +31,7 @@ tauri-plugin-process = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
+# Swarm REST API for review status. native-tls → schannel on Windows, so it
+# trusts the corporate CA in the Windows cert store (unlike bundled rustls roots).
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "native-tls"] }
 
