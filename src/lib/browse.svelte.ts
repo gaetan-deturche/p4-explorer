@@ -17,7 +17,7 @@ import { history } from "$lib/history.svelte";
 import { pending } from "$lib/pending.svelte";
 import type { ViewState } from "$lib/nav";
 
-type Tab = "history" | "pending" | "streams" | "repo";
+type Tab = "history" | "pending" | "streams" | "repo" | "log";
 type Hooks = {
   conn: () => P4Conn;
   connected: () => boolean;

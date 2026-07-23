@@ -8,7 +8,16 @@
   import { history } from "$lib/history.svelte";
   import { browse } from "$lib/browse.svelte";
   import { connection } from "$lib/connection.svelte";
-  import { loadLastServer, loadUserFor, loadCharsetFor, saveView } from "$lib/nav";
+  import { cmdlog } from "$lib/cmdlog.svelte";
+  import {
+    loadLastServer,
+    loadUserFor,
+    loadCharsetFor,
+    saveView,
+    loadViews,
+    saveViews,
+    type Views,
+  } from "$lib/nav";
   import MenuBar from "$lib/components/MenuBar.svelte";
   import Toolbar from "$lib/components/Toolbar.svelte";
   import StatusBar from "$lib/components/StatusBar.svelte";
@@ -16,12 +25,14 @@
   import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
   import InputDialog from "$lib/components/InputDialog.svelte";
   import LoginDialog from "$lib/components/LoginDialog.svelte";
+  import ApprovalDialog from "$lib/components/ApprovalDialog.svelte";
   import SyncProgressDialog from "$lib/components/SyncProgressDialog.svelte";
   import SyncErrorDialog from "$lib/components/SyncErrorDialog.svelte";
   import UpdateDialog from "$lib/components/UpdateDialog.svelte";
   import DepotTree from "$lib/components/DepotTree.svelte";
   import HistoryTable from "$lib/components/HistoryTable.svelte";
   import PendingList from "$lib/components/PendingList.svelte";
+  import CommandLog from "$lib/components/CommandLog.svelte";
   import StreamsBrowser from "$lib/components/StreamsBrowser.svelte";
   import ChangeDetails from "$lib/components/ChangeDetails.svelte";
   import ContextMenu from "$lib/components/ContextMenu.svelte";
@@ -112,9 +123,52 @@
 
   // Center tab. History/details pane lives in $lib/history.svelte.ts; the depot
   // tree, streams/repo tabs and index live in $lib/browse.svelte.ts.
-  let centerTab = $state<"history" | "pending" | "streams" | "repo">("pending");
+  let centerTab = $state<"history" | "pending" | "streams" | "repo" | "log">("pending");
 
   const centerRows = $derived(centerTab === "pending" ? pending.rows : history.rows);
+
+  // --- closable views (Depot pane + center tabs), persisted; re-shown via the
+  //     View menu. Depot and Streams are hidden by default.
+  let views = $state<Views>(loadViews());
+  $effect(() => saveViews(views));
+  const TABS: { key: "history" | "pending" | "streams" | "repo" | "log"; label: string }[] = [
+    { key: "history", label: "History" },
+    { key: "pending", label: "Pending" },
+    { key: "streams", label: "Streams" },
+    { key: "repo", label: "Depot" },
+    { key: "log", label: "Commands" },
+  ];
+  // Show a center tab (and load its data). History uses the current selection.
+  function showTab(key: (typeof TABS)[number]["key"]) {
+    centerTab = key;
+    if (key === "pending") pending.load();
+    else if (key === "streams") browse.loadStreams();
+    else if (key === "repo") browse.openRepo();
+  }
+  // Keep centerTab on a visible tab; if the active one was closed, pick another.
+  $effect(() => {
+    if (!views[centerTab]) {
+      const next = TABS.find((t) => views[t.key]);
+      if (next) centerTab = next.key;
+    }
+  });
+  function closeTab(key: (typeof TABS)[number]["key"]) {
+    views[key] = false;
+    if (centerTab === key) {
+      const next = TABS.find((t) => views[t.key]);
+      if (next) centerTab = next.key;
+    }
+  }
+  // Toggle a view from the View menu; re-showing a center tab focuses it.
+  function toggleView(key: keyof Views) {
+    if (views[key]) {
+      if (key === "files") views.files = false;
+      else closeTab(key);
+    } else {
+      views[key] = true;
+      if (key !== "files") showTab(key as (typeof TABS)[number]["key"]);
+    }
+  }
 
   // Persist the current workspace's view (tab + selection) on every change, so a
   // restart / workspace switch returns here. selectClient reads this back before
@@ -253,6 +307,7 @@
   }
 
   onMount(() => {
+    cmdlog.start(); // record p4 commands for the Commands view
     history.init({
       conn: () => conn,
       setNotice,
@@ -331,11 +386,13 @@
     connected={connection.connected}
     refreshing={browse.refreshing}
     {syncing}
+    {views}
     onOptions={() => (optionsOpen = true)}
     onReconnect={() => connection.connect()}
     onExit={exitApp}
     onRefresh={() => browse.refresh()}
     onSync={() => sync.globalSync()}
+    onToggleView={toggleView}
     onAbout={showAbout}
     onCheckUpdates={() => updates.check(false)}
   />
@@ -367,38 +424,51 @@
   {/if}
 
   <div class="cols">
-    <section class="col left" style="width:{leftW}px">
-      <DepotTree
-        root={browse.tree}
-        selectedPath={browse.selectedTreePath}
-        indexing={browse.indexing}
-        onSelect={(n) => browse.selectNode(n)}
-        onExpand={(n) => browse.expandNode(n)}
-        onSearch={(t) => browse.searchDepot(t)}
-        onOpenResult={(f) => browse.openResult(f)}
-        onContext={(n, e) => onTreeContext(n.path, n.isDir, e)}
-      />
-    </section>
+    {#if views.files}
+      <section class="col left" style="width:{leftW}px">
+        <div class="panehdr">
+          <span>Files</span>
+          <button class="paneclose" title="Close view" onclick={() => (views.files = false)}>✕</button>
+        </div>
+        <DepotTree
+          root={browse.tree}
+          selectedPath={browse.selectedTreePath}
+          indexing={browse.indexing}
+          onSelect={(n) => browse.selectNode(n)}
+          onExpand={(n) => browse.expandNode(n)}
+          onSearch={(t) => browse.searchDepot(t)}
+          onOpenResult={(f) => browse.openResult(f)}
+          onContext={(n, e) => onTreeContext(n.path, n.isDir, e)}
+        />
+      </section>
 
-    <div
-      class="gutter"
-      role="separator"
-      aria-orientation="vertical"
-      onpointerdown={(e) => startResize(e, "left")}
-    ></div>
+      <div
+        class="gutter"
+        role="separator"
+        aria-orientation="vertical"
+        onpointerdown={(e) => startResize(e, "left")}
+      ></div>
+    {/if}
 
     <section class="col center">
       <div class="tabs">
-        <button class:active={centerTab === "history"} onclick={() => (centerTab = "history")}>
-          History
-        </button>
-        <button class:active={centerTab === "pending"} onclick={openPending}>Pending</button>
-        <button class:active={centerTab === "streams"} onclick={() => browse.loadStreams()}>
-          Streams
-        </button>
-        <button class:active={centerTab === "repo"} onclick={() => browse.openRepo()}>Repo</button>
+        {#each TABS.filter((t) => views[t.key]) as t (t.key)}
+          <div class="tab" class:active={centerTab === t.key}>
+            <button class="tablabel" onclick={() => showTab(t.key)}>{t.label}</button>
+            <button
+              class="tabclose"
+              title="Close view"
+              onclick={(e) => {
+                e.stopPropagation();
+                closeTab(t.key);
+              }}>✕</button
+            >
+          </div>
+        {/each}
       </div>
-      {#if centerTab === "streams"}
+      {#if !TABS.some((t) => views[t.key])}
+        <div class="msg dim">All views are closed — reopen one from the View menu.</div>
+      {:else if centerTab === "streams"}
         <StreamsBrowser
           rows={browse.streamRows}
           loading={browse.streamsLoading}
@@ -412,6 +482,8 @@
           onSelect={(n) => browse.repoSelect(n)}
           onExpand={(n) => browse.repoExpand(n)}
         />
+      {:else if centerTab === "log"}
+        <CommandLog entries={cmdlog.entries} onClear={() => cmdlog.clear()} />
       {:else if centerTab === "pending"}
         <PendingList
           bind:this={pendingList}
@@ -635,6 +707,8 @@
   />
 {/if}
 
+<ApprovalDialog />
+
 {#if updates.state}
   <UpdateDialog
     version={updates.state.version}
@@ -717,25 +791,76 @@
   }
   .tabs {
     display: flex;
-    gap: 4px;
+    gap: 2px;
     padding: 6px 8px 0;
     background: var(--bg-panel);
     border-bottom: 1px solid var(--border);
   }
-  .tabs button {
-    border: none;
+  .tab {
+    display: flex;
+    align-items: center;
     border-bottom: 2px solid transparent;
+  }
+  .tab.active {
+    border-bottom-color: var(--accent);
+  }
+  .tablabel {
+    border: none;
     border-radius: 0;
     background: none;
-    padding: 4px 12px;
+    padding: 4px 2px 4px 12px;
     color: var(--text-dim);
   }
-  .tabs button.active {
+  .tab.active .tablabel {
     color: var(--text);
-    border-bottom-color: var(--accent);
+  }
+  .tabclose {
+    border: none;
+    background: none;
+    border-radius: 4px;
+    padding: 0 5px;
+    margin-right: 2px;
+    color: var(--text-dim);
+    font-size: 10px;
+    line-height: 1;
+    cursor: pointer;
+  }
+  .tabclose:hover {
+    color: var(--text);
+    background: var(--bg-hover);
+  }
+  .panehdr {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 4px 6px 4px 10px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-dim);
+    background: var(--bg-panel);
+    border-bottom: 1px solid var(--border);
+  }
+  .paneclose {
+    border: none;
+    background: none;
+    border-radius: 4px;
+    padding: 0 6px;
+    color: var(--text-dim);
+    font-size: 10px;
+    cursor: pointer;
+  }
+  .paneclose:hover {
+    color: var(--text);
+    background: var(--bg-hover);
   }
   .center :global(.panel) {
     flex: 1;
     min-height: 0;
+  }
+  .msg {
+    padding: 16px;
+    font-size: 12px;
   }
 </style>

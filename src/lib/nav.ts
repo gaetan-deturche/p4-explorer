@@ -4,9 +4,43 @@
 //! workspace's last view when switching back to it.
 
 export interface ViewState {
-  tab: "history" | "pending" | "streams" | "repo";
+  tab: "history" | "pending" | "streams" | "repo" | "log";
   treePath: string; // selected depot path (tree highlight + history subject)
   histMode: "folder" | "file";
+}
+
+/** Which views (panes/tabs) are shown. `files` is the left workspace tree; the
+ *  Streams and Depot (all-depots, `repo`) tabs start hidden. */
+export interface Views {
+  files: boolean;
+  history: boolean;
+  pending: boolean;
+  streams: boolean;
+  repo: boolean; // the all-depots browser, labelled "Depot"
+  log: boolean; // the p4-command log ("Commands")
+}
+const DEFAULT_VIEWS: Views = {
+  files: true,
+  history: true,
+  pending: true,
+  streams: false,
+  repo: false,
+  log: false,
+};
+const VIEWS = "nav:views:v2"; // v2: left pane is `files`; `repo` (Depot tab) hidden
+export function loadViews(): Views {
+  const raw = get(VIEWS);
+  if (raw) {
+    try {
+      return { ...DEFAULT_VIEWS, ...JSON.parse(raw) };
+    } catch {
+      /* corrupt — fall through to defaults */
+    }
+  }
+  return { ...DEFAULT_VIEWS };
+}
+export function saveViews(v: Views): void {
+  set(VIEWS, JSON.stringify(v));
 }
 
 const LAST_SERVER = "nav:lastServer";

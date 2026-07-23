@@ -1,29 +1,41 @@
 <script lang="ts">
+  import type { Views } from "$lib/nav";
+
   let {
     connected,
     refreshing,
     syncing,
+    views,
     onOptions,
     onReconnect,
     onExit,
     onRefresh,
     onSync,
+    onToggleView,
     onAbout,
     onCheckUpdates,
   }: {
     connected: boolean;
     refreshing: boolean;
     syncing: boolean;
+    views: Views;
     onOptions: () => void;
     onReconnect: () => void;
     onExit: () => void;
     onRefresh: () => void;
     onSync: () => void;
+    onToggleView: (key: keyof Views) => void;
     onAbout: () => void;
     onCheckUpdates: () => void;
   } = $props();
 
-  type Item = { label: string; action?: () => void; disabled?: boolean; sep?: boolean };
+  type Item = {
+    label: string;
+    action?: () => void;
+    disabled?: boolean;
+    sep?: boolean;
+    checked?: boolean;
+  };
 
   let open = $state<string | null>(null);
   const busy = $derived(!connected || refreshing || syncing);
@@ -43,6 +55,17 @@
       items: [
         { label: "Refresh", action: onRefresh, disabled: busy },
         { label: "Sync workspace…", action: onSync, disabled: busy },
+      ],
+    },
+    {
+      name: "View",
+      items: [
+        { label: "Files", action: () => onToggleView("files"), checked: views.files },
+        { label: "History", action: () => onToggleView("history"), checked: views.history },
+        { label: "Pending", action: () => onToggleView("pending"), checked: views.pending },
+        { label: "Streams", action: () => onToggleView("streams"), checked: views.streams },
+        { label: "Depot", action: () => onToggleView("repo"), checked: views.repo },
+        { label: "Commands", action: () => onToggleView("log"), checked: views.log },
       ],
     },
     {
@@ -86,7 +109,9 @@
             {#if it.sep}
               <div class="msep"></div>
             {:else}
-              <button class="item" disabled={it.disabled} onclick={() => run(it)}>{it.label}</button>
+              <button class="item" disabled={it.disabled} onclick={() => run(it)}>
+                {#if it.checked !== undefined}<span class="chk">{it.checked ? "✓" : ""}</span>{/if}{it.label}
+              </button>
             {/if}
           {/each}
         </div>
@@ -158,6 +183,11 @@
   .item:disabled {
     color: var(--text-dim);
     opacity: 0.6;
+  }
+  .chk {
+    display: inline-block;
+    width: 1.1em;
+    color: var(--accent);
   }
   .msep {
     height: 1px;

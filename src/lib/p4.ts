@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { safe } from "$lib/safe.svelte";
 
 /** A tagged p4 output record: field -> value (values are strings from p4). */
 export type P4Record = Record<string, string>;
@@ -52,8 +53,13 @@ export function isReleaseBuild(): Promise<boolean> {
   return invoke<boolean>("is_release_build");
 }
 
+// Gate every backend call through safe mode (the allow decision + labels live in
+// $lib/safe + $lib/p4cmds; reads and app-local calls pass straight through).
+function g<T>(cmd: string, args: Record<string, unknown> = {}): Promise<T> {
+  return safe.guard(cmd, () => invoke<T>(cmd, args));
+}
 async function call(cmd: string, args: Record<string, unknown>): Promise<P4Record[]> {
-  return await invoke<P4Record[]>(cmd, args);
+  return g<P4Record[]>(cmd, args);
 }
 
 export const p4 = {
@@ -73,19 +79,19 @@ export const p4 = {
   resync: (conn: P4Conn, files: string[], force: boolean) =>
     call("p4_resync", { conn, files, force }),
   syncStream: (conn: P4Conn, path?: string) =>
-    invoke<number>("p4_sync_stream", { conn, path: path ?? null }),
-  syncCancel: () => invoke<void>("sync_cancel"),
+    g<number>("p4_sync_stream", { conn, path: path ?? null }),
+  syncCancel: () => g<void>("sync_cancel"),
   search: (conn: P4Conn, root: string, term: string, max = 300) =>
     call("p4_search", { conn, root, term, max }),
   diff2: (conn: P4Conn, depotFile: string, rev: number) =>
-    invoke<string>("p4_diff2", { conn, depotFile, rev }),
+    g<string>("p4_diff2", { conn, depotFile, rev }),
   openDiff: (conn: P4Conn, depotFile: string, rev: number) =>
-    invoke<void>("open_diff", { conn, depotFile, rev }),
+    g<void>("open_diff", { conn, depotFile, rev }),
   describeShelved: (conn: P4Conn, change: string) => call("p4_describe_shelved", { conn, change }),
   diffShelved: (conn: P4Conn, depotFile: string, rev: number, change: string) =>
-    invoke<string>("p4_diff_shelved", { conn, depotFile, rev, change }),
+    g<string>("p4_diff_shelved", { conn, depotFile, rev, change }),
   openDiffShelved: (conn: P4Conn, depotFile: string, rev: number, change: string) =>
-    invoke<void>("open_diff_shelved", { conn, depotFile, rev, change }),
+    g<void>("open_diff_shelved", { conn, depotFile, rev, change }),
   streams: (conn: P4Conn) => call("p4_streams", { conn }),
   depots: (conn: P4Conn) => call("p4_depots", { conn }),
   switch: (conn: P4Conn, stream: string) => call("p4_switch", { conn, stream }),
@@ -93,27 +99,25 @@ export const p4 = {
   shelveDelete: (conn: P4Conn, change: string) => call("p4_shelve_delete", { conn, change }),
   shelveUpdate: (conn: P4Conn, change: string) => call("p4_shelve", { conn, change }),
   requestReview: (conn: P4Conn, change: string) =>
-    invoke<void>("p4_request_review", { conn, change }),
-  swarmUrl: (conn: P4Conn) => invoke<string>("swarm_url", { conn }),
+    g<void>("p4_request_review", { conn, change }),
+  swarmUrl: (conn: P4Conn) => g<string>("swarm_url", { conn }),
   swarmReview: (conn: P4Conn, change: string) =>
-    invoke<ReviewInfo | null>("swarm_review", { conn, change }),
-  loginStatus: (conn: P4Conn) => invoke<boolean>("p4_login_status", { conn }),
-  login: (conn: P4Conn, password: string) => invoke<void>("p4_login", { conn, password }),
-  trust: (conn: P4Conn) => invoke<void>("p4_trust", { conn }),
+    g<ReviewInfo | null>("swarm_review", { conn, change }),
+  loginStatus: (conn: P4Conn) => g<boolean>("p4_login_status", { conn }),
+  login: (conn: P4Conn, password: string) => g<void>("p4_login", { conn, password }),
+  trust: (conn: P4Conn) => g<void>("p4_trust", { conn }),
   opened: (conn: P4Conn, change: string) => call("p4_opened", { conn, change }),
-  diffLocal: (conn: P4Conn, depotFile: string) =>
-    invoke<string>("p4_diff_local", { conn, depotFile }),
-  openDiffLocal: (conn: P4Conn, depotFile: string) =>
-    invoke<void>("open_diff_local", { conn, depotFile }),
+  diffLocal: (conn: P4Conn, depotFile: string) => g<string>("p4_diff_local", { conn, depotFile }),
+  openDiffLocal: (conn: P4Conn, depotFile: string) => g<void>("open_diff_local", { conn, depotFile }),
   revert: (conn: P4Conn, depotFile: string) => call("p4_revert", { conn, depotFile }),
   revertKeep: (conn: P4Conn, depotFile: string) => call("p4_revert_keep", { conn, depotFile }),
   reopen: (conn: P4Conn, depotFile: string, change: string) =>
     call("p4_reopen", { conn, depotFile, change }),
   newChangelist: (conn: P4Conn, description: string) =>
-    invoke<string>("p4_new_changelist", { conn, description }),
-  envPort: (conn: P4Conn) => invoke<string>("p4_env_port", { conn }),
+    g<string>("p4_new_changelist", { conn, description }),
+  envPort: (conn: P4Conn) => g<string>("p4_env_port", { conn }),
   setDescription: (conn: P4Conn, change: string, description: string) =>
-    invoke<void>("p4_set_description", { conn, change, description }),
+    g<void>("p4_set_description", { conn, change, description }),
 };
 
 /** Last path segment of a depot path. */
