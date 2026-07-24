@@ -2,6 +2,62 @@
 //! launching the configured external P4DIFF tool.
 
 use crate::p4::{self, P4Conn};
+use tauri::AppHandle;
+use tauri_plugin_dialog::DialogExt;
+
+/// Generate a unified-diff `.patch` from `files` (or all opened files of
+/// `change` when `files` is empty), prompt a Save-As dialog, and write it.
+/// Returns the saved path, or None if the user cancelled.
+#[tauri::command]
+pub async fn export_patch(
+    app: AppHandle,
+    conn: P4Conn,
+    change: String,
+    files: Vec<String>,
+    default_name: String,
+) -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        // The given selection, else all opened files of the changelist.
+        let targets: Vec<String> = if !files.is_empty() {
+            files
+        } else if !change.is_empty() {
+            p4::run(&conn, &["opened", "-c", &change])
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|r| r.get("depotFile").and_then(|v| v.as_str()).map(String::from))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        if targets.is_empty() {
+            return Err("No modified files to include in the patch.".into());
+        }
+        let mut args: Vec<&str> = vec!["diff", "-du"];
+        for t in &targets {
+            args.push(t.as_str());
+        }
+        let patch = p4::run_raw_stdout_diff(&conn, &args)?;
+        if patch.trim().is_empty() {
+            return Err("No textual diff to export (files may be adds or binaries).".into());
+        }
+        let picked = app
+            .dialog()
+            .file()
+            .set_file_name(&default_name)
+            .add_filter("Patch", &["patch"])
+            .blocking_save_file();
+        match picked {
+            Some(fp) => {
+                let path = fp.into_path().map_err(|e| e.to_string())?;
+                std::fs::write(&path, patch).map_err(|e| e.to_string())?;
+                Ok(Some(path.display().to_string()))
+            }
+            None => Ok(None),
+        }
+    })
+    .await
+    .map_err(|e| format!("export-patch task failed: {e}"))?
+}
 
 /// Unified diff of an opened file: local workspace vs the depot (have) — the
 /// "local vs server" diff. P4DIFF cleared so it prints instead of launching.

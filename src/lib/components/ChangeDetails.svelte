@@ -135,20 +135,22 @@
                 onpointermove={moveTip}
                 onpointerleave={hideTip}
               >
-                <button
-                  class="dchev"
-                  title="Show diff"
-                  onclick={(e) => {
-                    e.stopPropagation();
-                    toggleDiff(f);
-                  }}
-                  ondblclick={(e) => e.stopPropagation()}
-                >
-                  {d?.open ? "▾" : "▸"}
-                </button>
-                <span class="path">
-                  <span class="pdir">{sp.dir}</span><span class="pfile">{sp.name}</span>
-                </span>
+                <div class="fcinner">
+                  <button
+                    class="dchev"
+                    title="Show diff"
+                    onclick={(e) => {
+                      e.stopPropagation();
+                      toggleDiff(f);
+                    }}
+                    ondblclick={(e) => e.stopPropagation()}
+                  >
+                    {d?.open ? "▾" : "▸"}
+                  </button>
+                  <span class="path">
+                    <span class="pfile">{sp.name}</span><span class="pdir">{sp.dir}</span>
+                  </span>
+                </div>
               </td>
               <td class="dim">{f.type ?? ""}</td>
             </tr>
@@ -232,6 +234,9 @@
     table-layout: fixed;
     width: 100%;
   }
+  .files td {
+    vertical-align: middle; /* match the flex-centered file cell so text lines up */
+  }
   .files th {
     position: relative;
     overflow: hidden;
@@ -260,9 +265,13 @@
     opacity: 0.5;
   }
   .filecell {
+    overflow: hidden;
+  }
+  .fcinner {
     display: flex;
     align-items: center;
     gap: 3px;
+    min-width: 0;
   }
   .dchev {
     flex: none;
@@ -278,9 +287,12 @@
   .dchev:hover {
     color: var(--text);
   }
-  /* File cell: truncate the directory, always keep the filename+rev visible. */
+  /* File cell: filename first (so names align across rows), directory after it
+     as dim context that truncates. */
   .path {
     display: flex;
+    align-items: baseline;
+    gap: 8px;
     min-width: 0;
     overflow: hidden;
     flex: 1;

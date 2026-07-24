@@ -65,6 +65,8 @@ async function call(cmd: string, args: Record<string, unknown>): Promise<P4Recor
 export const p4 = {
   info: (conn: P4Conn) => call("p4_info", { conn }),
   clients: (conn: P4Conn) => call("p4_clients", { conn }),
+  newClient: (conn: P4Conn, name: string, root: string, stream: string) =>
+    g<void>("p4_new_client", { conn, name, root, stream }),
   dirs: (conn: P4Conn, path: string) => call("p4_dirs", { conn, path }),
   files: (conn: P4Conn, path: string) => call("p4_files", { conn, path }),
   changes: (conn: P4Conn, path: string, max = 50, before?: number) =>
@@ -109,6 +111,8 @@ export const p4 = {
   trust: (conn: P4Conn) => g<void>("p4_trust", { conn }),
   opened: (conn: P4Conn, change: string) => call("p4_opened", { conn, change }),
   diffLocal: (conn: P4Conn, depotFile: string) => g<string>("p4_diff_local", { conn, depotFile }),
+  exportPatch: (conn: P4Conn, change: string, files: string[], defaultName: string) =>
+    g<string | null>("export_patch", { conn, change, files, defaultName }),
   openDiffLocal: (conn: P4Conn, depotFile: string) => g<void>("open_diff_local", { conn, depotFile }),
   revert: (conn: P4Conn, depotFile: string) => call("p4_revert", { conn, depotFile }),
   revertKeep: (conn: P4Conn, depotFile: string) => call("p4_revert_keep", { conn, depotFile }),

@@ -8,6 +8,8 @@ import { loadHist, saveHist, type HistEntry } from "$lib/cache";
 type Hooks = {
   conn: () => P4Conn;
   setNotice: (m: string, ms?: number) => void;
+  // Translate a display path to the p4-query path (client view; for virtual streams).
+  toQuery: (path: string) => string;
 };
 
 const CHUNK = 50;
@@ -143,9 +145,10 @@ export const history = {
 
     // Fetch the first chunk AND the synced-CL together so the list appears with
     // its greying/bold already correct — no ungreyed-then-greyed flash.
+    const q = h.toQuery(path);
     const [firstBatch, have] = await Promise.all([
-      safe(() => p4.changes(h!.conn(), path, CHUNK)),
-      safe(() => p4.haveChange(h!.conn(), path)),
+      safe(() => p4.changes(h!.conn(), q, CHUNK)),
+      safe(() => p4.haveChange(h!.conn(), q)),
     ]);
     if (seq !== loadSeq) return; // selection changed; keep whatever's shown
     endLoad();
@@ -160,7 +163,7 @@ export const history = {
       let before = Math.min(...firstBatch.map((b) => Number(b.change))) - 1;
       while (all.length < CAP && Number.isFinite(before) && before > 0) {
         if (!cached) more = true;
-        const batch = await safe(() => p4.changes(h!.conn(), path, CHUNK, before));
+        const batch = await safe(() => p4.changes(h!.conn(), q, CHUNK, before));
         if (seq !== loadSeq) return;
         if (batch.length === 0) break;
         all = [...all, ...batch];
@@ -191,9 +194,10 @@ export const history = {
       beginLoad(seq);
     }
 
+    const q = h.toQuery(depotFile);
     const [rev, fs] = await Promise.all([
-      safe(() => p4.filelog(h!.conn(), depotFile, 200)),
-      safe(() => p4.fstat(h!.conn(), depotFile)),
+      safe(() => p4.filelog(h!.conn(), q, 200)),
+      safe(() => p4.fstat(h!.conn(), q)),
     ]);
     if (seq !== loadSeq) return;
     endLoad();

@@ -11,6 +11,7 @@
     syncing,
     reconciling,
     onClientChange,
+    onNewWorkspace,
     onServerChange,
     onAddServer,
     onServerContext,
@@ -27,6 +28,7 @@
     syncing: boolean;
     reconciling: boolean;
     onClientChange: (client: string) => void;
+    onNewWorkspace: () => void;
     onServerChange: (port: string) => void;
     onAddServer: () => void;
     onServerContext: (e: MouseEvent) => void;
@@ -47,6 +49,18 @@
       return;
     }
     if (v !== conn.port) onServerChange(v);
+  }
+
+  const NEW_WS = "__new_ws__";
+  function onWsPick(e: Event) {
+    const sel = e.currentTarget as HTMLSelectElement;
+    const v = sel.value;
+    if (v === NEW_WS) {
+      sel.value = conn.client; // don't leave "New…" selected
+      onNewWorkspace();
+      return;
+    }
+    onClientChange(v);
   }
 </script>
 
@@ -78,14 +92,9 @@
       </select>
     </label>
 
-    <label class="ws" title="● workspace checked out on this machine   ○ elsewhere">
+    <label class="ws" title="● workspace bound to this machine (Host)   ○ shared / another host">
       Workspace
-      <select
-        class="mono"
-        value={conn.client}
-        onchange={(e) => onClientChange((e.currentTarget as HTMLSelectElement).value)}
-        disabled={!connected}
-      >
+      <select class="mono" value={conn.client} onchange={onWsPick} disabled={!connected}>
         <option value="">— select —</option>
         {#each clients as c (c.client)}
           <option value={c.client}>
@@ -94,6 +103,7 @@
               : ""}
           </option>
         {/each}
+        <option value={NEW_WS}>＋ New workspace…</option>
       </select>
     </label>
   </div>

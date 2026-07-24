@@ -48,9 +48,25 @@ async function safe<T>(fn: () => Promise<T[]>): Promise<T[]> {
   }
 }
 
+// p4-query prefix (client syntax, e.g. //<client>) used for dirs/files/history
+// instead of the stream depot path, so a VIRTUAL stream resolves through the
+// workspace view. Display paths stay in stream-depot form (rebuilt from the
+// parent path + basename), so the tree looks the same.
+let queryRoot = "";
+function base(p: string): string {
+  return p.slice(p.lastIndexOf("/") + 1);
+}
+
 export const browse = {
   init(hooks: Hooks) {
     h = hooks;
+  },
+  /** Translate a display (stream-depot) path to the p4-query path (client
+   *  syntax). Identity for paths outside the current stream root. */
+  toQuery(path: string): string {
+    return rootPath && queryRoot && path.startsWith(rootPath)
+      ? queryRoot + path.slice(rootPath.length)
+      : path;
   },
   get rootPath() {
     return rootPath;
@@ -105,6 +121,7 @@ export const browse = {
     if (!h) return;
     clientRoot = root;
     rootPath = stream;
+    queryRoot = "//" + h.conn().client; // browse through the client view
     tree = makeNode(stream, true);
     tree.expanded = true;
 
@@ -144,13 +161,19 @@ export const browse = {
       if (local && node.children.length === 0) node.children = buildChildren(local);
     }
 
-    // Refresh unless we already have it fresh in memory this session.
+    // Refresh unless we already have it fresh in memory this session. Query via
+    // the client view, but rebuild each child's path from the display parent +
+    // basename so the tree stays in stream-depot form (and virtual streams show).
     if (!mem) {
+      const q = browse.toQuery(path);
       const [d, f] = await Promise.all([
-        safe(() => p4.dirs(h!.conn(), path)),
-        safe(() => p4.files(h!.conn(), path)),
+        safe(() => p4.dirs(h!.conn(), q)),
+        safe(() => p4.files(h!.conn(), q)),
       ]);
-      const c = { dirs: d, files: f };
+      const c = {
+        dirs: d.map((r) => (r.dir ? { ...r, dir: `${path}/${base(r.dir)}` } : r)),
+        files: f.map((r) => (r.depotFile ? { ...r, depotFile: `${path}/${base(r.depotFile)}` } : r)),
+      };
       node.children = buildChildren(c);
       folderCache.set(path, c);
       saveFolder(h.conn().client, path, c);

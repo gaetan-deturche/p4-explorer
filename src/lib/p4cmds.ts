@@ -38,6 +38,7 @@ export const P4_COMMANDS: P4Cmd[] = [
   { key: "swarm_url", label: "swarm url", read: true },
   { key: "swarm_review", label: "swarm review", read: true },
   { key: "sync_cancel", label: "cancel sync", read: true },
+  { key: "export_patch", label: "diff (export patch)", read: true },
   // non-reads (need approval by default)
   { key: "p4_sync", label: "sync", read: false },
   { key: "p4_sync_stream", label: "sync", read: false },
@@ -52,6 +53,7 @@ export const P4_COMMANDS: P4Cmd[] = [
   { key: "p4_revert_keep", label: "revert -k", read: false },
   { key: "p4_reopen", label: "reopen", read: false },
   { key: "p4_new_changelist", label: "new changelist", read: false },
+  { key: "p4_new_client", label: "new workspace", read: false },
   { key: "p4_set_description", label: "change description", read: false },
   { key: "p4_login", label: "login", read: false },
   { key: "p4_trust", label: "trust", read: false },

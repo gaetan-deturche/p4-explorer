@@ -3,7 +3,7 @@
 //! and the keep-alive/health-check poll. The `conn` object itself stays in the
 //! page (it is two-way bound by dialogs); this store drives everything around it.
 
-import { p4, pathsExist, type P4Conn, type P4Record } from "$lib/p4";
+import { p4, type P4Conn, type P4Record } from "$lib/p4";
 import { loadServers, saveServers, withServer, withoutServer } from "$lib/servers";
 import {
   loadClientFor,
@@ -65,7 +65,21 @@ let busy = $state(false);
 let serverVersion = $state("");
 let clients = $state<P4Record[]>([]);
 let servers = $state<string[]>([]);
-let localClients = $state<Set<string>>(new Set()); // clients whose Root exists here
+let localClients = $state<Set<string>>(new Set()); // clients bound to this machine (Host)
+let clientHost = ""; // this machine's hostname (p4 info clientHost)
+
+// Apply a client list: flag the ones bound to this machine (Host match) and
+// sort those first.
+function setClientList(list: P4Record[]) {
+  localClients = new Set(
+    clientHost ? list.filter((c) => (c.Host ?? "").trim() === clientHost).map((c) => c.client) : [],
+  );
+  clients = [...list].sort((a, b) => {
+    const la = localClients.has(a.client) ? 0 : 1;
+    const lb = localClients.has(b.client) ? 0 : 1;
+    return la - lb || a.client.localeCompare(b.client);
+  });
+}
 
 // Each `p4` CLI call reconnects; the first `dirs` on a huge stream root is a
 // ~2.7s server-side cold disk read of db.rev. Re-running it periodically keeps
@@ -146,6 +160,8 @@ export const connection = {
     const conn = h.conn();
     busy = true;
     connection.stopKeepAlive(); // no health-check poll while (re)connecting
+    clients = []; // don't show the previous server's workspaces while switching
+    localClients = new Set();
     h.setConnError("");
     try {
       // Seed the server dropdown: adopt the ambient P4PORT if none was set.
@@ -225,15 +241,11 @@ export const connection = {
       startKeepAlive();
       saveUserFor(conn.port, conn.user); // remember this server's user
       saveCharsetFor(conn.port, conn.charset); // and its charset choice
-      const list = await p4.clients(conn);
-      // Flag workspaces whose Root exists on this machine, and sort those first.
-      const exist = await pathsExist(list.map((c) => c.Root ?? "")).catch(() => []);
-      localClients = new Set(list.filter((_, idx) => exist[idx]).map((c) => c.client));
-      clients = [...list].sort((a, b) => {
-        const la = localClients.has(a.client) ? 0 : 1;
-        const lb = localClients.has(b.client) ? 0 : 1;
-        return la - lb || a.client.localeCompare(b.client);
-      });
+      // Flag workspaces bound to THIS machine (client Host == this host) and
+      // sort those first — Host-locked is the accurate signal; a shared client
+      // (empty Host) is not "this machine" even if its Root folder exists here.
+      clientHost = (i.clientHost ?? "").trim();
+      setClientList(await p4.clients(conn));
       // Prefer the workspace the user last used on this server; fall back to the
       // client reported by `p4 info`.
       const saved = loadClientFor(conn.port);
@@ -293,6 +305,20 @@ export const connection = {
     conn.client = "";
     browse.reset();
     await connection.connect();
+  },
+  /** Create a new stream workspace bound to this machine, then switch to it. */
+  async createWorkspace(name: string, root: string, stream: string) {
+    if (!h) return;
+    const conn = h.conn();
+    try {
+      await p4.newClient(conn, name.trim(), root.trim(), stream.trim());
+    } catch (e) {
+      h.setConnError(`Create workspace failed: ${String(e)}`);
+      return;
+    }
+    h.setNotice(`Workspace ${name.trim()} created.`);
+    setClientList(await p4.clients(conn).catch(() => [])); // pick up the new client
+    await connection.selectClient(name.trim());
   },
   /** Remember `port` and connect. Adding a server goes through the login flow so
    *  the user picks the account for it (the ambient P4USER may have no access to

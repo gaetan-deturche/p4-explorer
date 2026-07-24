@@ -14,6 +14,7 @@
     onShelvedDiff,
     onOpenLocalDiff,
     onOpenShelvedDiff,
+    contextChange,
     onContext,
     onFileContext,
     onMoveFile,
@@ -23,6 +24,7 @@
     client: string; // resets the per-CL cache when the workspace changes
     refreshKey: number; // bumps when pending data changes → refetch open CLs' files
     reviews: Record<string, ReviewInfo | null>; // change → Swarm review status
+    contextChange: string; // the changelist whose context menu is open (highlight it)
     onLocalFiles: (change: string) => Promise<P4Record[]>; // opened (workspace) files
     onShelvedFiles: (change: string) => Promise<P4Record[]>; // shelved files
     onLocalDiff: (depotFile: string) => Promise<string>; // local vs server
@@ -30,9 +32,89 @@
     onOpenLocalDiff: (depotFile: string) => void;
     onOpenShelvedDiff: (depotFile: string, rev: number, change: string) => void;
     onContext: (cl: P4Record, e: MouseEvent) => void; // right-click a changelist
-    onFileContext: (file: P4Record, change: string, e: MouseEvent) => void; // right-click a file
+    // right-click a file → (file, change, event, selected depot files)
+    onFileContext: (file: P4Record, change: string, e: MouseEvent, files: string[]) => void;
     onMoveFile: (file: string, toChange: string) => void; // drag a file onto another CL
   } = $props();
+
+  // Multi-select of local (opened) files via click / Ctrl+click / Shift+click.
+  let selected = $state<Set<string>>(new Set());
+  let anchor: string | null = null;
+  // Local files in render order (open changelists only), for Shift-range.
+  const orderedFiles = $derived.by(() => {
+    const out: string[] = [];
+    for (const r of rows) {
+      const s = cls[r.change];
+      if (s?.open) for (const f of s.local) if (f.depotFile) out.push(f.depotFile);
+    }
+    return out;
+  });
+  function clickFile(file: string, e: MouseEvent | KeyboardEvent) {
+    if (e.shiftKey && anchor) {
+      const a = orderedFiles.indexOf(anchor);
+      const b = orderedFiles.indexOf(file);
+      if (a >= 0 && b >= 0) {
+        const [lo, hi] = a < b ? [a, b] : [b, a];
+        selected = new Set(orderedFiles.slice(lo, hi + 1));
+      }
+    } else if (e.ctrlKey || e.metaKey) {
+      const n = new Set(selected);
+      if (n.has(file)) n.delete(file);
+      else n.add(file);
+      selected = n;
+      anchor = file;
+    } else {
+      selected = new Set([file]);
+      anchor = file;
+    }
+  }
+  function clearSelection() {
+    selected = new Set();
+    anchor = null;
+  }
+
+  // Rubber-band (marquee) selection: drag over empty space to box-select local
+  // file rows. Rows carry data-file; hit-testing is done in viewport (client)
+  // coords so it works regardless of scroll.
+  let bodyEl: HTMLDivElement;
+  let marquee = $state<{ left: number; top: number; width: number; height: number } | null>(null);
+  let marqStart: { x: number; y: number } | null = null;
+  let marqBase: Set<string> = new Set(); // selection to preserve when Ctrl-adding
+
+  function bodyMouseDown(e: MouseEvent) {
+    // Only from empty space (not a row/button, which are child targets) and LMB.
+    if (e.button !== 0 || e.target !== e.currentTarget) return;
+    e.preventDefault();
+    const additive = e.ctrlKey || e.metaKey;
+    marqStart = { x: e.clientX, y: e.clientY };
+    marqBase = additive ? new Set(selected) : new Set();
+    if (!additive) clearSelection();
+    window.addEventListener("mousemove", bodyMouseMove);
+    window.addEventListener("mouseup", bodyMouseUp);
+  }
+  function bodyMouseMove(e: MouseEvent) {
+    if (!marqStart) return;
+    const r = bodyEl.getBoundingClientRect();
+    const cx = Math.max(r.left, Math.min(e.clientX, r.right));
+    const cy = Math.max(r.top, Math.min(e.clientY, r.bottom));
+    const x0 = Math.min(marqStart.x, cx),
+      x1 = Math.max(marqStart.x, cx);
+    const y0 = Math.min(marqStart.y, cy),
+      y1 = Math.max(marqStart.y, cy);
+    marquee = { left: x0, top: y0, width: x1 - x0, height: y1 - y0 };
+    const next = new Set(marqBase);
+    for (const el of bodyEl.querySelectorAll<HTMLElement>("[data-file]")) {
+      const b = el.getBoundingClientRect();
+      if (b.bottom >= y0 && b.top <= y1) next.add(el.dataset.file!);
+    }
+    selected = next;
+  }
+  function bodyMouseUp() {
+    marqStart = null;
+    marquee = null;
+    window.removeEventListener("mousemove", bodyMouseMove);
+    window.removeEventListener("mouseup", bodyMouseUp);
+  }
 
   // Drag-and-drop: move an opened file from one changelist to another.
   let drag = $state<{ file: string; from: string } | null>(null);
@@ -113,6 +195,8 @@
       lastClient = client;
       cls = {};
       fdiff = {};
+      selected = new Set();
+      anchor = null;
     }
     const forced = key !== lastKey;
     lastKey = key;
@@ -152,7 +236,13 @@
 </script>
 
 <div class="panel">
-  <div class="scroll body">
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div
+    class="scroll body"
+    bind:this={bodyEl}
+    onmousedown={bodyMouseDown}
+    onkeydown={(e) => e.key === "Escape" && clearSelection()}
+  >
     {#if loading}
       <div class="msg dim">Loading…</div>
     {:else if rows.length === 0}
@@ -165,6 +255,7 @@
         <button
           class="cl"
           class:dropinto={dragOver === r.change}
+          class:contextsel={contextChange === r.change}
           onclick={() => toggleCL(r.change)}
           oncontextmenu={(e) => onContext(r, e)}
           ondragover={(e) => {
@@ -222,24 +313,44 @@
       {/each}
     {/if}
   </div>
+  {#if marquee}
+    <div
+      class="marquee"
+      style="left:{marquee.left}px;top:{marquee.top}px;width:{marquee.width}px;height:{marquee.height}px"
+    ></div>
+  {/if}
 </div>
 
 {#snippet fileRow(f: P4Record, change: string, kind: "local" | "shelved", depth: number)}
   {@const key = `${change}|${kind}|${f.depotFile}`}
   {@const fd = fdiff[key]}
   {@const sp = splitPath(f.depotFile)}
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
   <div
     class="frow mono"
+    data-file={kind === "local" ? f.depotFile : undefined}
     class:dragging={drag?.file === f.depotFile}
+    class:selected={kind === "local" && selected.has(f.depotFile)}
     style="padding-left:{depth * 16 + 4}px"
     title={"Double-click to open in external diff\n" + f.depotFile}
     draggable={kind === "local"}
+    onclick={(e) => kind === "local" && clickFile(f.depotFile, e)}
+    onkeydown={(e) => {
+      if (kind === "local" && (e.key === "Enter" || e.key === " ")) {
+        e.preventDefault();
+        clickFile(f.depotFile, e);
+      }
+    }}
     ondblclick={() => openExt(change, kind, f)}
     oncontextmenu={(e) => {
       if (kind === "local") {
         e.preventDefault();
-        onFileContext(f, change, e);
+        // Right-click selects the item (unless it's already in the selection).
+        if (!selected.has(f.depotFile)) {
+          selected = new Set([f.depotFile]);
+          anchor = f.depotFile;
+        }
+        onFileContext(f, change, e, [...selected]);
       }
     }}
     ondragstart={(e) => {
@@ -267,7 +378,7 @@
       {fd?.open ? "▾" : "▸"}
     </button>
     <span class="act act-{f.action}">{f.action ?? ""}</span>
-    <span class="fpath"><span class="pdir dim">{sp.dir}</span>{sp.name}</span>
+    <span class="fpath"><span class="pfile">{sp.name}</span><span class="pdir dim">{sp.dir}</span></span>
     <span class="ftype dim">{f.type ?? ""}</span>
   </div>
   {#if fd?.open}
@@ -294,6 +405,14 @@
     flex: 1;
     padding: 2px 0;
   }
+  .marquee {
+    position: fixed;
+    z-index: 50;
+    pointer-events: none;
+    border: 1px solid var(--accent);
+    background: var(--bg-sel);
+    opacity: 0.35;
+  }
   .cl {
     display: flex;
     align-items: baseline;
@@ -309,6 +428,7 @@
     white-space: nowrap;
     cursor: pointer;
     border-bottom: 1px solid var(--border);
+    user-select: none;
   }
   .cl:hover {
     background: var(--bg-hover);
@@ -377,6 +497,7 @@
     font-size: 12px;
     color: var(--text);
     cursor: pointer;
+    user-select: none;
   }
   .subfolder:hover {
     background: var(--bg-hover);
@@ -394,6 +515,7 @@
     font-size: 12px;
     white-space: nowrap;
     cursor: default;
+    user-select: none;
   }
   .frow:hover {
     background: var(--bg-hover);
@@ -403,6 +525,15 @@
   }
   .frow.dragging {
     opacity: 0.4;
+  }
+  .frow.selected {
+    background: var(--bg-sel);
+  }
+  .frow.selected:hover {
+    background: var(--bg-sel);
+  }
+  .cl.contextsel {
+    background: var(--bg-sel);
   }
   .fchev {
     flex: none;
@@ -433,10 +564,23 @@
     color: var(--accent);
   }
   .fpath {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
     flex: 1;
     min-width: 0;
     overflow: hidden;
+  }
+  .fpath .pfile {
+    flex: none;
+    white-space: nowrap;
+  }
+  .fpath .pdir {
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow: hidden;
     text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .ftype {
     flex: none;

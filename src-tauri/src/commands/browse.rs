@@ -20,6 +20,55 @@ pub async fn p4_clients(conn: P4Conn) -> Res {
     run(conn, args).await
 }
 
+/// Create a new stream workspace bound to this machine: sets Root + Stream +
+/// Host (this host) and drops the View so p4 generates it from the stream.
+#[tauri::command]
+pub async fn p4_new_client(
+    conn: P4Conn,
+    name: String,
+    root: String,
+    stream: String,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        // Host = this machine, so the new client is bound here (gets the ● mark).
+        let host = p4::run(&conn, &["info"])
+            .ok()
+            .and_then(|recs| {
+                recs.into_iter()
+                    .next()
+                    .and_then(|r| r.get("clientHost").and_then(|v| v.as_str()).map(String::from))
+            })
+            .unwrap_or_default();
+        let mut args: Vec<String> = vec![
+            "--field".into(),
+            format!("Root={root}"),
+            "--field".into(),
+            format!("Host={host}"),
+        ];
+        if !stream.is_empty() {
+            args.push("--field".into());
+            args.push(format!("Stream={stream}"));
+        }
+        args.extend(["client".into(), "-o".into(), name.clone()]);
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        let form = p4::run_raw(&conn, &refs)?;
+        // For a stream client the View is derived from the stream — drop the
+        // template View so `client -i` regenerates it.
+        let form = if stream.is_empty() {
+            form
+        } else {
+            match form.find("\nView:") {
+                Some(i) => format!("{}\n", &form[..i]),
+                None => form,
+            }
+        };
+        p4::run_raw_stdin(&conn, &["client", "-i"], &form)?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("new-client task failed: {e}"))?
+}
+
 /// Sub-directories of a depot path (`p4 dirs <path>/*`).
 #[tauri::command]
 pub async fn p4_dirs(conn: P4Conn, path: String) -> Res {

@@ -26,6 +26,7 @@
   import InputDialog from "$lib/components/InputDialog.svelte";
   import LoginDialog from "$lib/components/LoginDialog.svelte";
   import ApprovalDialog from "$lib/components/ApprovalDialog.svelte";
+  import NewWorkspaceDialog from "$lib/components/NewWorkspaceDialog.svelte";
   import SyncProgressDialog from "$lib/components/SyncProgressDialog.svelte";
   import SyncErrorDialog from "$lib/components/SyncErrorDialog.svelte";
   import UpdateDialog from "$lib/components/UpdateDialog.svelte";
@@ -120,6 +121,7 @@
   // Server selector UI (the list + switching live in the connection store).
   let serverCtx = $state<{ x: number; y: number } | null>(null);
   let addServerOpen = $state(false);
+  let newWorkspaceOpen = $state(false);
 
   // Center tab. History/details pane lives in $lib/history.svelte.ts; the depot
   // tree, streams/repo tabs and index live in $lib/browse.svelte.ts.
@@ -216,20 +218,28 @@
     if (own && !isDefault) {
       items.push({ label: "Delete shelf", action: () => pending.deleteShelf(cl.change) });
     }
+    items.push({ label: "Generate patch…", action: () => generatePatch(cl.change, []) });
     return items;
   }
 
   // --- pending FILE context (local/opened files) -----------------------------
-  let fileCtx = $state<{ x: number; y: number; file: P4Record; change: string } | null>(null);
+  let fileCtx = $state<{
+    x: number;
+    y: number;
+    file: P4Record;
+    change: string;
+    files: string[];
+  } | null>(null);
   let newClFile = $state<string | null>(null); // a file awaiting a new-changelist name
   let renameCl = $state<{ change: string; desc: string } | null>(null); // CL being renamed
 
   // PendingList instance, for the optimistic file move shared with drag-and-drop.
   let pendingList = $state<{ moveFile: (file: string, from: string, to: string) => void }>();
 
-  function onPendingFileContext(file: P4Record, change: string, e: MouseEvent) {
-    fileCtx = { x: e.clientX, y: e.clientY, file, change };
+  function onPendingFileContext(file: P4Record, change: string, e: MouseEvent, files: string[]) {
+    fileCtx = { x: e.clientX, y: e.clientY, file, change, files };
   }
+  const generatePatch = (change: string, files: string[]) => pending.generatePatch(change, files);
   // Move via the context menu, optimistically (falls back to a plain reopen if
   // the list isn't mounted for some reason).
   function moveFileTo(file: string, from: string, to: string) {
@@ -247,8 +257,10 @@
     if (target) pending.rename(target.change, desc);
   }
 
-  // Right-click menu for a pending file: view/revert, un-open, or move to a CL.
-  function fileMenuItems(file: P4Record, change: string) {
+  // Right-click menu for a pending file: view/revert, un-open, patch, or move.
+  // `files` is the current selection (≥1); single-file actions use the clicked
+  // file, the patch action uses the whole selection.
+  function fileMenuItems(file: P4Record, change: string, files: string[]) {
     const targets = pending.rows
       .filter((cl) => cl.change !== change)
       .map((cl) => {
@@ -259,8 +271,10 @@
         return { label, action: () => moveFileTo(file.depotFile, change, cl.change) };
       });
     targets.push({ label: "New changelist…", action: () => (newClFile = file.depotFile) });
+    const patchLabel = files.length > 1 ? `Generate patch (${files.length} files)…` : "Generate patch…";
     return [
       { label: "View diff", action: () => pending.openLocalDiff(file.depotFile) },
+      { label: patchLabel, action: () => generatePatch("", files.length ? files : [file.depotFile]) },
       { label: "Revert file…", action: () => pending.revert(file.depotFile) },
       {
         label: "Remove from changelist (keep changes)…",
@@ -279,6 +293,7 @@
   // --- history row context menu: "update to this changelist" ----------------
   function openHistContext(change: string, e: MouseEvent) {
     if (!change || centerTab !== "history") return;
+    history.selectChange(change); // highlight the right-clicked row
     ctxMenu = { x: e.clientX, y: e.clientY, change };
   }
 
@@ -311,6 +326,7 @@
     history.init({
       conn: () => conn,
       setNotice,
+      toQuery: (p) => browse.toQuery(p),
     });
     browse.init({
       conn: () => conn,
@@ -392,6 +408,7 @@
     onExit={exitApp}
     onRefresh={() => browse.refresh()}
     onSync={() => sync.globalSync()}
+    onNewWorkspace={() => (newWorkspaceOpen = true)}
     onToggleView={toggleView}
     onAbout={showAbout}
     onCheckUpdates={() => updates.check(false)}
@@ -406,6 +423,7 @@
     {syncing}
     {reconciling}
     onClientChange={(c) => connection.selectClient(c)}
+    onNewWorkspace={() => (newWorkspaceOpen = true)}
     onServerChange={(p) => connection.switchServerTo(p)}
     onAddServer={() => (addServerOpen = true)}
     onServerContext={(e) => {
@@ -492,6 +510,7 @@
           client={conn.client}
           refreshKey={pending.version}
           reviews={pending.reviews}
+          contextChange={pendingCtx?.cl.change ?? ""}
           onLocalFiles={pending.localFiles}
           onShelvedFiles={pending.shelvedFiles}
           onLocalDiff={pending.localDiff}
@@ -656,7 +675,7 @@
   <ContextMenu
     x={fileCtx.x}
     y={fileCtx.y}
-    items={fileMenuItems(fileCtx.file, fileCtx.change)}
+    items={fileMenuItems(fileCtx.file, fileCtx.change, fileCtx.files)}
     onClose={() => (fileCtx = null)}
   />
 {/if}
@@ -704,6 +723,17 @@
       connection.addAndSwitch(port);
     }}
     onCancel={() => (addServerOpen = false)}
+  />
+{/if}
+
+{#if newWorkspaceOpen}
+  <NewWorkspaceDialog
+    initialStream={browse.rootPath}
+    onSubmit={(w) => {
+      newWorkspaceOpen = false;
+      connection.createWorkspace(w.name, w.root, w.stream);
+    }}
+    onCancel={() => (newWorkspaceOpen = false)}
   />
 {/if}
 

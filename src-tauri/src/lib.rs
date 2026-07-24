@@ -10,6 +10,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             p4::set_app_handle(app.handle().clone()); // for p4-command log events
             // SQLite DB in the app data dir: file index (+ future caches).
@@ -23,6 +24,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::p4_info,
             commands::p4_clients,
+            commands::p4_new_client,
+            commands::export_patch,
             commands::p4_dirs,
             commands::p4_files,
             commands::p4_changes,

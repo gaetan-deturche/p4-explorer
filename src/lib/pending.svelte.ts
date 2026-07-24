@@ -196,6 +196,24 @@ export const pending = {
   rename(change: string, desc: string) {
     pending.mutate(() => p4.setDescription(h!.conn(), change, desc), "Changelist renamed.");
   },
+  /** Export a .patch from a changelist (files=[]) or an explicit file set. */
+  async generatePatch(change: string, files: string[]) {
+    if (!h) return;
+    const base =
+      files.length === 1
+        ? files[0].split("/").pop() || "file"
+        : files.length > 1
+          ? "selected"
+          : change && change !== "default"
+            ? `change-${change}`
+            : "workspace";
+    try {
+      const path = await p4.exportPatch(h.conn(), change, files, `${base}.patch`);
+      if (path) h.setNotice(`Patch saved to ${path}`, 6000);
+    } catch (e) {
+      h.setError(String(e));
+    }
+  },
 
   // --- file-content providers for PendingList (no `this`; safe as callbacks) --
   localFiles(change: string): Promise<P4Record[]> {
