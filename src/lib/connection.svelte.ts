@@ -129,12 +129,23 @@ export const connection = {
   forgetServer(port: string) {
     servers = withoutServer(servers, port);
     saveServers(servers);
+    // If we forgot the server we're on, drop the connection so it doesn't linger
+    // as the selected entry in the dropdown.
+    if (h && port === h.conn().port) {
+      connection.stopKeepAlive();
+      connected = false;
+      const conn = h.conn();
+      conn.client = "";
+      conn.port = "";
+      browse.reset();
+    }
   },
 
   async connect() {
     if (!h) return;
     const conn = h.conn();
     busy = true;
+    connection.stopKeepAlive(); // no health-check poll while (re)connecting
     h.setConnError("");
     try {
       // Seed the server dropdown: adopt the ambient P4PORT if none was set.
@@ -168,7 +179,12 @@ export const connection = {
       if (!info) info = await p4.info(conn); // last try; throws → outer catch
       const i = info[0] ?? {};
       serverVersion = i.serverVersion ?? "";
-      if (!conn.user && i.userName) conn.user = i.userName;
+      // Pick the user for this server: a remembered one wins; else the account
+      // an existing ticket was issued to (e.g. a prior P4V login) — that server
+      // may not accept the ambient P4USER — and only then p4 info's default.
+      if (!conn.user) {
+        conn.user = (await p4.ticketUser(conn).catch(() => "")) || i.userName || "";
+      }
       // If we corrected the port (e.g. added ssl:), replace the remembered entry.
       if (conn.port !== origPort && origPort) connection.forgetServer(origPort);
       connection.rememberServer(conn.port);
@@ -278,32 +294,49 @@ export const connection = {
     browse.reset();
     await connection.connect();
   },
-  /** Remember `port` and switch to it (from the "add server" dialog). */
+  /** Remember `port` and connect. Adding a server goes through the login flow so
+   *  the user picks the account for it (the ambient P4USER may have no access to
+   *  a newly-added server). */
   async addAndSwitch(port: string) {
     const v = normalizePort(port);
     if (!v) return;
     connection.rememberServer(v);
-    await connection.switchServerTo(v);
+    await connection.relogin(v);
   },
-  /** Force a fresh login to `port` (from Options → Re-login): point at that
-   *  server, prompt for a password, log in, then connect with the new ticket. */
+  /** Log in to `port` (from Add server or Options → Re-login): point at that
+   *  server, prompt for the user + password, establish SSL trust, log in (fixing
+   *  a charset mismatch if needed), then connect with the fresh ticket. */
   async relogin(port: string) {
     if (!h) return;
     const conn = h.conn();
+    connection.stopKeepAlive(); // avoid a background "lost connection" while the login prompt is open
     if (port && port !== conn.port) {
-      conn.port = port;
-      conn.user = loadUserFor(port);
-      conn.charset = loadCharsetFor(port);
+      conn.port = normalizePort(port);
+      conn.user = loadUserFor(conn.port);
+      conn.charset = loadCharsetFor(conn.port);
       conn.client = "";
       browse.reset();
     }
+    // Prefill the user from an existing ticket for this server if we have none.
+    if (!conn.user) conn.user = await p4.ticketUser(conn).catch(() => "");
     const cred = await h.promptLogin(conn.port, conn.user);
     if (!cred) return;
     conn.user = cred.user;
-    try {
-      await p4.login(conn, cred.password);
-    } catch (e) {
-      h.setConnError(`Login failed: ${String(e)}`);
+    await p4.trust(conn).catch(() => {}); // accept the SSL fingerprint on first use
+    let ok = false;
+    for (let i = 0; i < 3 && !ok; i++) {
+      try {
+        await p4.login(conn, cred.password);
+        ok = true;
+      } catch (e) {
+        if (!adjustCharset(conn, String(e))) {
+          h.setConnError(`Login failed: ${String(e)}`);
+          return;
+        }
+      }
+    }
+    if (!ok) {
+      h.setConnError("Login failed.");
       return;
     }
     h.setNotice("Logged in.");

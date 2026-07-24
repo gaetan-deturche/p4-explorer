@@ -34,6 +34,7 @@ export const P4_COMMANDS: P4Cmd[] = [
   { key: "p4_depots", label: "depots", read: true },
   { key: "p4_env_port", label: "set P4PORT", read: true },
   { key: "p4_login_status", label: "login -s", read: true },
+  { key: "p4_ticket_user", label: "tickets", read: true },
   { key: "swarm_url", label: "swarm url", read: true },
   { key: "swarm_review", label: "swarm review", read: true },
   { key: "sync_cancel", label: "cancel sync", read: true },

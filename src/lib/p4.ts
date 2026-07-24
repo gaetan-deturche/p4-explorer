@@ -104,6 +104,7 @@ export const p4 = {
   swarmReview: (conn: P4Conn, change: string) =>
     g<ReviewInfo | null>("swarm_review", { conn, change }),
   loginStatus: (conn: P4Conn) => g<boolean>("p4_login_status", { conn }),
+  ticketUser: (conn: P4Conn) => g<string>("p4_ticket_user", { conn }),
   login: (conn: P4Conn, password: string) => g<void>("p4_login", { conn, password }),
   trust: (conn: P4Conn) => g<void>("p4_trust", { conn }),
   opened: (conn: P4Conn, change: string) => call("p4_opened", { conn, change }),
