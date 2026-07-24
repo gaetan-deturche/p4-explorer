@@ -151,6 +151,33 @@ pub async fn paths_exist(paths: Vec<String>) -> Vec<bool> {
     .unwrap_or_default()
 }
 
+/// The user of a cached ticket whose address matches conn.port (`p4 tickets`),
+/// or "". Lets adding a server adopt the account you already logged in as (e.g.
+/// via P4V) instead of the ambient P4USER, which may not exist on that server.
+#[tauri::command]
+pub async fn p4_ticket_user(conn: P4Conn) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let want = conn.port.trim().trim_start_matches("ssl:").to_string();
+        if want.is_empty() {
+            return Ok(String::new());
+        }
+        let out = p4::run_raw(&conn, &["tickets"]).unwrap_or_default();
+        for line in out.lines() {
+            // "<address> (<user>) <ticket>"
+            let Some((addr, after)) = line.trim().split_once(" (") else {
+                continue;
+            };
+            let Some((user, _)) = after.split_once(") ") else { continue };
+            if addr.trim() == want {
+                return Ok(user.trim().to_string());
+            }
+        }
+        Ok(String::new())
+    })
+    .await
+    .map_err(|e| format!("ticket-user task failed: {e}"))?
+}
+
 /// Trust an SSL server's fingerprint (`p4 trust -y -f`) so subsequent commands
 /// don't fail on an unknown/changed fingerprint — needed on first connect to an
 /// `ssl:` server.
