@@ -13,7 +13,9 @@
     onOfflineDiff,
     onOpenOfflineDiff,
     onLocalFiles,
+    onLocalFilesCached,
     onShelvedFiles,
+    onShelvedFilesCached,
     onLocalDiff,
     onShelvedDiff,
     onOpenLocalDiff,
@@ -34,7 +36,9 @@
     onOpenOfflineDiff: (depotFile: string) => void; // open the offline diff externally
     contextChange: string; // the changelist whose context menu is open (highlight it)
     onLocalFiles: (change: string) => Promise<P4Record[]>; // opened (workspace) files
+    onLocalFilesCached: (change: string) => P4Record[]; // cached opened files (instant)
     onShelvedFiles: (change: string) => Promise<P4Record[]>; // shelved files
+    onShelvedFilesCached: (change: string) => P4Record[]; // cached shelved files (instant)
     onLocalDiff: (depotFile: string) => Promise<string>; // local vs server
     onShelvedDiff: (depotFile: string, rev: number, change: string) => Promise<string>;
     onOpenLocalDiff: (depotFile: string) => void;
@@ -144,11 +148,16 @@
   // a refresh (e.g. after moving a file) doesn't flash "Loading…".
   async function loadCL(change: string) {
     const prev = cls[change];
+    // Paint the cached opened + shelved files instantly (so an expanded CL isn't
+    // empty — or flashing the empty state — while p4 runs); the fetch reconciles.
+    const cachedLocal = prev?.local?.length ? prev.local : onLocalFilesCached(change);
+    const cachedShelved = prev?.shelved?.length ? prev.shelved : onShelvedFilesCached(change);
     cls[change] = {
       open: prev?.open ?? true,
-      loading: !prev, // only the very first load shows the spinner
-      local: prev?.local ?? [],
-      shelved: prev?.shelved ?? [],
+      // Spinner only on the very first load with nothing cached to show.
+      loading: !prev && cachedLocal.length === 0 && cachedShelved.length === 0,
+      local: cachedLocal,
+      shelved: cachedShelved,
       shelvedOpen: prev?.shelvedOpen ?? false,
     };
     const [local, shelved] = await Promise.all([onLocalFiles(change), onShelvedFiles(change)]);

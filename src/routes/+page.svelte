@@ -533,7 +533,9 @@
           onOpenOfflineDiff={pending.openLocalDiff}
           contextChange={pendingCtx?.cl.change ?? ""}
           onLocalFiles={pending.localFiles}
+          onLocalFilesCached={pending.localFilesCached}
           onShelvedFiles={pending.shelvedFiles}
+          onShelvedFilesCached={pending.shelvedFilesCached}
           onLocalDiff={pending.localDiff}
           onShelvedDiff={pending.shelvedDiff}
           onOpenLocalDiff={pending.openLocalDiff}

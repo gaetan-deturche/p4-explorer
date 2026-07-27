@@ -65,6 +65,30 @@ function savePendingCache(client: string, recs: P4Record[]): void {
   if (client) cacheSet("p4:pending", client, JSON.stringify(recs));
 }
 
+// Cached opened files per changelist (store scope p4:clfiles:<client>, key change).
+function loadClFilesCache(client: string, change: string): P4Record[] {
+  if (!client) return [];
+  try {
+    return JSON.parse(cacheGetSync(`p4:clfiles:${client}`, change) ?? "[]") as P4Record[];
+  } catch {
+    return [];
+  }
+}
+function saveClFilesCache(client: string, change: string, recs: P4Record[]): void {
+  if (client) cacheSet(`p4:clfiles:${client}`, change, JSON.stringify(recs));
+}
+function loadShelvedCache(client: string, change: string): P4Record[] {
+  if (!client) return [];
+  try {
+    return JSON.parse(cacheGetSync(`p4:clshelved:${client}`, change) ?? "[]") as P4Record[];
+  } catch {
+    return [];
+  }
+}
+function saveShelvedCache(client: string, change: string, recs: P4Record[]): void {
+  if (client) cacheSet(`p4:clshelved:${client}`, change, JSON.stringify(recs));
+}
+
 // Self-scheduling loop: the next scan is armed only after the current one
 // finishes, so a long (~30s) scan never overlaps or piles up behind a timer.
 async function runOfflineLoop() {
@@ -404,13 +428,31 @@ export const pending = {
   },
 
   // --- file-content providers for PendingList (no `this`; safe as callbacks) --
-  localFiles(change: string): Promise<P4Record[]> {
-    return p4.opened(h!.conn(), change).catch(() => [] as P4Record[]);
+  /** The cached opened files of a changelist (sync) — for instant paint. */
+  localFilesCached(change: string): P4Record[] {
+    return h ? loadClFilesCache(h.conn().client, change) : [];
   },
-  shelvedFiles(change: string): Promise<P4Record[]> {
-    return change === "default"
-      ? Promise.resolve([] as P4Record[])
-      : p4.describeShelved(h!.conn(), change).catch(() => [] as P4Record[]);
+  async localFiles(change: string): Promise<P4Record[]> {
+    const conn = h!.conn();
+    const recs = await p4.opened(conn, change).catch(() => [] as P4Record[]);
+    const files = recs.filter((r) => r.depotFile); // drop any non-file header record
+    saveClFilesCache(conn.client, change, files); // cache the FILTERED list
+    return files;
+  },
+  /** The cached shelved files of a changelist (sync) — for instant paint. */
+  shelvedFilesCached(change: string): P4Record[] {
+    return h && change !== "default" ? loadShelvedCache(h.conn().client, change) : [];
+  },
+  async shelvedFiles(change: string): Promise<P4Record[]> {
+    if (change === "default") return [];
+    const conn = h!.conn();
+    const recs = await p4.describeShelved(conn, change).catch(() => [] as P4Record[]);
+    // `describe -S` returns a header record (the change itself, no depotFile)
+    // even with no shelf — keep only the actual shelved files, or the cache
+    // (and count) would show a phantom "Shelved (1)".
+    const files = recs.filter((r) => r.depotFile);
+    saveShelvedCache(conn.client, change, files);
+    return files;
   },
   localDiff(file: string): Promise<string> {
     return p4.diffLocal(h!.conn(), file);

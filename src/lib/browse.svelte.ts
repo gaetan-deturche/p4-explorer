@@ -16,7 +16,7 @@ import {
 } from "$lib/cache";
 import { history } from "$lib/history.svelte";
 import { pending } from "$lib/pending.svelte";
-import { cacheGetSync, cacheSet } from "$lib/store";
+import { cacheGetSync, cacheSet, cacheClearScope } from "$lib/store";
 import { loadBrowseSource, saveBrowseSource, type ViewState } from "$lib/nav";
 
 type Tab = "history" | "pending" | "streams" | "log" | "notes";
@@ -91,16 +91,34 @@ async function withFolderSyncSlot<T>(fn: () => Promise<T>): Promise<T> {
     fsWaiters.shift()?.();
   }
 }
-/** Fill in a directory node's sync marker + have/head changelists (mutate node). */
+/** Fill in a directory node's sync marker + have/head changelists (mutate node).
+ *  Instant from the in-memory or persisted (store) cache; only queries p4 on a
+ *  cold miss. Refresh clears the store scope so it recomputes. */
 async function computeFolderSync(node: TreeNode): Promise<void> {
   if (!h) return;
   const cacheKey = node.path.toLowerCase();
+  const apply = (r: FolderSync) => {
+    node.folderSync = r.status;
+    node.haveCl = r.have;
+    node.headCl = r.head;
+  };
   const hit = folderSyncCache.get(cacheKey);
   if (hit) {
-    node.folderSync = hit.status;
-    node.haveCl = hit.have;
-    node.headCl = hit.head;
+    apply(hit);
     return;
+  }
+  const client = h.conn().client;
+  const scope = `p4foldersync:${client}`;
+  try {
+    const s = cacheGetSync(scope, node.path);
+    if (s) {
+      const stored = JSON.parse(s) as FolderSync;
+      folderSyncCache.set(cacheKey, stored);
+      apply(stored); // instant on repeat visits — no p4 (refreshed via Refresh)
+      return;
+    }
+  } catch {
+    /* corrupt */
   }
   const conn = h.conn();
   const q = browse.toQuery(node.path);
@@ -119,9 +137,8 @@ async function computeFolderSync(node: TreeNode): Promise<void> {
     return { status, have: haveCl, head: headCl };
   });
   folderSyncCache.set(cacheKey, res);
-  node.folderSync = res.status;
-  node.haveCl = res.have;
-  node.headCl = res.head;
+  cacheSet(scope, node.path, JSON.stringify(res));
+  apply(res);
 }
 
 /** A stale file's synced changelist (its head CL is already known from fstat). */
@@ -547,6 +564,7 @@ export const browse = {
     refreshing = true;
     folderCache.clear();
     folderSyncCache.clear();
+    cacheClearScope(`p4foldersync:${h.conn().client}`); // persisted folder-sync markers
     history.clearMemCache();
     clearClientCache(h.conn().client);
     // Re-fetch the tree + history in the BACKGROUND so a caller (e.g. a submit)
