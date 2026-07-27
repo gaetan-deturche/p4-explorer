@@ -7,6 +7,7 @@ import { p4, idx, type P4Conn, type P4Record } from "$lib/p4";
 import { makeNode, type TreeNode } from "$lib/tree";
 import {
   loadFolder,
+  loadFolderAsync,
   saveFolder,
   clearClientCache,
   buildChildren,
@@ -334,7 +335,10 @@ export const browse = {
 
     // workspace (server stream)
     const mem = folderCache.get(path);
-    const cached = mem ?? loadFolder(h.conn().client, path);
+    // Instant paint from the fast cache; on a miss consult the SQLite source of
+    // truth (cold/evicted localStorage) before falling back to disk.
+    let cached = mem ?? loadFolder(h.conn().client, path);
+    if (!cached && !mem) cached = await loadFolderAsync(h.conn().client, path);
     if (cached) {
       node.children = buildChildren(cached);
     } else {

@@ -1,65 +1,59 @@
-//! Depot-browse persistence: folder-contents + file/folder-history caches in
-//! localStorage (stale-while-revalidate), plus depot→local path mapping used to
-//! show synced contents from disk instantly. All pure — the client name and
+//! Depot-browse persistence: folder-contents + file/folder-history caches,
+//! stale-while-revalidate, plus depot→local path mapping used to show synced
+//! contents from disk instantly. Backed by the generic `store` (SQLite source
+//! of truth + localStorage/memory fast layers). All pure — the client name and
 //! workspace roots are passed in, so this has no reactive state of its own.
 
 import { listLocalDir, type P4Record } from "$lib/p4";
 import { makeNode, type TreeNode } from "$lib/tree";
+import { cacheGetSync, cacheGet, cacheSet, cacheClearScope } from "$lib/store";
 
 export type FolderContents = { dirs: P4Record[]; files: P4Record[] };
 export type HistEntry = { mode: "folder" | "file"; subject: string; rows: P4Record[]; have: string };
 
-const folderKey = (client: string, path: string) => `p4tree:${client}:${path}`;
-const histKey = (client: string, id: string) => `p4hist:${client}:${id}`;
+// Scopes group a client's entries so Refresh can drop them in one call. The
+// localStorage keys these produce (`p4tree:<client>:<path>`) match the previous
+// format, so any already-cached data is reused.
+const treeScope = (client: string) => `p4tree:${client}`;
+const histScope = (client: string) => `p4hist:${client}`;
 
-export function loadFolder(client: string, path: string): FolderContents | null {
+function parse<T>(s: string | null): T | null {
+  if (s === null) return null;
   try {
-    const s = localStorage.getItem(folderKey(client, path));
-    return s ? (JSON.parse(s) as FolderContents) : null;
+    return JSON.parse(s) as T;
   } catch {
     return null;
   }
 }
 
+/** Synchronous folder read (memory/localStorage) for instant paint; null misses
+ *  fall to `loadFolderAsync` (SQLite). */
+export function loadFolder(client: string, path: string): FolderContents | null {
+  return parse<FolderContents>(cacheGetSync(treeScope(client), path));
+}
+/** Folder read including the SQLite source of truth (for a cold/evicted cache). */
+export async function loadFolderAsync(client: string, path: string): Promise<FolderContents | null> {
+  return parse<FolderContents>(await cacheGet(treeScope(client), path));
+}
 export function saveFolder(client: string, path: string, c: FolderContents) {
-  try {
-    localStorage.setItem(folderKey(client, path), JSON.stringify(c));
-  } catch {
-    /* quota / disabled: ignore */
-  }
+  cacheSet(treeScope(client), path, JSON.stringify(c));
 }
 
 export function loadHist(client: string, id: string): HistEntry | null {
-  try {
-    const s = localStorage.getItem(histKey(client, id));
-    return s ? (JSON.parse(s) as HistEntry) : null;
-  } catch {
-    return null;
-  }
+  return parse<HistEntry>(cacheGetSync(histScope(client), id));
 }
-
+export async function loadHistAsync(client: string, id: string): Promise<HistEntry | null> {
+  return parse<HistEntry>(await cacheGet(histScope(client), id));
+}
 export function saveHist(client: string, id: string, e: HistEntry) {
-  try {
-    // Bound persisted size: keep the newest 100 rows.
-    localStorage.setItem(histKey(client, id), JSON.stringify({ ...e, rows: e.rows.slice(0, 100) }));
-  } catch {
-    /* quota / disabled: ignore */
-  }
+  // Bound persisted size: keep the newest 100 rows.
+  cacheSet(histScope(client), id, JSON.stringify({ ...e, rows: e.rows.slice(0, 100) }));
 }
 
 /** Drop all persisted folder + history entries for a client (on Refresh). */
 export function clearClientCache(client: string) {
-  try {
-    const prefixes = [`p4tree:${client}:`, `p4hist:${client}:`];
-    const keys: string[] = [];
-    for (let i = 0; i < localStorage.length; i++) {
-      const k = localStorage.key(i);
-      if (k && prefixes.some((p) => k.startsWith(p))) keys.push(k);
-    }
-    keys.forEach((k) => localStorage.removeItem(k));
-  } catch {
-    /* ignore */
-  }
+  cacheClearScope(treeScope(client));
+  cacheClearScope(histScope(client));
 }
 
 export function buildChildren(c: FolderContents): TreeNode[] {

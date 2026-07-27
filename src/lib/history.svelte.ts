@@ -3,7 +3,7 @@
 //! changelist-details pane. Shared bits (conn, tab switch, notices) via init().
 
 import { p4, type P4Conn, type P4Record } from "$lib/p4";
-import { loadHist, saveHist, type HistEntry } from "$lib/cache";
+import { loadHist, loadHistAsync, saveHist, type HistEntry } from "$lib/cache";
 
 type Hooks = {
   conn: () => P4Conn;
@@ -134,13 +134,21 @@ export const history = {
     if (!h) return;
     const id = "F:" + path;
 
-    const cached = memCache.get(id) ?? loadHist(h.conn().client, id);
+    let cached = memCache.get(id) ?? loadHist(h.conn().client, id);
     if (cached) {
       endLoad();
       apply(cached);
       this.autoSelectHave();
     } else {
-      beginLoad(seq);
+      cached = await loadHistAsync(h.conn().client, id); // SQLite fallback (cold cache)
+      if (seq !== loadSeq) return; // superseded during the async read
+      if (cached) {
+        endLoad();
+        apply(cached);
+        this.autoSelectHave();
+      } else {
+        beginLoad(seq);
+      }
     }
 
     // Fetch the first chunk AND the synced-CL together so the list appears with
@@ -185,13 +193,21 @@ export const history = {
     const seq = ++loadSeq;
     const id = "R:" + depotFile;
 
-    const cached = memCache.get(id) ?? loadHist(h.conn().client, id);
+    let cached = memCache.get(id) ?? loadHist(h.conn().client, id);
     if (cached) {
       endLoad();
       apply(cached);
       this.autoSelectHave();
     } else {
-      beginLoad(seq);
+      cached = await loadHistAsync(h.conn().client, id); // SQLite fallback (cold cache)
+      if (seq !== loadSeq) return; // superseded during the async read
+      if (cached) {
+        endLoad();
+        apply(cached);
+        this.autoSelectHave();
+      } else {
+        beginLoad(seq);
+      }
     }
 
     const q = h.toQuery(depotFile);

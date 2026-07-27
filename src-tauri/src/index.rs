@@ -48,8 +48,80 @@ impl AppState {
 pub fn init_schema(db: &Connection) -> rusqlite::Result<()> {
     db.execute_batch(
         "CREATE TABLE IF NOT EXISTS file_index(client TEXT NOT NULL, path TEXT NOT NULL);
-         CREATE INDEX IF NOT EXISTS idx_file_client ON file_index(client);",
+         CREATE INDEX IF NOT EXISTS idx_file_client ON file_index(client);
+         CREATE TABLE IF NOT EXISTS cache(
+             scope TEXT NOT NULL,
+             key   TEXT NOT NULL,
+             json  TEXT NOT NULL,
+             PRIMARY KEY(scope, key)
+         );",
     )
+}
+
+// --- Generic blob cache (source of truth for view data; the front-end mirrors
+// hot entries in localStorage/memory for instant reads). Small, indexed by the
+// (scope, key) primary key. -----------------------------------------------------
+
+/// Read a cached blob, or None if absent.
+#[tauri::command]
+pub async fn cache_get(
+    state: tauri::State<'_, AppState>,
+    scope: String,
+    key: String,
+) -> Result<Option<String>, String> {
+    let db = state.db.lock().unwrap();
+    match db.query_row(
+        "SELECT json FROM cache WHERE scope=?1 AND key=?2",
+        rusqlite::params![scope, key],
+        |r| r.get::<_, String>(0),
+    ) {
+        Ok(s) => Ok(Some(s)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Insert or replace a cached blob.
+#[tauri::command]
+pub async fn cache_set(
+    state: tauri::State<'_, AppState>,
+    scope: String,
+    key: String,
+    json: String,
+) -> Result<(), String> {
+    let db = state.db.lock().unwrap();
+    db.execute(
+        "INSERT INTO cache(scope, key, json) VALUES(?1, ?2, ?3)
+         ON CONFLICT(scope, key) DO UPDATE SET json=excluded.json",
+        rusqlite::params![scope, key, json],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Delete every entry in a scope (e.g. all of a client's tree cache).
+#[tauri::command]
+pub async fn cache_clear(state: tauri::State<'_, AppState>, scope: String) -> Result<(), String> {
+    let db = state.db.lock().unwrap();
+    db.execute("DELETE FROM cache WHERE scope=?1", rusqlite::params![scope])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Delete a single cache entry.
+#[tauri::command]
+pub async fn cache_del(
+    state: tauri::State<'_, AppState>,
+    scope: String,
+    key: String,
+) -> Result<(), String> {
+    let db = state.db.lock().unwrap();
+    db.execute(
+        "DELETE FROM cache WHERE scope=?1 AND key=?2",
+        rusqlite::params![scope, key],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 fn to_entries(paths: Vec<String>) -> Arc<Vec<Entry>> {
