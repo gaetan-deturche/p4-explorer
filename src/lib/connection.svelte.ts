@@ -240,6 +240,7 @@ export const connection = {
       connected = true;
       h.setOptionsOpen(false);
       startKeepAlive();
+      saveLastServer(conn.port); // restore THIS server on next launch, regardless of workspace
       saveUserFor(conn.port, conn.user); // remember this server's user
       saveCharsetFor(conn.port, conn.charset); // and its charset choice
       // Flag workspaces bound to THIS machine (client Host == this host) and
@@ -320,6 +321,14 @@ export const connection = {
     h.setNotice(`Workspace ${name.trim()} created.`);
     setClientList(await p4.clients(conn).catch(() => [])); // pick up the new client
     await connection.selectClient(name.trim());
+  },
+  /** A P4V-style default workspace name: user_host_NNNN (fresh number each call). */
+  suggestWorkspaceName(): string {
+    const clean = (s: string) => s.replace(/[^A-Za-z0-9_.-]+/g, "").trim();
+    const user = clean(h?.conn().user ?? "") || "user";
+    const host = clean(clientHost) || "host";
+    const n = 1000 + Math.floor(Math.random() * 9000);
+    return `${user}_${host}_${n}`;
   },
   /** Open the native folder-picker for the New-workspace Root field. */
   pickFolder(start: string) {

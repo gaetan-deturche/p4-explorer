@@ -728,6 +728,7 @@
 
 {#if newWorkspaceOpen}
   <NewWorkspaceDialog
+    initialName={connection.suggestWorkspaceName()}
     initialStream={browse.rootPath}
     pickFolder={(s) => connection.pickFolder(s)}
     loadStreams={() => connection.loadStreams()}

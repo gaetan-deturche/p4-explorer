@@ -2,12 +2,14 @@
   import { untrack } from "svelte";
 
   let {
+    initialName = "",
     initialStream = "",
     onSubmit,
     onCancel,
     pickFolder,
     loadStreams,
   }: {
+    initialName?: string;
     initialStream?: string;
     onSubmit: (v: { name: string; root: string; stream: string }) => void;
     onCancel: () => void;
@@ -15,11 +17,15 @@
     loadStreams: () => Promise<{ stream: string; name: string }[]>;
   } = $props();
 
-  let name = $state("");
+  let name = $state(untrack(() => initialName));
   let root = $state("");
   let stream = $state(untrack(() => initialStream));
   let nameEl: HTMLInputElement | undefined = $state();
-  $effect(() => nameEl?.focus());
+  // Prefill a suggested name but select it so a keystroke replaces the whole thing.
+  $effect(() => {
+    nameEl?.focus();
+    nameEl?.select();
+  });
 
   const ready = $derived(!!name.trim() && !!root.trim() && !!stream.trim());
   function submit() {
@@ -37,12 +43,21 @@
   let streamsLoading = $state(false);
   let filter = $state("");
   let filterEl: HTMLInputElement | undefined = $state();
+  // Fuzzy: every whitespace-separated token must appear in "name + path", in any
+  // order — so "ue5 main" matches //UE5/Main. Rank by where the first token hits.
   const shownStreams = $derived.by(() => {
     const q = filter.trim().toLowerCase();
     if (!q) return streams;
-    return streams.filter(
-      (s) => s.stream.toLowerCase().includes(q) || s.name.toLowerCase().includes(q),
-    );
+    const tokens = q.split(/\s+/);
+    return streams
+      .map((s) => {
+        const hay = `${s.name}\n${s.stream}`.toLowerCase();
+        const hits = tokens.map((t) => hay.indexOf(t));
+        return hits.every((i) => i >= 0) ? { s, score: Math.min(...hits) } : null;
+      })
+      .filter((m): m is { s: { stream: string; name: string }; score: number } => m !== null)
+      .sort((a, b) => a.score - b.score)
+      .map((m) => m.s);
   });
   async function openPicker() {
     pickerOpen = true;
