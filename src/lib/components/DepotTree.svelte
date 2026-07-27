@@ -99,13 +99,35 @@
     return rootNode;
   });
 
-  function sync(rec?: P4Record): { cls: string; label: string; title: string } {
+  // File sync marker. Tooltip is changelist-based (synced CL, or have/head CL
+  // when behind); the have CL fills in asynchronously for stale files.
+  function sync(node: TreeNode): { cls: string; label: string; title: string } {
+    const rec = node.rec;
     if (!rec) return { cls: "prov", label: "", title: "local (not yet confirmed)" };
     const have = rec.haveRev;
     const head = rec.headRev ?? "";
     if (!have) return { cls: "nosync", label: "", title: "not synced" };
-    if (have === head) return { cls: "synced", label: "●", title: `synced #${have}` };
-    return { cls: "stale", label: `#${have}/${head}`, title: `have #${have}, head #${head}` };
+    if (have === head) {
+      return { cls: "synced", label: "●", title: node.headCl ? `synced (CL ${node.headCl})` : "synced" };
+    }
+    const title = node.headCl
+      ? `have CL ${node.haveCl ?? "…"} / head CL ${node.headCl}`
+      : `have #${have}, head #${head}`;
+    return { cls: "stale", label: `#${have}/${head}`, title };
+  }
+  // Folder sync marker: have-change vs head-change under the folder.
+  function folderSync(node: TreeNode): { cls: string; label: string; title: string } {
+    const s = node.folderSync;
+    if (s === "synced") {
+      return { cls: "synced", label: "●", title: node.headCl ? `synced (CL ${node.headCl})` : "all files synced" };
+    }
+    if (s === "stale") {
+      const title = node.headCl
+        ? `have CL ${node.haveCl ?? "…"} / head CL ${node.headCl}`
+        : "some files behind head";
+      return { cls: "stale", label: "●", title };
+    }
+    return { cls: "nosync", label: "", title: "" };
   }
 </script>
 
@@ -199,7 +221,10 @@
       <span class="name">{node.name}</span>
       {#if node.loading}<span class="dim sp">…</span>{/if}
       {#if !node.isDir}
-        {@const s = sync(node.rec)}
+        {@const s = sync(node)}
+        <span class="sync {s.cls}" title={s.title}>{s.label}</span>
+      {:else if node.folderSync}
+        {@const s = folderSync(node)}
         <span class="sync {s.cls}" title={s.title}>{s.label}</span>
       {/if}
     </button>

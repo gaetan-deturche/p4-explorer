@@ -32,6 +32,7 @@ pub fn run() {
             commands::p4_changes,
             commands::p4_pending,
             commands::p4_have_change,
+            commands::p4_changes_exact,
             commands::p4_describe,
             commands::p4_filelog,
             commands::p4_fstat,

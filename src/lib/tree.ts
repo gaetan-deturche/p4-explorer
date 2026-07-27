@@ -10,6 +10,9 @@ export interface TreeNode {
   loaded: boolean; // children fetched from the server at least once
   loading: boolean;
   untracked?: boolean; // Local source: on disk but not in the depot (ignored/uncommitted)
+  folderSync?: "synced" | "stale" | "nosync"; // dir: have-change vs head-change under it
+  haveCl?: string; // synced changelist (for the sync tooltip)
+  headCl?: string; // latest available changelist (for the sync tooltip)
   children: TreeNode[];
 }
 

@@ -81,6 +81,7 @@ export const p4 = {
     call("p4_changes", { conn, path, max, before: before ?? null }),
   pending: (conn: P4Conn, max = 50) => call("p4_pending", { conn, max }),
   haveChange: (conn: P4Conn, path: string) => call("p4_have_change", { conn, path }),
+  changesExact: (conn: P4Conn, spec: string) => call("p4_changes_exact", { conn, spec }),
   describe: (conn: P4Conn, change: string) => call("p4_describe", { conn, change }),
   filelog: (conn: P4Conn, file: string, max = 100) => call("p4_filelog", { conn, file, max }),
   fstat: (conn: P4Conn, file: string) => call("p4_fstat", { conn, file }),

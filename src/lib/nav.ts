@@ -69,6 +69,16 @@ export function saveLastServer(server: string): void {
   if (server) set(LAST_SERVER, server);
 }
 
+const BROWSE_SRC = "nav:browseSource";
+/** The Files-pane data source, persisted globally. Defaults to `local`. */
+export function loadBrowseSource(): "local" | "workspace" | "depot" {
+  const v = get(BROWSE_SRC);
+  return v === "workspace" || v === "depot" ? v : "local";
+}
+export function saveBrowseSource(s: "local" | "workspace" | "depot"): void {
+  set(BROWSE_SRC, s);
+}
+
 /** The last workspace (client) used on `server`, or "" if none. */
 export function loadClientFor(server: string): string {
   return server ? (get(clientKey(server)) ?? "") : "";

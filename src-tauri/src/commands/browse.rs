@@ -119,6 +119,13 @@ pub async fn p4_have_change(conn: P4Conn, path: String) -> Res {
     run(conn, v(&["changes", "-m", "1", &spec])).await
 }
 
+/// Latest submitted change for an EXACT spec, verbatim (no `/...` appended) —
+/// e.g. `//depot/file.cpp#have` to get a single file's synced changelist.
+#[tauri::command]
+pub async fn p4_changes_exact(conn: P4Conn, spec: String) -> Res {
+    run(conn, v(&["changes", "-m", "1", "-s", "submitted", &spec])).await
+}
+
 /// Full description of a changelist, exploded to one row per affected file.
 #[tauri::command]
 pub async fn p4_describe(conn: P4Conn, change: String) -> Res {
