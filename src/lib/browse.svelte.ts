@@ -144,6 +144,29 @@ function applyFileCl(node: TreeNode, rec: P4Record): void {
   else computeFileHaveCl(node); // stale → fetch the synced (have) CL in the background
 }
 
+/** Apply the Local-source sync/ignored markers to a folder's children from a
+ *  server listing: `dirs` = subfolder basenames present in the depot, `files` =
+ *  fstat records (have/head). Anything on disk but absent is `untracked`. */
+function applyLocalMarkers(children: TreeNode[], dirs: string[], files: P4Record[]): void {
+  const sDirs = new Set(dirs.map((x) => x.toLowerCase()));
+  const sFiles = new Map<string, P4Record>();
+  for (const r of files) if (r.depotFile) sFiles.set(base(r.depotFile).toLowerCase(), r);
+  for (const k of children) {
+    const bn = base(k.path).toLowerCase();
+    if (k.isDir) {
+      k.untracked = !sDirs.has(bn);
+      if (!k.untracked) computeFolderSync(k);
+    } else {
+      const rec = sFiles.get(bn);
+      k.untracked = !rec;
+      if (rec) {
+        k.rec = rec;
+        applyFileCl(k, rec);
+      }
+    }
+  }
+}
+
 // Search-index keys, one namespace per source (see the index section below).
 function wsKey(): string {
   return h!.conn().client;
@@ -312,38 +335,52 @@ export const browse = {
     }
 
     if (source === "local") {
-      // Show the on-disk listing immediately — do NOT block folder-open on the
-      // server round-trip. The sync markers + ignored/uncommitted greying fill
-      // in when the (async) server listing for this folder arrives.
-      const local = await localChildren(clientRoot, rootPath, path);
-      node.children = local ? buildChildren(local) : [];
+      // Paint the cached disk listing AND cached sync/ignored markers instantly,
+      // then re-read the disk + fetch the server listing in the background to
+      // refresh both. Nothing here blocks folder-open.
+      const client = h.conn().client;
+      const localScope = `p4local:${client}`; // disk structure
+      const markScope = `p4localmark:${client}`; // server listing → sync markers
+      const parseJson = <T>(s: string | null): T | null => {
+        try {
+          return s ? (JSON.parse(s) as T) : null;
+        } catch {
+          return null;
+        }
+      };
+      const cachedLocal = parseJson<FolderContents>(cacheGetSync(localScope, path));
+      const cachedMark = parseJson<{ dirs: string[]; files: P4Record[] }>(
+        cacheGetSync(markScope, path),
+      );
+      const local = cachedLocal ?? (await localChildren(clientRoot, rootPath, path));
+      const kids = local ? buildChildren(local) : [];
+      // Apply cached markers BEFORE assigning children, so the sync dots paint in
+      // the same render as the files (not a tick later).
+      if (cachedMark) applyLocalMarkers(kids, cachedMark.dirs, cachedMark.files);
+      node.children = kids;
       node.loaded = true;
       node.loading = false;
+
       const conn = h.conn();
       const q = browse.toQuery(path);
-      void Promise.all([
-        safe(() => p4.dirs(conn, q)),
-        safe(() => p4.files(conn, q)),
-      ]).then(([d, f]) => {
-        const sDirs = new Set(d.map((r) => base(r.dir ?? "").toLowerCase()));
-        const sFiles = new Map<string, P4Record>(); // basename -> fstat rec (sync marker)
-        for (const r of f) if (r.depotFile) sFiles.set(base(r.depotFile).toLowerCase(), r);
-        // Mutate THROUGH node.children (the reactive proxy) so the UI updates.
-        for (const k of node.children) {
-          const bn = base(k.path).toLowerCase();
-          if (k.isDir) {
-            k.untracked = !sDirs.has(bn);
-            if (!k.untracked) computeFolderSync(k); // background sync marker
-          } else {
-            const rec = sFiles.get(bn);
-            k.untracked = !rec; // on disk but not in the depot
-            if (rec) {
-              k.rec = rec; // gives the file its have/head sync marker
-              applyFileCl(k, rec);
-            }
-          }
+      void (async () => {
+        // Refresh the disk structure cache (self-corrects on the next load).
+        if (cachedLocal) {
+          const fresh = await localChildren(clientRoot, rootPath, path);
+          if (fresh) cacheSet(localScope, path, JSON.stringify(fresh));
+        } else if (local) {
+          cacheSet(localScope, path, JSON.stringify(local));
         }
-      });
+        // Refresh the server listing → sync markers, and cache them.
+        const [d, f] = await Promise.all([
+          safe(() => p4.dirs(conn, q)),
+          safe(() => p4.files(conn, q)),
+        ]);
+        const dirs = d.map((r) => base(r.dir ?? "")).filter(Boolean);
+        const files = f.filter((r) => r.depotFile);
+        cacheSet(markScope, path, JSON.stringify({ dirs, files }));
+        applyLocalMarkers(node.children, dirs, files);
+      })();
       return;
     }
 

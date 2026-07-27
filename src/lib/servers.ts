@@ -1,22 +1,29 @@
-//! Server-list persistence for the Server dropdown (remembered P4PORTs).
+//! Server-list persistence for the Server dropdown (remembered P4PORTs). Backed
+//! by the store (SQLite source of truth), so the list survives a localStorage
+//! reset — it's critical state, not a disposable cache.
 
-const SERVERS_KEY = "p4:servers";
+import { cacheGetSync, cacheGet, cacheSet } from "$lib/store";
+
+const SERVERS_KEY = "servers"; // store scope `nav`
 
 export function loadServers(): string[] {
   try {
-    const s = localStorage.getItem(SERVERS_KEY);
-    return s ? (JSON.parse(s) as string[]) : [];
+    return JSON.parse(cacheGetSync("nav", SERVERS_KEY) ?? "[]") as string[];
+  } catch {
+    return [];
+  }
+}
+/** Server list including the SQLite source of truth (for a lost localStorage). */
+export async function loadServersAsync(): Promise<string[]> {
+  try {
+    return JSON.parse((await cacheGet("nav", SERVERS_KEY)) ?? "[]") as string[];
   } catch {
     return [];
   }
 }
 
 export function saveServers(list: string[]) {
-  try {
-    localStorage.setItem(SERVERS_KEY, JSON.stringify(list));
-  } catch {
-    /* quota / disabled: ignore */
-  }
+  cacheSet("nav", SERVERS_KEY, JSON.stringify(list));
 }
 
 /** Return `list` with `port` appended (deduped, trimmed) — same ref if unchanged. */

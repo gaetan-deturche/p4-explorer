@@ -161,10 +161,20 @@ fn ensure_loaded(state: &AppState, client: &str) -> Arc<Vec<Entry>> {
     entries
 }
 
-/// Number of indexed files for a client (0 = needs building).
+/// Number of indexed files for a client (0 = needs building). A COUNT query, so
+/// it does NOT load the (potentially millions of) rows into memory — that only
+/// happens on an actual search (`ensure_loaded`).
 #[tauri::command]
 pub async fn index_status(state: State<'_, AppState>, client: String) -> Result<usize, String> {
-    Ok(ensure_loaded(&state, &client).len())
+    let db = state.db.lock().unwrap();
+    let n: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM file_index WHERE client=?1",
+            [&client],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(n as usize)
 }
 
 /// Depot paths from `p4 files <pattern>`, dropping deleted/purged/archived revs.

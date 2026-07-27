@@ -4,7 +4,7 @@
 //! page (it is two-way bound by dialogs); this store drives everything around it.
 
 import { p4, pickFolder as pickFolderCmd, type P4Conn, type P4Record } from "$lib/p4";
-import { loadServers, saveServers, withServer, withoutServer } from "$lib/servers";
+import { loadServers, loadServersAsync, saveServers, withServer, withoutServer } from "$lib/servers";
 import {
   loadClientFor,
   saveClientFor,
@@ -117,6 +117,8 @@ export const connection = {
   init(hooks: Hooks) {
     h = hooks;
     servers = loadServers();
+    // If localStorage was reset, recover the list from the SQLite source of truth.
+    if (!servers.length) loadServersAsync().then((l) => (servers = l.length ? l : servers));
     // Ease off background polling when the app isn't focused.
     if (typeof window !== "undefined") {
       window.addEventListener("focus", () => connection.setFocused(true));
@@ -176,13 +178,17 @@ export const connection = {
     }
   },
 
-  async connect(opts?: { skipAuth?: boolean }) {
+  async connect(opts?: { skipAuth?: boolean; skipReselect?: boolean }) {
     if (!h) return;
     const conn = h.conn();
-    busy = true;
+    // `skipReselect`: a background validation of an already-open (optimistically
+    // shown) workspace — don't flip the UI into a connecting/empty state.
+    if (!opts?.skipReselect) {
+      busy = true;
+      clients = []; // don't show the previous server's workspaces while switching
+      localClients = new Set();
+    }
     connection.stopKeepAlive(); // no health-check poll while (re)connecting
-    clients = []; // don't show the previous server's workspaces while switching
-    localClients = new Set();
     h.setConnError("");
     try {
       // Seed the server dropdown: adopt the ambient P4PORT if none was set.
@@ -284,7 +290,7 @@ export const connection = {
       // the BACKGROUND — so selecting the workspace doesn't wait on a `p4 clients`
       // round-trip (noticeable on a remote server like Epic).
       const cachedClients = loadClientsFor(conn.port);
-      if (cachedClients.length) setClientList(cachedClients);
+      if (cachedClients.length && !opts?.skipReselect) setClientList(cachedClients);
       const refreshClients = p4
         .clients(conn)
         .then((fresh) => {
@@ -293,13 +299,17 @@ export const connection = {
         })
         .catch(() => {});
 
-      const cachedTarget = pick(clients);
-      if (cachedTarget) {
-        await connection.selectClient(cachedTarget); // open now, from the cached list
+      if (opts?.skipReselect) {
+        await refreshClients; // workspace already open — just refresh list + Host marks
       } else {
-        await refreshClients; // no usable cache — need the fresh list to pick a target
-        const t = pick(clients);
-        if (t) await connection.selectClient(t);
+        const cachedTarget = pick(clients);
+        if (cachedTarget) {
+          await connection.selectClient(cachedTarget); // open now, from the cached list
+        } else {
+          await refreshClients; // no usable cache — need the fresh list to pick a target
+          const t = pick(clients);
+          if (t) await connection.selectClient(t);
+        }
       }
     } catch (e) {
       connected = false;
@@ -344,9 +354,26 @@ export const connection = {
     if (port === conn.port) return;
     conn.port = port;
     conn.user = loadUserFor(port); // this server's remembered user ("" → ambient)
+    conn.charset = loadCharsetFor(port);
     conn.client = "";
     browse.reset();
-    await connection.connect();
+
+    // Optimistic fast path for a KNOWN server: show its cached workspace list and
+    // open the saved workspace immediately (its views paint from the store), then
+    // validate auth + refresh in the background. Unknown/first-time servers take
+    // the full blocking connect (SSL/trust/charset first-connect fixup).
+    const cachedClients = loadClientsFor(port);
+    const savedClient = loadClientFor(port);
+    const hasTarget =
+      !!savedClient && cachedClients.some((c) => c.client === savedClient && c.Stream);
+    if (hasTarget) {
+      connected = true; // optimistic — reverted by connect() below if auth fails
+      setClientList(cachedClients);
+      await connection.selectClient(savedClient); // opens the cached workspace instantly
+      void connection.connect({ skipReselect: true }); // validate + refresh in background
+    } else {
+      await connection.connect();
+    }
   },
   /** Create a new stream workspace bound to this machine, then switch to it. */
   async createWorkspace(name: string, root: string, stream: string) {
