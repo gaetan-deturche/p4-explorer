@@ -23,6 +23,51 @@ let loading = $state(false);
 let version = $state(0); // bumps on every (re)load so views refetch file lists
 let reviews = $state<Record<string, ReviewInfo | null>>({}); // change → Swarm review status
 
+// Offline changes (files modified/added/deleted on disk but not open in any
+// changelist). Scanned on its own low-rate timer — a workspace-wide p4 scan is
+// slow, so it's decoupled from the fast pending refresh and eased off further
+// when the app is in the background.
+let offline = $state<P4Record[]>([]);
+let offlineScanning = $state(false);
+let offlineTimer: number | null = null;
+let offlineStopped = true;
+let offlineFocused = true;
+const OFFLINE_MS_FOCUS = 300_000; // 5 min (the scan itself is ~30s)
+const OFFLINE_MS_BG = 1_800_000; // 30 min in the background
+
+// Persist the last offline result per workspace so switching back shows it
+// instantly (a fresh scan then refreshes in the background). Survives restart.
+function offlineKey(client: string): string {
+  return `p4:offline:${client}`;
+}
+function loadOfflineCache(client: string): P4Record[] {
+  try {
+    const s = client ? localStorage.getItem(offlineKey(client)) : null;
+    return s ? (JSON.parse(s) as P4Record[]) : [];
+  } catch {
+    return [];
+  }
+}
+function saveOfflineCache(client: string, recs: P4Record[]): void {
+  try {
+    if (client) localStorage.setItem(offlineKey(client), JSON.stringify(recs));
+  } catch {
+    /* quota / disabled — best effort */
+  }
+}
+
+// Self-scheduling loop: the next scan is armed only after the current one
+// finishes, so a long (~30s) scan never overlaps or piles up behind a timer.
+async function runOfflineLoop() {
+  if (offlineStopped) return;
+  const ran = await pending.scanOffline();
+  if (offlineStopped) return;
+  // If the scan was skipped (another scan held the lock — e.g. right after a
+  // workspace switch), retry soon instead of waiting the full interval.
+  const delay = ran ? (offlineFocused ? OFFLINE_MS_FOCUS : OFFLINE_MS_BG) : 5_000;
+  offlineTimer = window.setTimeout(runOfflineLoop, delay);
+}
+
 export const pending = {
   init(hooks: Hooks) {
     h = hooks;
@@ -39,12 +84,75 @@ export const pending = {
   get reviews() {
     return reviews;
   },
+  get offline() {
+    return offline;
+  },
+  get offlineScanning() {
+    return offlineScanning;
+  },
 
   /** Drop the current list (on disconnect / workspace switch). */
   clear() {
     rows = [];
     loading = false;
     reviews = {};
+    offline = [];
+    pending.stopOfflineScan();
+  },
+
+  /** Scan the whole workspace for offline changes (read-only p4 preview). The
+   *  in-flight guard lives on `window`, so it serializes even across stray
+   *  duplicate scan loops (e.g. dev-HMR module reloads) — a workspace-wide p4
+   *  scan must never run more than once at a time. */
+  async scanOffline(): Promise<boolean> {
+    if (!h || !h.connected() || !h.conn().client) {
+      offline = [];
+      return true;
+    }
+    const w = window as unknown as { __p4guiOfflineBusy?: boolean };
+    if (w.__p4guiOfflineBusy) return false; // a scan is already running — skipped
+    w.__p4guiOfflineBusy = true;
+    offlineScanning = true;
+    const conn = h.conn();
+    const client = conn.client; // snapshot: the workspace THIS scan is for
+    try {
+      const recs = await p4.status(conn).catch(() => [] as P4Record[]);
+      // Keep only real change entries (an action + a file).
+      const result = recs.filter((r) => (r.action ?? r.status) && (r.clientFile || r.depotFile));
+      saveOfflineCache(client, result); // cache under the scanned workspace (not the current one)
+      // Only show it if we're STILL on that workspace — a switch may have happened
+      // during the (~30s) scan, and a stale result must not overwrite the new view.
+      if (h && h.conn().client === client) offline = result;
+      return true;
+    } finally {
+      offlineScanning = false;
+      w.__p4guiOfflineBusy = false;
+    }
+  },
+  /** Start the low-rate offline-change scan: show the cached result immediately,
+   *  then run a fresh scan (and keep polling) to update it. Idempotent — if a
+   *  loop is already running, just refresh the cached display. */
+  startOfflineScan() {
+    if (!h) return;
+    offline = loadOfflineCache(h.conn().client); // instant: last known set for this workspace
+    if (!offlineStopped) return; // a loop is already active — don't spawn another
+    offlineStopped = false;
+    runOfflineLoop();
+  },
+  stopOfflineScan() {
+    offlineStopped = true;
+    if (offlineTimer !== null) clearTimeout(offlineTimer);
+    offlineTimer = null;
+  },
+  /** Focus-aware pacing: slow the offline scan right down in the background, and
+   *  pull the next scan in soon when focus returns. */
+  setFocused(v: boolean) {
+    if (v === offlineFocused) return;
+    offlineFocused = v;
+    if (!offlineStopped && v && offlineTimer !== null) {
+      clearTimeout(offlineTimer);
+      offlineTimer = window.setTimeout(runOfflineLoop, 2000);
+    }
   },
 
   /** (Re)load the client's pending changelists (Default prepended). */
@@ -226,6 +334,9 @@ export const pending = {
   },
   localDiff(file: string): Promise<string> {
     return p4.diffLocal(h!.conn(), file);
+  },
+  offlineDiff(file: string): Promise<string> {
+    return p4.diffOffline(h!.conn(), file); // -f: diff an unopened (offline) file
   },
   shelvedDiff(file: string, rev: number, change: string): Promise<string> {
     return p4.diffShelved(h!.conn(), file, rev, change);

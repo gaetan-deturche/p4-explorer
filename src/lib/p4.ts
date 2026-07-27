@@ -87,6 +87,7 @@ export const p4 = {
   fstat: (conn: P4Conn, file: string) => call("p4_fstat", { conn, file }),
   sync: (conn: P4Conn, path?: string) => call("p4_sync", { conn, path: path ?? null }),
   reconcile: (conn: P4Conn, path: string) => call("p4_reconcile", { conn, path }),
+  status: (conn: P4Conn) => call("p4_status", { conn }),
   resync: (conn: P4Conn, files: string[], force: boolean) =>
     call("p4_resync", { conn, files, force }),
   syncStream: (conn: P4Conn, path?: string) =>
@@ -120,6 +121,8 @@ export const p4 = {
   trust: (conn: P4Conn) => g<void>("p4_trust", { conn }),
   opened: (conn: P4Conn, change: string) => call("p4_opened", { conn, change }),
   diffLocal: (conn: P4Conn, depotFile: string) => g<string>("p4_diff_local", { conn, depotFile }),
+  diffOffline: (conn: P4Conn, depotFile: string) =>
+    g<string>("p4_diff_local_forced", { conn, depotFile }),
   exportPatch: (conn: P4Conn, change: string, files: string[], defaultName: string) =>
     g<string | null>("export_patch", { conn, change, files, defaultName }),
   openDiffLocal: (conn: P4Conn, depotFile: string) => g<void>("open_diff_local", { conn, depotFile }),

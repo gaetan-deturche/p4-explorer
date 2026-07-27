@@ -227,3 +227,21 @@ pub async fn p4_reconcile(conn: P4Conn, path: String) -> Res {
     };
     run(conn, v(&["reconcile", &spec])).await
 }
+
+/// Read-only preview of offline changes across the whole workspace: tracked
+/// files modified or missing on disk but not open in any changelist
+/// (`p4 reconcile -n -e -d -m //<client>/...`). `-m` compares modification times
+/// instead of digesting every file (~24s vs minutes), and `-a` (new-file
+/// discovery, a full filesystem walk) is omitted — both are what make reconcile
+/// slow. The cost is disk-stat-bound and can't be parallelized meaningfully, so
+/// callers scan on a low-rate background timer. Each record carries `action`
+/// (edit/delete) plus depotFile/clientFile.
+#[tauri::command]
+pub async fn p4_status(conn: P4Conn) -> Res {
+    let spec = if conn.client.is_empty() {
+        "...".to_string()
+    } else {
+        format!("//{}/...", conn.client)
+    };
+    run(conn, v(&["reconcile", "-n", "-e", "-d", "-m", &spec])).await
+}

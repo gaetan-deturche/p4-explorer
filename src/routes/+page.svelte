@@ -517,6 +517,10 @@
           client={conn.client}
           refreshKey={pending.version}
           reviews={pending.reviews}
+          offline={pending.offline}
+          offlineScanning={pending.offlineScanning}
+          onOfflineDiff={pending.offlineDiff}
+          onOpenOfflineDiff={pending.openLocalDiff}
           contextChange={pendingCtx?.cl.change ?? ""}
           onLocalFiles={pending.localFiles}
           onShelvedFiles={pending.shelvedFiles}

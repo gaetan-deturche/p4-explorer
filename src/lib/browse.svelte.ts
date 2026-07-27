@@ -256,6 +256,7 @@ export const browse = {
       }
     }
     pending.load();
+    pending.startOfflineScan(); // low-rate workspace scan for offline changes
 
     // A saved "repo" tab no longer exists (Depot is a Files-pane source now).
     const valid: Tab[] = ["history", "pending", "streams", "log"];

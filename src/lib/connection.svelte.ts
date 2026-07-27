@@ -18,6 +18,7 @@ import {
 } from "$lib/nav";
 import { browse } from "$lib/browse.svelte";
 import { history } from "$lib/history.svelte";
+import { pending } from "$lib/pending.svelte";
 
 type Tab = "history" | "pending" | "streams" | "log";
 type Hooks = {
@@ -35,6 +36,12 @@ type Hooks = {
 
 let h: Hooks | null = null;
 let keepAliveId: number | null = null;
+let focused = true; // window focus; slows background polling
+const KEEPALIVE_MS_FOCUS = 20_000;
+const KEEPALIVE_MS_BG = 120_000;
+function keepAliveMs(): number {
+  return focused ? KEEPALIVE_MS_FOCUS : KEEPALIVE_MS_BG;
+}
 
 /** Prepend the `ssl:` prefix Perforce needs when the user omits a protocol —
  *  most servers are SSL and typing a bare host:port otherwise fails to connect. */
@@ -101,13 +108,25 @@ function startKeepAlive() {
         h.setConnError("Lost connection to the Perforce server. Retrying…");
       }
     }
-  }, 20000);
+  }, keepAliveMs());
 }
 
 export const connection = {
   init(hooks: Hooks) {
     h = hooks;
     servers = loadServers();
+    // Ease off background polling when the app isn't focused.
+    if (typeof window !== "undefined") {
+      window.addEventListener("focus", () => connection.setFocused(true));
+      window.addEventListener("blur", () => connection.setFocused(false));
+    }
+  },
+  /** Window focus changed → re-pace the keep-alive and the offline scan. */
+  setFocused(v: boolean) {
+    if (v === focused) return;
+    focused = v;
+    if (keepAliveId !== null) startKeepAlive(); // re-arm keep-alive at the new rate
+    pending.setFocused(v);
   },
   get connected() {
     return connected;

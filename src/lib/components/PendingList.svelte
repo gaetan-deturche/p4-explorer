@@ -8,6 +8,10 @@
     client,
     refreshKey,
     reviews,
+    offline,
+    offlineScanning,
+    onOfflineDiff,
+    onOpenOfflineDiff,
     onLocalFiles,
     onShelvedFiles,
     onLocalDiff,
@@ -24,6 +28,10 @@
     client: string; // resets the per-CL cache when the workspace changes
     refreshKey: number; // bumps when pending data changes → refetch open CLs' files
     reviews: Record<string, ReviewInfo | null>; // change → Swarm review status
+    offline: P4Record[]; // files changed on disk but not open in any changelist
+    offlineScanning: boolean; // an offline-change scan is in progress
+    onOfflineDiff: (depotFile: string) => Promise<string>; // forced local-vs-server diff
+    onOpenOfflineDiff: (depotFile: string) => void; // open the offline diff externally
     contextChange: string; // the changelist whose context menu is open (highlight it)
     onLocalFiles: (change: string) => Promise<P4Record[]>; // opened (workspace) files
     onShelvedFiles: (change: string) => Promise<P4Record[]>; // shelved files
@@ -228,11 +236,29 @@
     if (kind === "local") onOpenLocalDiff(f.depotFile);
     else onOpenShelvedDiff(f.depotFile, Number(f.rev), change);
   }
+  // Inline diff for offline (unopened) files — forced local-vs-server diff.
+  let offlineDiffs = $state<Record<string, { open: boolean; loading: boolean; text: string }>>({});
+  async function toggleOfflineDiff(f: P4Record) {
+    const key = f.depotFile ?? f.clientFile ?? "";
+    const cur = offlineDiffs[key];
+    if (cur?.open) {
+      offlineDiffs[key] = { ...cur, open: false };
+      return;
+    }
+    if (cur && !cur.loading) {
+      offlineDiffs[key] = { ...cur, open: true };
+      return;
+    }
+    offlineDiffs[key] = { open: true, loading: true, text: "" };
+    const text = await onOfflineDiff(f.depotFile ?? "");
+    offlineDiffs[key] = { open: true, loading: false, text };
+  }
 
   function splitPath(p: string): { dir: string; name: string } {
     const i = p.lastIndexOf("/");
     return i >= 0 ? { dir: p.slice(0, i + 1), name: p.slice(i + 1) } : { dir: "", name: p };
   }
+  let offlineOpen = $state(true); // the "Offline changes" group is expanded
 </script>
 
 <div class="panel">
@@ -311,6 +337,48 @@
           {/if}
         {/if}
       {/each}
+
+      {#if offline.length > 0 || offlineScanning}
+        <button class="cl offlinehdr" onclick={() => (offlineOpen = !offlineOpen)}>
+          <span class="tw">{offlineOpen ? "▾" : "▸"}</span>
+          <span class="cnum mono">Offline</span>
+          <span class="desc">modified on disk, not checked out</span>
+          <span class="user dim">{offlineScanning ? "scanning…" : offline.length}</span>
+        </button>
+        {#if offlineOpen}
+          {#if offline.length === 0}
+            <div class="finfo dim">Scanning…</div>
+          {:else}
+            {#each offline as f (f.clientFile ?? f.depotFile)}
+              {@const key = f.depotFile ?? f.clientFile ?? ""}
+              {@const od = offlineDiffs[key]}
+              {@const sp = splitPath(f.depotFile ?? f.clientFile ?? "")}
+              <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
+              <div
+                class="frow mono"
+                style="padding-left:20px"
+                title={"Double-click to open in external diff\n" + (f.clientFile ?? f.depotFile ?? "")}
+                ondblclick={() => onOpenOfflineDiff(f.depotFile ?? "")}
+              >
+                <button class="fchev" title="Show diff" onclick={() => toggleOfflineDiff(f)}>
+                  {od?.open ? "▾" : "▸"}
+                </button>
+                <span class="act act-{f.action}">{f.action ?? ""}</span>
+                <span class="fpath"><span class="pfile">{sp.name}</span><span class="pdir dim">{sp.dir}</span></span>
+              </div>
+              {#if od?.open}
+                {#if od.loading}
+                  <div class="finfo dim" style="padding-left:36px">Loading diff…</div>
+                {:else if !od.text.trim()}
+                  <div class="finfo dim" style="padding-left:36px">No diff (identical, or file gone).</div>
+                {:else}
+                  <DiffView text={od.text} />
+                {/if}
+              {/if}
+            {/each}
+          {/if}
+        {/if}
+      {/if}
     {/if}
   </div>
   {#if marquee}

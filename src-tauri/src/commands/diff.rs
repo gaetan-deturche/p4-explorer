@@ -88,6 +88,18 @@ pub async fn p4_diff_local(conn: P4Conn, depot_file: String) -> Result<String, S
     .map_err(|e| format!("diff task failed: {e}"))?
 }
 
+/// As `p4_diff_local`, but `-f` forces the diff for a file that is NOT open —
+/// used for offline-modified files. Text files give a unified diff; binaries
+/// give a "files differ" line.
+#[tauri::command]
+pub async fn p4_diff_local_forced(conn: P4Conn, depot_file: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        p4::run_raw_stdout_diff(&conn, &["diff", "-f", "-du", &depot_file])
+    })
+    .await
+    .map_err(|e| format!("diff task failed: {e}"))?
+}
+
 /// Open an opened file's local-vs-server diff in the external tool (depot #have
 /// on the left, the live workspace file on the right).
 #[tauri::command]
