@@ -212,21 +212,67 @@ export const pending = {
     }
   },
   /** As `mutate`, but confirm first. */
-  async action(runFn: () => Promise<unknown>, msg: string, title: string, ok: string, note: string) {
+  async action(
+    runFn: () => Promise<unknown>,
+    msg: string,
+    title: string,
+    ok: string,
+    note: string,
+    opts?: { refresh?: boolean },
+  ) {
     if (!h || !h.connected() || h.syncing()) return;
     if (!(await h.askConfirm(msg, title, ok))) return;
-    await pending.mutate(runFn, note);
+    await pending.mutate(runFn, note, opts);
   },
 
-  submit(change: string) {
+  async submit(change: string) {
+    if (!h || !h.connected() || h.syncing()) return;
     const what = change === "default" ? "the default changelist" : `changelist @${change}`;
-    pending.action(
-      () => p4.submit(h!.conn(), change),
+    const go = await h.askConfirm(
       `Submit ${what}?\nThis commits the files to the depot and cannot be undone.`,
       "Submit changelist",
       "Submit",
-      "Changelist submitted.",
     );
+    if (go) await pending.doSubmit(change);
+  },
+  /** Submit, reporting the result of the SUBMIT command itself — a later refresh
+   *  failure must not look like a failed submit (#3). If the submit is blocked by
+   *  shelved files, offer to delete the shelf and submit (#1). */
+  async doSubmit(change: string) {
+    if (!h || h.syncing()) return;
+    const label = change === "default" ? "The default changelist" : `Changelist @${change}`;
+    h.setSyncing(true);
+    try {
+      try {
+        await p4.submit(h.conn(), change);
+      } catch (e) {
+        if (!/shelved/i.test(String(e))) throw e;
+        // Blocked by shelved files — offer to remove the shelf and submit.
+        h.setSyncing(false);
+        const yes = await h.askConfirm(
+          `${label} has shelved files that block the submit.\nRemove the shelf and submit?`,
+          "Shelved files",
+          "Remove shelf & submit",
+        );
+        if (!yes) return;
+        h.setSyncing(true);
+        await p4.shelveDelete(h.conn(), change);
+        await p4.submit(h.conn(), change); // may still throw → outer catch
+      }
+      h.setNotice("Changelist submitted.");
+      // Refresh separately: the submit already succeeded, so a refresh error is
+      // not a submit error (don't surface it as one).
+      try {
+        await h.refresh();
+      } catch {
+        /* submit succeeded regardless */
+      }
+    } catch (e) {
+      h.setError(String(e));
+    } finally {
+      pending.load();
+      h.setSyncing(false);
+    }
   },
   requestReview(change: string) {
     pending.action(
@@ -235,6 +281,7 @@ export const pending = {
       "Request review",
       "Request",
       "Review requested.",
+      { refresh: false }, // shelving changes no synced content
     );
   },
   updateReview(change: string) {
@@ -244,15 +291,19 @@ export const pending = {
       "Update review",
       "Update",
       "Review updated.",
+      { refresh: false }, // shelving changes no synced content
     );
   },
   deleteShelf(change: string) {
+    // Removing a shelf changes no synced content — skip the full tree/index
+    // refresh (it was making this feel slow); just reload the pending list.
     pending.action(
       () => p4.shelveDelete(h!.conn(), change),
       `Delete the shelved files of @${change}?`,
       "Delete shelf",
       "Delete",
       "Shelf deleted.",
+      { refresh: false },
     );
   },
   async openReview(change: string) {

@@ -4,7 +4,7 @@
 //! workspace's last view when switching back to it.
 
 export interface ViewState {
-  tab: "history" | "pending" | "streams" | "log";
+  tab: "history" | "pending" | "streams" | "log" | "notes";
   treePath: string; // selected depot path (tree highlight + history subject)
   histMode: "folder" | "file";
 }
@@ -17,6 +17,7 @@ export interface Views {
   pending: boolean;
   streams: boolean;
   log: boolean; // the p4-command log ("Commands")
+  notes: boolean; // the notification history ("Notifications")
 }
 const DEFAULT_VIEWS: Views = {
   files: true,
@@ -24,6 +25,7 @@ const DEFAULT_VIEWS: Views = {
   pending: true,
   streams: false,
   log: false,
+  notes: false,
 };
 const VIEWS = "nav:views:v3"; // v3: Depot is now a source of the Files pane, not a tab
 export function loadViews(): Views {

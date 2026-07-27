@@ -69,6 +69,7 @@
         { label: "Pending", action: () => onToggleView("pending"), checked: views.pending },
         { label: "Streams", action: () => onToggleView("streams"), checked: views.streams },
         { label: "Commands", action: () => onToggleView("log"), checked: views.log },
+        { label: "Notifications", action: () => onToggleView("notes"), checked: views.notes },
       ],
     },
     {

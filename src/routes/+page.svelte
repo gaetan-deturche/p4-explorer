@@ -9,6 +9,7 @@
   import { browse } from "$lib/browse.svelte";
   import { connection } from "$lib/connection.svelte";
   import { cmdlog } from "$lib/cmdlog.svelte";
+  import { notifications } from "$lib/notifications.svelte";
   import {
     loadLastServer,
     loadUserFor,
@@ -34,6 +35,7 @@
   import HistoryTable from "$lib/components/HistoryTable.svelte";
   import PendingList from "$lib/components/PendingList.svelte";
   import CommandLog from "$lib/components/CommandLog.svelte";
+  import NotificationLog from "$lib/components/NotificationLog.svelte";
   import StreamsBrowser from "$lib/components/StreamsBrowser.svelte";
   import ChangeDetails from "$lib/components/ChangeDetails.svelte";
   import ContextMenu from "$lib/components/ContextMenu.svelte";
@@ -82,10 +84,12 @@
   // Transient status helpers (auto-clear).
   function setNotice(m: string, ms = 4000) {
     notice = m;
+    notifications.add("notice", m);
     window.setTimeout(() => (notice = ""), ms);
   }
   function setError(m: string, ms = 6000) {
     error = m;
+    notifications.add("error", m);
     window.setTimeout(() => (error = ""), ms);
   }
 
@@ -125,7 +129,7 @@
 
   // Center tab. History/details pane lives in $lib/history.svelte.ts; the depot
   // tree, streams/repo tabs and index live in $lib/browse.svelte.ts.
-  let centerTab = $state<"history" | "pending" | "streams" | "log">("pending");
+  let centerTab = $state<"history" | "pending" | "streams" | "log" | "notes">("pending");
 
   const centerRows = $derived(centerTab === "pending" ? pending.rows : history.rows);
 
@@ -133,11 +137,12 @@
   //     View menu. Depot and Streams are hidden by default.
   let views = $state<Views>(loadViews());
   $effect(() => saveViews(views));
-  const TABS: { key: "history" | "pending" | "streams" | "log"; label: string }[] = [
+  const TABS: { key: "history" | "pending" | "streams" | "log" | "notes"; label: string }[] = [
     { key: "history", label: "History" },
     { key: "pending", label: "Pending" },
     { key: "streams", label: "Streams" },
     { key: "log", label: "Commands" },
+    { key: "notes", label: "Notifications" },
   ];
   // Show a center tab (and load its data). History uses the current selection.
   function showTab(key: (typeof TABS)[number]["key"]) {
@@ -335,7 +340,10 @@
     connection.init({
       conn: () => conn,
       getTab: () => centerTab,
-      setConnError: (m) => (error = m),
+      setConnError: (m) => {
+        error = m;
+        notifications.add("error", m);
+      },
       setNotice,
       setOptionsOpen: (v) => (optionsOpen = v),
       getSyncing: () => syncing,
@@ -509,6 +517,8 @@
         />
       {:else if centerTab === "log"}
         <CommandLog entries={cmdlog.entries} onClear={() => cmdlog.clear()} />
+      {:else if centerTab === "notes"}
+        <NotificationLog entries={notifications.entries} onClear={() => notifications.clear()} />
       {:else if centerTab === "pending"}
         <PendingList
           bind:this={pendingList}
