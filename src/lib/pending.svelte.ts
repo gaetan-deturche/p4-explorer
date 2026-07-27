@@ -51,6 +51,20 @@ function saveOfflineCache(client: string, recs: P4Record[]): void {
   if (client) cacheSet("p4:offline", client, JSON.stringify(recs));
 }
 
+// Cached pending changelists per workspace (store scope `p4:pending`) — the
+// numbered CLs only; the synthetic "default" row is re-prepended on load.
+function loadPendingCache(client: string): P4Record[] {
+  if (!client) return [];
+  try {
+    return JSON.parse(cacheGetSync("p4:pending", client) ?? "[]") as P4Record[];
+  } catch {
+    return [];
+  }
+}
+function savePendingCache(client: string, recs: P4Record[]): void {
+  if (client) cacheSet("p4:pending", client, JSON.stringify(recs));
+}
+
 // Self-scheduling loop: the next scan is armed only after the current one
 // finishes, so a long (~30s) scan never overlaps or piles up behind a timer.
 async function runOfflineLoop() {
@@ -155,20 +169,33 @@ export const pending = {
     }
   },
 
-  /** (Re)load the client's pending changelists (Default prepended). */
+  /** (Re)load the client's pending changelists (Default prepended). Shows the
+   *  cached list instantly, then refreshes from the server. */
   async load() {
     if (!h) return;
-    if (!h.connected() || !h.conn().client) {
+    const conn = h.conn();
+    if (!h.connected() || !conn.client) {
       rows = [];
       loading = false;
       reviews = {};
       return;
     }
-    if (rows.length === 0) loading = true; // keep previous list otherwise
-    const r = await p4.pending(h.conn(), 100).catch(() => [] as P4Record[]);
+    const client = conn.client;
+    const def = { change: "default", desc: "", user: conn.user, time: "" } as P4Record;
+    if (rows.length === 0) {
+      const cached = loadPendingCache(client);
+      if (cached.length) {
+        rows = [def, ...cached];
+        version++;
+      } else {
+        loading = true; // nothing to show yet
+      }
+    }
+    const r = await p4.pending(conn, 100).catch(() => [] as P4Record[]);
     loading = false;
-    const def = { change: "default", desc: "", user: h.conn().user, time: "" } as P4Record;
+    if (h.conn().client !== client) return; // switched workspace during the fetch
     rows = [def, ...r];
+    savePendingCache(client, r);
     version++; // signal open changelists to refetch their (now-stale) file lists
     pending.loadReviews(); // fire-and-forget: populate Swarm review badges
   },

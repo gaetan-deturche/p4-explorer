@@ -16,6 +16,7 @@ import {
 } from "$lib/cache";
 import { history } from "$lib/history.svelte";
 import { pending } from "$lib/pending.svelte";
+import { cacheGetSync, cacheSet } from "$lib/store";
 import { loadBrowseSource, saveBrowseSource, type ViewState } from "$lib/nav";
 
 type Tab = "history" | "pending" | "streams" | "log" | "notes";
@@ -58,6 +59,19 @@ async function safe<T>(fn: () => Promise<T[]>): Promise<T[]> {
 let queryRoot = "";
 function base(p: string): string {
   return p.slice(p.lastIndexOf("/") + 1);
+}
+
+// Cached stream list per server (store scope `p4:streams`, key = port).
+function loadStreamsCache(port: string): P4Record[] {
+  if (!port) return [];
+  try {
+    return JSON.parse(cacheGetSync("p4:streams", port) ?? "[]") as P4Record[];
+  } catch {
+    return [];
+  }
+}
+function saveStreamsCache(port: string, rows: P4Record[]): void {
+  if (port) cacheSet("p4:streams", port, JSON.stringify(rows));
 }
 
 // Folder sync markers: have-change vs head-change under a folder (same signal
@@ -477,10 +491,17 @@ export const browse = {
     if (!h) return;
     h.setTab("streams");
     if (!h.connected()) return;
-    if (streamRows.length === 0) streamsLoading = true;
+    const port = h.conn().port;
+    if (streamRows.length === 0) {
+      const cached = loadStreamsCache(port); // instant from cache
+      if (cached.length) streamRows = cached;
+      else streamsLoading = true;
+    }
     const rows = await safe(() => p4.streams(h!.conn()));
     streamsLoading = false;
+    if (h.conn().port !== port) return; // switched server during the fetch
     streamRows = rows;
+    saveStreamsCache(port, rows);
   },
 
   // --- refresh ---------------------------------------------------------------
