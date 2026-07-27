@@ -68,7 +68,6 @@
         { label: "History", action: () => onToggleView("history"), checked: views.history },
         { label: "Pending", action: () => onToggleView("pending"), checked: views.pending },
         { label: "Streams", action: () => onToggleView("streams"), checked: views.streams },
-        { label: "Depot", action: () => onToggleView("repo"), checked: views.repo },
         { label: "Commands", action: () => onToggleView("log"), checked: views.log },
       ],
     },

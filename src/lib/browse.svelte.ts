@@ -17,7 +17,10 @@ import { history } from "$lib/history.svelte";
 import { pending } from "$lib/pending.svelte";
 import type { ViewState } from "$lib/nav";
 
-type Tab = "history" | "pending" | "streams" | "repo" | "log";
+type Tab = "history" | "pending" | "streams" | "log";
+/** The file browser's data source: on-disk files, the workspace stream (server),
+ *  or the whole depot (server, all depots from //). */
+export type BrowseSource = "local" | "workspace" | "depot";
 type Hooks = {
   conn: () => P4Conn;
   connected: () => boolean;
@@ -32,13 +35,12 @@ let rootPath = $state(""); // stream root, e.g. //Curiosity/main
 let clientRoot = $state(""); // local workspace root, e.g. H:\Dev\...\Curiosity
 let tree = $state<TreeNode | null>(null);
 let selectedTreePath = $state("");
+let source = $state<BrowseSource>("workspace"); // Files pane data source
 let refreshing = $state(false);
 let indexing = $state(false);
 let indexCount = $state(0);
 let streamRows = $state<P4Record[]>([]);
 let streamsLoading = $state(false);
-let repoTree = $state<TreeNode | null>(null);
-let repoSelected = $state("");
 
 async function safe<T>(fn: () => Promise<T[]>): Promise<T[]> {
   try {
@@ -55,6 +57,26 @@ async function safe<T>(fn: () => Promise<T[]>): Promise<T[]> {
 let queryRoot = "";
 function base(p: string): string {
   return p.slice(p.lastIndexOf("/") + 1);
+}
+
+/** The root tree node for the current source: the `//` depots root for `depot`,
+ *  else the workspace stream root (local & workspace share it; only the child
+ *  listing differs). */
+function rootForSource(): TreeNode {
+  if (source === "depot") {
+    return {
+      path: "//",
+      name: "Depots",
+      isDir: true,
+      expanded: true,
+      loaded: false,
+      loading: false,
+      children: [],
+    };
+  }
+  const n = makeNode(rootPath, true);
+  n.expanded = true;
+  return n;
 }
 
 export const browse = {
@@ -92,11 +114,21 @@ export const browse = {
   get streamsLoading() {
     return streamsLoading;
   },
-  get repoTree() {
-    return repoTree;
+  get source() {
+    return source;
   },
-  get repoSelected() {
-    return repoSelected;
+  /** Switch the Files pane between on-disk / workspace-server / whole-depot and
+   *  rebuild its tree. Depot needs no open workspace; the others need `rootPath`. */
+  async setSource(s: BrowseSource) {
+    if (!h || s === source) return;
+    source = s;
+    selectedTreePath = "";
+    if (s !== "depot" && !rootPath) {
+      tree = null;
+      return;
+    }
+    tree = rootForSource();
+    await browse.loadNode(tree);
   },
 
   /** Clear all browse state (on disconnect / workspace switch). */
@@ -106,11 +138,10 @@ export const browse = {
     clientRoot = "";
     tree = null;
     selectedTreePath = "";
+    source = "workspace";
     history.reset();
     pending.clear();
     streamRows = [];
-    repoTree = null;
-    repoSelected = "";
   },
 
   /** Point the browser at a workspace stream and load its data, restoring the
@@ -121,6 +152,7 @@ export const browse = {
     if (!h) return;
     clientRoot = root;
     rootPath = stream;
+    source = "workspace"; // entering a workspace lands on its stream (server) view
     queryRoot = "//" + h.conn().client; // browse through the client view
     tree = makeNode(stream, true);
     tree.expanded = true;
@@ -136,22 +168,49 @@ export const browse = {
     }
     pending.load();
 
-    const tab = view?.tab ?? fallbackTab;
+    // A saved "repo" tab no longer exists (Depot is a Files-pane source now).
+    const valid: Tab[] = ["history", "pending", "streams", "log"];
+    const tab = valid.includes(view?.tab as Tab) ? (view!.tab as Tab) : fallbackTab;
     if (tab === "streams") browse.loadStreams();
-    else if (tab === "repo") browse.openRepo();
     browse.ensureIndex(); // background: build the fuzzy-search index if new
     h.setTab(tab);
     await browse.loadNode(tree); // `tree` is the reactive proxy — mutate through it
   },
 
-  // --- depot tree ------------------------------------------------------------
-  // Populate a directory node's children: instant from cache/local disk, then
-  // the authoritative p4 listing replaces it (stale-while-revalidate).
+  // --- file tree -------------------------------------------------------------
+  // Populate a directory node's children. Dispatches on the current source:
+  // depot (server, all depots), local (on-disk listing), or workspace (server
+  // stream with stale-while-revalidate caching).
   async loadNode(node: TreeNode) {
     if (!h || node.loading) return;
     node.loading = true;
     const path = node.path;
 
+    if (source === "depot") {
+      if (path === "//") {
+        const depots = await safe(() => p4.depots(h!.conn()));
+        node.children = depots.filter((d) => d.name).map((d) => makeNode("//" + d.name, true));
+      } else {
+        const [d, f] = await Promise.all([
+          safe(() => p4.dirs(h!.conn(), path)),
+          safe(() => p4.files(h!.conn(), path)),
+        ]);
+        node.children = buildChildren({ dirs: d, files: f });
+      }
+      node.loaded = true;
+      node.loading = false;
+      return;
+    }
+
+    if (source === "local") {
+      const local = await localChildren(clientRoot, rootPath, path);
+      node.children = local ? buildChildren(local) : [];
+      node.loaded = true;
+      node.loading = false;
+      return;
+    }
+
+    // workspace (server stream)
     const mem = folderCache.get(path);
     const cached = mem ?? loadFolder(h.conn().client, path);
     if (cached) {
@@ -182,9 +241,15 @@ export const browse = {
     node.loading = false;
   },
 
-  // Single click: select (dir → history, file → details) — does NOT fold.
+  // Single click: select. File → its server history/details (works for tracked
+  // files in every source). Folder → its history in workspace/local; in the
+  // depot source (no folder-history subject) it just folds/unfolds.
   selectNode(node: TreeNode) {
     selectedTreePath = node.path;
+    if (node.isDir && source === "depot") {
+      browse.expandNode(node);
+      return;
+    }
     h?.setTab("history"); // explicit user navigation → show History
     if (node.isDir) history.loadFolder(node.path);
     else history.selectFile(node.path);
@@ -254,54 +319,6 @@ export const browse = {
     const rows = await safe(() => p4.streams(h!.conn()));
     streamsLoading = false;
     streamRows = rows;
-  },
-
-  // --- Repo (all-depots) browser tab -----------------------------------------
-  openRepo() {
-    if (!h) return;
-    h.setTab("repo");
-    if (!h.connected()) return;
-    if (!repoTree) {
-      repoTree = {
-        path: "//",
-        name: "Depots",
-        isDir: true,
-        expanded: true,
-        loaded: false,
-        loading: false,
-        children: [],
-      };
-      browse.loadRepoNode(repoTree);
-    }
-  },
-  async loadRepoNode(node: TreeNode) {
-    if (!h || node.loading) return;
-    node.loading = true;
-    if (node.path === "//") {
-      const depots = await safe(() => p4.depots(h!.conn()));
-      node.children = depots.filter((d) => d.name).map((d) => makeNode("//" + d.name, true));
-    } else {
-      const [d, f] = await Promise.all([
-        safe(() => p4.dirs(h!.conn(), node.path)),
-        safe(() => p4.files(h!.conn(), node.path)),
-      ]);
-      node.children = buildChildren({ dirs: d, files: f });
-    }
-    node.loaded = true;
-    node.loading = false;
-  },
-  repoExpand(node: TreeNode) {
-    node.expanded = !node.expanded;
-    if (node.expanded && !node.loaded) browse.loadRepoNode(node);
-  },
-  repoSelect(node: TreeNode) {
-    if (!h) return;
-    repoSelected = node.path;
-    if (node.isDir) browse.repoExpand(node);
-    else {
-      history.selectFile(node.path);
-      h.setTab("history"); // jump to History showing this file's revisions
-    }
   },
 
   // --- refresh ---------------------------------------------------------------

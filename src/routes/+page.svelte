@@ -125,7 +125,7 @@
 
   // Center tab. History/details pane lives in $lib/history.svelte.ts; the depot
   // tree, streams/repo tabs and index live in $lib/browse.svelte.ts.
-  let centerTab = $state<"history" | "pending" | "streams" | "repo" | "log">("pending");
+  let centerTab = $state<"history" | "pending" | "streams" | "log">("pending");
 
   const centerRows = $derived(centerTab === "pending" ? pending.rows : history.rows);
 
@@ -133,11 +133,10 @@
   //     View menu. Depot and Streams are hidden by default.
   let views = $state<Views>(loadViews());
   $effect(() => saveViews(views));
-  const TABS: { key: "history" | "pending" | "streams" | "repo" | "log"; label: string }[] = [
+  const TABS: { key: "history" | "pending" | "streams" | "log"; label: string }[] = [
     { key: "history", label: "History" },
     { key: "pending", label: "Pending" },
     { key: "streams", label: "Streams" },
-    { key: "repo", label: "Depot" },
     { key: "log", label: "Commands" },
   ];
   // Show a center tab (and load its data). History uses the current selection.
@@ -145,7 +144,6 @@
     centerTab = key;
     if (key === "pending") pending.load();
     else if (key === "streams") browse.loadStreams();
-    else if (key === "repo") browse.openRepo();
   }
   // Keep centerTab on a visible tab; if the active one was closed, pick another.
   $effect(() => {
@@ -448,13 +446,29 @@
           <span>Files</span>
           <button class="paneclose" title="Close view" onclick={() => (views.files = false)}>✕</button>
         </div>
+        <div class="srcsel">
+          {#each [{ k: "local", l: "Local" }, { k: "workspace", l: "Workspace" }, { k: "depot", l: "Depot" }] as s (s.k)}
+            <button
+              class="srcbtn"
+              class:active={browse.source === s.k}
+              title={s.k === "local"
+                ? "Files on disk in this workspace"
+                : s.k === "workspace"
+                  ? "This workspace's stream, from the server"
+                  : "The whole depot (all depots), from the server"}
+              onclick={() => browse.setSource(s.k as "local" | "workspace" | "depot")}
+            >
+              {s.l}
+            </button>
+          {/each}
+        </div>
         <DepotTree
           root={browse.tree}
           selectedPath={browse.selectedTreePath}
           indexing={browse.indexing}
           onSelect={(n) => browse.selectNode(n)}
           onExpand={(n) => browse.expandNode(n)}
-          onSearch={(t) => browse.searchDepot(t)}
+          onSearch={browse.source === "workspace" ? (t) => browse.searchDepot(t) : undefined}
           onOpenResult={(f) => browse.openResult(f)}
           onContext={(n, e) => onTreeContext(n.path, n.isDir, e)}
         />
@@ -492,13 +506,6 @@
           loading={browse.streamsLoading}
           currentStream={browse.rootPath}
           onContext={onStreamContext}
-        />
-      {:else if centerTab === "repo"}
-        <DepotTree
-          root={browse.repoTree}
-          selectedPath={browse.repoSelected}
-          onSelect={(n) => browse.repoSelect(n)}
-          onExpand={(n) => browse.repoExpand(n)}
         />
       {:else if centerTab === "log"}
         <CommandLog entries={cmdlog.entries} onClear={() => cmdlog.clear()} />
@@ -887,6 +894,32 @@
   .paneclose:hover {
     color: var(--text);
     background: var(--bg-hover);
+  }
+  .srcsel {
+    display: flex;
+    gap: 2px;
+    padding: 4px 6px;
+    background: var(--bg-panel);
+    border-bottom: 1px solid var(--border);
+  }
+  .srcbtn {
+    flex: 1;
+    border: 1px solid var(--border);
+    background: var(--bg-alt);
+    border-radius: 4px;
+    padding: 3px 6px;
+    font-size: 11px;
+    color: var(--text-dim);
+    cursor: pointer;
+  }
+  .srcbtn:hover {
+    color: var(--text);
+    background: var(--bg-hover);
+  }
+  .srcbtn.active {
+    color: var(--accent);
+    border-color: var(--accent);
+    background: var(--bg-sel);
   }
   .center :global(.panel) {
     flex: 1;

@@ -4,19 +4,18 @@
 //! workspace's last view when switching back to it.
 
 export interface ViewState {
-  tab: "history" | "pending" | "streams" | "repo" | "log";
+  tab: "history" | "pending" | "streams" | "log";
   treePath: string; // selected depot path (tree highlight + history subject)
   histMode: "folder" | "file";
 }
 
-/** Which views (panes/tabs) are shown. `files` is the left workspace tree; the
- *  Streams and Depot (all-depots, `repo`) tabs start hidden. */
+/** Which views (panes/tabs) are shown. `files` is the left file browser (its
+ *  Local/Workspace/Depot source is chosen in the pane, not a separate view). */
 export interface Views {
   files: boolean;
   history: boolean;
   pending: boolean;
   streams: boolean;
-  repo: boolean; // the all-depots browser, labelled "Depot"
   log: boolean; // the p4-command log ("Commands")
 }
 const DEFAULT_VIEWS: Views = {
@@ -24,10 +23,9 @@ const DEFAULT_VIEWS: Views = {
   history: true,
   pending: true,
   streams: false,
-  repo: false,
   log: false,
 };
-const VIEWS = "nav:views:v2"; // v2: left pane is `files`; `repo` (Depot tab) hidden
+const VIEWS = "nav:views:v3"; // v3: Depot is now a source of the Files pane, not a tab
 export function loadViews(): Views {
   const raw = get(VIEWS);
   if (raw) {
