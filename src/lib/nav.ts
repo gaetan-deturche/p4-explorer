@@ -1,7 +1,9 @@
-//! Navigation persistence (localStorage, best-effort): the last server + the
-//! last workspace used on each server, and the last view (tab + selection) for
-//! each workspace. Lets the app reopen where the user left off and return to a
-//! workspace's last view when switching back to it.
+//! Navigation persistence: the last server + the last workspace used on each
+//! server, and the last view (tab + selection) for each workspace. Lets the app
+//! reopen where the user left off. Backed by the generic `store` (SQLite source
+//! of truth + localStorage/memory fast layers), scope `nav`.
+
+import { cacheGetSync, cacheSet } from "$lib/store";
 
 export interface ViewState {
   tab: "history" | "pending" | "streams" | "log" | "notes";
@@ -27,7 +29,7 @@ const DEFAULT_VIEWS: Views = {
   log: false,
   notes: false,
 };
-const VIEWS = "nav:views:v3"; // v3: Depot is now a source of the Files pane, not a tab
+const VIEWS = "views:v3"; // v3: Depot is now a source of the Files pane, not a tab
 export function loadViews(): Views {
   const raw = get(VIEWS);
   if (raw) {
@@ -43,25 +45,20 @@ export function saveViews(v: Views): void {
   set(VIEWS, JSON.stringify(v));
 }
 
-const LAST_SERVER = "nav:lastServer";
-const clientKey = (server: string) => `nav:client:${server}`;
-const userKey = (server: string) => `nav:user:${server}`;
-const charsetKey = (server: string) => `nav:charset:${server}`;
-const viewKey = (client: string) => `nav:view:${client}`;
+const LAST_SERVER = "lastServer";
+const clientKey = (server: string) => `client:${server}`;
+const userKey = (server: string) => `user:${server}`;
+const charsetKey = (server: string) => `charset:${server}`;
+const viewKey = (client: string) => `view:${client}`;
 
+// Route through the store (scope `nav`): reads are synchronous from the fast
+// layers; writes also persist to SQLite. Keys keep the same `nav:*` localStorage
+// layout, so existing data is reused.
 function get(key: string): string | null {
-  try {
-    return localStorage.getItem(key);
-  } catch {
-    return null;
-  }
+  return cacheGetSync("nav", key);
 }
 function set(key: string, val: string): void {
-  try {
-    localStorage.setItem(key, val);
-  } catch {
-    /* storage unavailable / full — navigation memory is best-effort */
-  }
+  cacheSet("nav", key, val);
 }
 
 export function loadLastServer(): string {
@@ -71,7 +68,7 @@ export function saveLastServer(server: string): void {
   if (server) set(LAST_SERVER, server);
 }
 
-const BROWSE_SRC = "nav:browseSource";
+const BROWSE_SRC = "browseSource";
 /** The Files-pane data source, persisted globally. Defaults to `local`. */
 export function loadBrowseSource(): "local" | "workspace" | "depot" {
   const v = get(BROWSE_SRC);
@@ -89,7 +86,7 @@ export function saveClientFor(server: string, client: string): void {
   if (server && client) set(clientKey(server), client);
 }
 
-const clientsKey = (server: string) => `nav:clients:${server}`;
+const clientsKey = (server: string) => `clients:${server}`;
 /** Cached `p4 clients` list for `server` — shown instantly on connect while the
  *  fresh list loads. Records carry client/Host/Root/Stream. */
 export function loadClientsFor(server: string): Record<string, string>[] {

@@ -4,6 +4,7 @@
 
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { p4, type P4Conn, type P4Record, type ReviewInfo } from "$lib/p4";
+import { cacheGetSync, cacheSet } from "$lib/store";
 
 type Hooks = {
   conn: () => P4Conn;
@@ -35,25 +36,19 @@ let offlineFocused = true;
 const OFFLINE_MS_FOCUS = 300_000; // 5 min (the scan itself is ~30s)
 const OFFLINE_MS_BG = 1_800_000; // 30 min in the background
 
-// Persist the last offline result per workspace so switching back shows it
-// instantly (a fresh scan then refreshes in the background). Survives restart.
-function offlineKey(client: string): string {
-  return `p4:offline:${client}`;
-}
+// Persist the last offline result per workspace (store scope `p4:offline`) so
+// switching back shows it instantly; a fresh scan then refreshes it. Durable in
+// SQLite, mirrored in localStorage for the instant read.
 function loadOfflineCache(client: string): P4Record[] {
+  if (!client) return [];
   try {
-    const s = client ? localStorage.getItem(offlineKey(client)) : null;
-    return s ? (JSON.parse(s) as P4Record[]) : [];
+    return JSON.parse(cacheGetSync("p4:offline", client) ?? "[]") as P4Record[];
   } catch {
     return [];
   }
 }
 function saveOfflineCache(client: string, recs: P4Record[]): void {
-  try {
-    if (client) localStorage.setItem(offlineKey(client), JSON.stringify(recs));
-  } catch {
-    /* quota / disabled — best effort */
-  }
+  if (client) cacheSet("p4:offline", client, JSON.stringify(recs));
 }
 
 // Self-scheduling loop: the next scan is armed only after the current one
