@@ -88,6 +88,7 @@ export const p4 = {
   sync: (conn: P4Conn, path?: string) => call("p4_sync", { conn, path: path ?? null }),
   reconcile: (conn: P4Conn, path: string) => call("p4_reconcile", { conn, path }),
   status: (conn: P4Conn) => call("p4_status", { conn }),
+  cancelOfflineScan: () => g<void>("cancel_offline_scan"),
   resync: (conn: P4Conn, files: string[], force: boolean) =>
     call("p4_resync", { conn, files, force }),
   syncStream: (conn: P4Conn, path?: string) =>

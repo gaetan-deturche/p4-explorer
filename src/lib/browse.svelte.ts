@@ -483,20 +483,25 @@ export const browse = {
   async refresh() {
     if (!h || !h.connected() || refreshing) return;
     refreshing = true;
-    try {
-      folderCache.clear();
-      folderSyncCache.clear();
-      history.clearMemCache();
-      clearClientCache(h.conn().client);
-      if (tree) {
-        tree.expanded = true;
-        await browse.reloadNode(tree);
+    folderCache.clear();
+    folderSyncCache.clear();
+    history.clearMemCache();
+    clearClientCache(h.conn().client);
+    // Re-fetch the tree + history in the BACKGROUND so a caller (e.g. a submit)
+    // isn't blocked on reloading every expanded folder — the panes update when
+    // their data arrives.
+    void (async () => {
+      try {
+        if (tree) {
+          tree.expanded = true;
+          await browse.reloadNode(tree);
+        }
+        if (selectedTreePath && history.mode === "file") await history.selectFile(selectedTreePath);
+        else if (selectedTreePath) await history.loadFolder(selectedTreePath);
+        browse.buildIndex(); // rebuild the fuzzy-search index in the background
+      } finally {
+        refreshing = false;
       }
-      if (selectedTreePath && history.mode === "file") await history.selectFile(selectedTreePath);
-      else if (selectedTreePath) await history.loadFolder(selectedTreePath);
-      browse.buildIndex(); // rebuild the fuzzy-search index in the background
-    } finally {
-      refreshing = false;
-    }
+    })();
   },
 };

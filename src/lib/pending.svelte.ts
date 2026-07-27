@@ -116,7 +116,12 @@ export const pending = {
     const conn = h.conn();
     const client = conn.client; // snapshot: the workspace THIS scan is for
     try {
-      const recs = await p4.status(conn).catch(() => [] as P4Record[]);
+      let recs: P4Record[];
+      try {
+        recs = await p4.status(conn);
+      } catch {
+        return true; // cancelled (by an interactive write) or failed — keep the list
+      }
       // Keep only real change entries (an action + a file).
       const result = recs.filter((r) => (r.action ?? r.status) && (r.clientFile || r.depotFile));
       saveOfflineCache(client, result); // cache under the scanned workspace (not the current one)
@@ -201,6 +206,7 @@ export const pending = {
     if (!h || !h.connected() || h.syncing()) return;
     h.setSyncing(true);
     try {
+      await p4.cancelOfflineScan().catch(() => {}); // free its server locks before writing
       await runFn();
       h.setNotice(okNotice);
       if (opts?.refresh !== false) await h.refresh();
@@ -243,6 +249,7 @@ export const pending = {
     const label = change === "default" ? "The default changelist" : `Changelist @${change}`;
     h.setSyncing(true);
     try {
+      await p4.cancelOfflineScan().catch(() => {}); // free its server locks before submitting
       try {
         await p4.submit(h.conn(), change);
       } catch (e) {

@@ -8,6 +8,8 @@ import { loadServers, saveServers, withServer, withoutServer } from "$lib/server
 import {
   loadClientFor,
   saveClientFor,
+  loadClientsFor,
+  saveClientsFor,
   saveLastServer,
   loadView,
   saveView,
@@ -267,19 +269,37 @@ export const connection = {
       // sort those first — Host-locked is the accurate signal; a shared client
       // (empty Host) is not "this machine" even if its Root folder exists here.
       clientHost = (i.clientHost ?? "").trim();
-      setClientList(await p4.clients(conn));
       // Prefer the workspace the user last used on this server; fall back to the
       // client reported by `p4 info`.
       const saved = loadClientFor(conn.port);
       const cn = i.clientName;
-      const target =
-        saved && clients.some((c) => c.client === saved)
+      const pick = (list: P4Record[]) =>
+        saved && list.some((c) => c.client === saved)
           ? saved
-          : cn && cn !== "*unknown*" && clients.some((c) => c.client === cn)
+          : cn && cn !== "*unknown*" && list.some((c) => c.client === cn)
             ? cn
             : "";
-      if (target) {
-        await connection.selectClient(target);
+
+      // Show the cached workspace list instantly, then refresh from the server in
+      // the BACKGROUND — so selecting the workspace doesn't wait on a `p4 clients`
+      // round-trip (noticeable on a remote server like Epic).
+      const cachedClients = loadClientsFor(conn.port);
+      if (cachedClients.length) setClientList(cachedClients);
+      const refreshClients = p4
+        .clients(conn)
+        .then((fresh) => {
+          setClientList(fresh);
+          saveClientsFor(conn.port, fresh);
+        })
+        .catch(() => {});
+
+      const cachedTarget = pick(clients);
+      if (cachedTarget) {
+        await connection.selectClient(cachedTarget); // open now, from the cached list
+      } else {
+        await refreshClients; // no usable cache — need the fresh list to pick a target
+        const t = pick(clients);
+        if (t) await connection.selectClient(t);
       }
     } catch (e) {
       connected = false;
@@ -339,7 +359,9 @@ export const connection = {
       return;
     }
     h.setNotice(`Workspace ${name.trim()} created.`);
-    setClientList(await p4.clients(conn).catch(() => [])); // pick up the new client
+    const list = await p4.clients(conn).catch(() => [] as P4Record[]); // pick up the new client
+    setClientList(list);
+    saveClientsFor(conn.port, list);
     await connection.selectClient(name.trim());
   },
   /** A P4V-style default workspace name: user_host_NNNN (fresh number each call). */

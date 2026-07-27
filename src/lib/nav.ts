@@ -89,6 +89,22 @@ export function saveClientFor(server: string, client: string): void {
   if (server && client) set(clientKey(server), client);
 }
 
+const clientsKey = (server: string) => `nav:clients:${server}`;
+/** Cached `p4 clients` list for `server` — shown instantly on connect while the
+ *  fresh list loads. Records carry client/Host/Root/Stream. */
+export function loadClientsFor(server: string): Record<string, string>[] {
+  if (!server) return [];
+  try {
+    const s = get(clientsKey(server));
+    return s ? (JSON.parse(s) as Record<string, string>[]) : [];
+  } catch {
+    return [];
+  }
+}
+export function saveClientsFor(server: string, list: Record<string, string>[]): void {
+  if (server) set(clientsKey(server), JSON.stringify(list));
+}
+
 /** The user (P4USER) last used on `server`, or "" if none. Servers can differ. */
 export function loadUserFor(server: string): string {
   return server ? (get(userKey(server)) ?? "") : "";

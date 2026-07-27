@@ -20,6 +20,7 @@ export const P4_COMMANDS: P4Cmd[] = [
   { key: "p4_have_change", label: "changes (have)", read: true },
   { key: "p4_changes_exact", label: "changes (have)", read: true },
   { key: "p4_status", label: "status (offline changes)", read: true },
+  { key: "cancel_offline_scan", label: "cancel offline scan", read: true },
   { key: "p4_describe", label: "describe", read: true },
   { key: "p4_filelog", label: "filelog", read: true },
   { key: "p4_fstat", label: "fstat", read: true },

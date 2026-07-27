@@ -237,11 +237,50 @@ pub async fn p4_reconcile(conn: P4Conn, path: String) -> Res {
 /// callers scan on a low-rate background timer. Each record carries `action`
 /// (edit/delete) plus depotFile/clientFile.
 #[tauri::command]
-pub async fn p4_status(conn: P4Conn) -> Res {
+pub async fn p4_status(
+    state: tauri::State<'_, crate::index::AppState>,
+    conn: P4Conn,
+) -> Res {
+    use std::sync::atomic::Ordering;
     let spec = if conn.client.is_empty() {
         "...".to_string()
     } else {
         format!("//{}/...", conn.client)
     };
-    run(conn, v(&["reconcile", "-n", "-e", "-d", "-m", &spec])).await
+    let pid_slot = state.offline_pid.clone();
+    let abort = state.offline_abort.clone();
+    abort.store(false, Ordering::SeqCst);
+    tauri::async_runtime::spawn_blocking(move || {
+        let res = p4::run_killable(&conn, &["reconcile", "-n", "-e", "-d", "-m", &spec], &pid_slot);
+        // If it was cancelled (killed by an interactive write), report an error
+        // so the caller keeps the previous list instead of clearing it.
+        if abort.swap(false, Ordering::SeqCst) {
+            return Err("offline scan cancelled".to_string());
+        }
+        res
+    })
+    .await
+    .map_err(|e| format!("status task failed: {e}"))?
+}
+
+/// Kill the in-flight offline-changes scan (called before an interactive write
+/// so the scan's server locks don't block it). No-op if none is running.
+#[tauri::command]
+pub async fn cancel_offline_scan(
+    state: tauri::State<'_, crate::index::AppState>,
+) -> Result<(), String> {
+    use std::sync::atomic::Ordering;
+    let pid = *state.offline_pid.lock().unwrap();
+    if let Some(pid) = pid {
+        state.offline_abort.store(true, Ordering::SeqCst);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            let _ = std::process::Command::new("taskkill")
+                .args(["/F", "/T", "/PID", &pid.to_string()])
+                .creation_flags(0x0800_0000)
+                .output();
+        }
+    }
+    Ok(())
 }

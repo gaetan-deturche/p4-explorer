@@ -26,6 +26,10 @@ pub struct AppState {
     pub sync_pids: Arc<Mutex<Vec<u32>>>,
     /// Set when the user cancels a sync, so the backend stops between phases.
     pub sync_abort: Arc<AtomicBool>,
+    /// PID of the running offline-changes scan (killed on an interactive write).
+    pub offline_pid: Arc<Mutex<Option<u32>>>,
+    /// Set when an offline scan is cancelled, so its result is discarded.
+    pub offline_abort: Arc<AtomicBool>,
 }
 
 impl AppState {
@@ -35,6 +39,8 @@ impl AppState {
             mem: Mutex::new(None),
             sync_pids: Arc::new(Mutex::new(Vec::new())),
             sync_abort: Arc::new(AtomicBool::new(false)),
+            offline_pid: Arc::new(Mutex::new(None)),
+            offline_abort: Arc::new(AtomicBool::new(false)),
         }
     }
 }

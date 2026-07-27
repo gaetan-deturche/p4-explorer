@@ -199,32 +199,11 @@ pub fn run_raw_stdout_diff(conn: &P4Conn, args: &[&str]) -> Result<String, Strin
 ///
 /// Error records (severity >= E_FAILED) are collected; if there are no data
 /// records we return them (joined) as an `Err`. Warnings are dropped silently.
-pub fn run(conn: &P4Conn, args: &[&str]) -> Result<Vec<Record>, String> {
-    let mut cmd = Command::new("p4");
-    cmd.arg("-ztag").arg("-Mj");
-    for g in conn.global_args() {
-        cmd.arg(g);
-    }
-    apply_charset(&mut cmd, conn);
-    for a in args {
-        cmd.arg(a);
-    }
-
-    // Don't flash a console window when spawning p4 from the GUI process.
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
-
-    let start = Instant::now();
-    let out = cmd
-        .output()
-        .map_err(|e| format!("failed to launch p4: {e} (is p4 on PATH?)"))?;
-    log_command(args, start.elapsed().as_millis(), out.status.success());
-
-    let stdout = String::from_utf8_lossy(&out.stdout);
+/// Parse `-ztag -Mj` stdout into records, turning a failure record into an
+/// `Err` only when there are no data records (data masks errors — fine for
+/// reads; `run_strict` is the strict variant for mutations).
+fn parse_records(stdout: &[u8], success: bool, stderr: &[u8]) -> Result<Vec<Record>, String> {
+    let stdout = String::from_utf8_lossy(stdout);
     let mut records: Vec<Record> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
 
@@ -257,8 +236,8 @@ pub fn run(conn: &P4Conn, args: &[&str]) -> Result<Vec<Record>, String> {
         if !errors.is_empty() {
             return Err(errors.join("\n"));
         }
-        if !out.status.success() {
-            let stderr = String::from_utf8_lossy(&out.stderr);
+        if !success {
+            let stderr = String::from_utf8_lossy(stderr);
             let stderr = stderr.trim();
             if !stderr.is_empty() {
                 return Err(stderr.to_string());
@@ -266,6 +245,76 @@ pub fn run(conn: &P4Conn, args: &[&str]) -> Result<Vec<Record>, String> {
         }
     }
     Ok(records)
+}
+
+pub fn run(conn: &P4Conn, args: &[&str]) -> Result<Vec<Record>, String> {
+    let mut cmd = Command::new("p4");
+    cmd.arg("-ztag").arg("-Mj");
+    for g in conn.global_args() {
+        cmd.arg(g);
+    }
+    apply_charset(&mut cmd, conn);
+    for a in args {
+        cmd.arg(a);
+    }
+
+    // Don't flash a console window when spawning p4 from the GUI process.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    let start = Instant::now();
+    let out = cmd
+        .output()
+        .map_err(|e| format!("failed to launch p4: {e} (is p4 on PATH?)"))?;
+    log_command(args, start.elapsed().as_millis(), out.status.success());
+    parse_records(&out.stdout, out.status.success(), &out.stderr)
+}
+
+/// Like `run`, but spawns the child and records its PID in `pid_slot` so a long
+/// command (the offline-changes scan) can be killed mid-flight to release its
+/// server locks — otherwise it blocks interactive writes (submit, reopen).
+pub fn run_killable(
+    conn: &P4Conn,
+    args: &[&str],
+    pid_slot: &std::sync::Arc<std::sync::Mutex<Option<u32>>>,
+) -> Result<Vec<Record>, String> {
+    let mut cmd = Command::new("p4");
+    cmd.arg("-ztag").arg("-Mj");
+    for g in conn.global_args() {
+        cmd.arg(g);
+    }
+    apply_charset(&mut cmd, conn);
+    for a in args {
+        cmd.arg(a);
+    }
+    cmd.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    let start = Instant::now();
+    let child = cmd
+        .spawn()
+        .map_err(|e| format!("failed to launch p4: {e} (is p4 on PATH?)"))?;
+    let id = child.id();
+    *pid_slot.lock().unwrap() = Some(id);
+    let out = child.wait_with_output();
+    {
+        let mut s = pid_slot.lock().unwrap();
+        if *s == Some(id) {
+            *s = None;
+        }
+    }
+    let out = out.map_err(|e| e.to_string())?;
+    log_command(args, start.elapsed().as_millis(), out.status.success());
+    parse_records(&out.stdout, out.status.success(), &out.stderr)
 }
 
 /// Like `run`, but a failure record (severity >= E_FAILED) is ALWAYS surfaced as
