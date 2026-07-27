@@ -89,8 +89,60 @@ pub async fn index_status(state: State<'_, AppState>, client: String) -> Result<
     Ok(ensure_loaded(&state, &client).len())
 }
 
-/// (Re)build the index for a client: `p4 files //root/...`, keep the existing
-/// (non-deleted) files, store them, and load into memory. Returns the count.
+/// Depot paths from `p4 files <pattern>`, dropping deleted/purged/archived revs.
+fn server_files(conn: &P4Conn, pattern: &str) -> Result<Vec<String>, String> {
+    let recs = p4::run(conn, &["files", pattern])?;
+    Ok(recs
+        .into_iter()
+        .filter(|r| {
+            let a = r.get("action").and_then(|v| v.as_str()).unwrap_or("");
+            !a.contains("delete") && a != "purge" && a != "archive"
+        })
+        .filter_map(|r| r.get("depotFile").and_then(|v| v.as_str()).map(str::to_string))
+        .collect())
+}
+
+/// Store `paths` under `key` (replacing any prior rows) and load into memory.
+fn store_paths(state: &AppState, key: &str, paths: Vec<String>) -> Result<usize, String> {
+    let n = paths.len();
+    {
+        let mut db = state.db.lock().unwrap();
+        let tx = db.transaction().map_err(|e| e.to_string())?;
+        tx.execute("DELETE FROM file_index WHERE client=?1", [key])
+            .map_err(|e| e.to_string())?;
+        {
+            let mut stmt = tx
+                .prepare("INSERT INTO file_index(client, path) VALUES(?1, ?2)")
+                .map_err(|e| e.to_string())?;
+            for p in &paths {
+                stmt.execute(rusqlite::params![key, p]).map_err(|e| e.to_string())?;
+            }
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+    }
+    *state.mem.lock().unwrap() = Some((key.to_string(), to_entries(paths)));
+    Ok(n)
+}
+
+/// Recursively collect every file under `dir`, as depot-form paths rooted at
+/// `base` (i.e. `base/<relative path with '/' separators>`).
+fn walk_local(dir: &std::path::Path, base: &str, out: &mut Vec<String>) {
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    for e in rd.flatten() {
+        let Ok(ft) = e.file_type() else { continue };
+        let name = e.file_name().to_string_lossy().to_string();
+        let child = format!("{base}/{name}");
+        if ft.is_dir() {
+            walk_local(&e.path(), &child, out);
+        } else if ft.is_file() {
+            out.push(child);
+        }
+    }
+}
+
+/// (Re)build the index for a client key: `p4 files //root/...`, keep the
+/// existing (non-deleted) files, store them, and load into memory. Returns
+/// the count. Used for the workspace source (`key` = client name).
 #[tauri::command]
 pub async fn index_build(
     state: State<'_, AppState>,
@@ -99,44 +151,46 @@ pub async fn index_build(
     root: String,
 ) -> Result<usize, String> {
     let pattern = format!("{}/...", root.trim_end_matches('/'));
-    let paths: Vec<String> = tauri::async_runtime::spawn_blocking(move || {
-        let recs = p4::run(&conn, &["files", &pattern])?;
-        let out: Vec<String> = recs
-            .into_iter()
-            .filter(|r| {
-                let a = r.get("action").and_then(|v| v.as_str()).unwrap_or("");
-                !a.contains("delete") && a != "purge" && a != "archive"
-            })
-            .filter_map(|r| {
-                r.get("depotFile")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string)
-            })
-            .collect();
-        Ok::<Vec<String>, String>(out)
+    let paths = tauri::async_runtime::spawn_blocking(move || server_files(&conn, &pattern))
+        .await
+        .map_err(|e| format!("index task failed: {e}"))??;
+    store_paths(&state, &client, paths)
+}
+
+/// Build the whole-depot index (`p4 files //...`, every depot), stored under
+/// `key` (shared per server). Can be large/slow on big servers.
+#[tauri::command]
+pub async fn index_build_depot(
+    state: State<'_, AppState>,
+    conn: P4Conn,
+    key: String,
+) -> Result<usize, String> {
+    let paths = tauri::async_runtime::spawn_blocking(move || server_files(&conn, "//..."))
+        .await
+        .map_err(|e| format!("index task failed: {e}"))??;
+    store_paths(&state, &key, paths)
+}
+
+/// Build the on-disk index for the Local source: every file under `root` (the
+/// workspace root on disk), as depot-form paths rooted at `root_path` (the
+/// stream root), stored under `key`.
+#[tauri::command]
+pub async fn index_build_local(
+    state: State<'_, AppState>,
+    key: String,
+    root: String,
+    root_path: String,
+) -> Result<usize, String> {
+    let paths = tauri::async_runtime::spawn_blocking(move || {
+        let mut out = Vec::new();
+        if !root.is_empty() {
+            walk_local(std::path::Path::new(&root), root_path.trim_end_matches('/'), &mut out);
+        }
+        out
     })
     .await
-    .map_err(|e| format!("index task failed: {e}"))??;
-
-    let n = paths.len();
-    {
-        let mut db = state.db.lock().unwrap();
-        let tx = db.transaction().map_err(|e| e.to_string())?;
-        tx.execute("DELETE FROM file_index WHERE client=?1", [&client])
-            .map_err(|e| e.to_string())?;
-        {
-            let mut stmt = tx
-                .prepare("INSERT INTO file_index(client, path) VALUES(?1, ?2)")
-                .map_err(|e| e.to_string())?;
-            for p in &paths {
-                stmt.execute(rusqlite::params![client, p])
-                    .map_err(|e| e.to_string())?;
-            }
-        }
-        tx.commit().map_err(|e| e.to_string())?;
-    }
-    *state.mem.lock().unwrap() = Some((client.clone(), to_entries(paths)));
-    Ok(n)
+    .map_err(|e| format!("index task failed: {e}"))?;
+    store_paths(&state, &key, paths)
 }
 
 /// Fuzzy subsequence search over the client's index. Returns the best `max`

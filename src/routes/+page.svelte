@@ -468,7 +468,7 @@
           indexing={browse.indexing}
           onSelect={(n) => browse.selectNode(n)}
           onExpand={(n) => browse.expandNode(n)}
-          onSearch={browse.source === "workspace" ? (t) => browse.searchDepot(t) : undefined}
+          onSearch={(t) => browse.searchDepot(t)}
           onOpenResult={(f) => browse.openResult(f)}
           onContext={(n, e) => onTreeContext(n.path, n.isDir, e)}
         />

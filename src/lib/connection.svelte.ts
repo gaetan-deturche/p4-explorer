@@ -243,6 +243,7 @@ export const connection = {
       saveLastServer(conn.port); // restore THIS server on next launch, regardless of workspace
       saveUserFor(conn.port, conn.user); // remember this server's user
       saveCharsetFor(conn.port, conn.charset); // and its charset choice
+      browse.ensureDepotIndex(); // background: build the whole-depot search index
       // Flag workspaces bound to THIS machine (client Host == this host) and
       // sort those first — Host-locked is the accurate signal; a shared client
       // (empty Host) is not "this machine" even if its Root folder exists here.

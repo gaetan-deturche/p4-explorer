@@ -22,6 +22,9 @@ export const idx = {
   status: (client: string) => invoke<number>("index_status", { client }),
   build: (conn: P4Conn, client: string, root: string) =>
     invoke<number>("index_build", { conn, client, root }),
+  buildDepot: (conn: P4Conn, key: string) => invoke<number>("index_build_depot", { conn, key }),
+  buildLocal: (key: string, root: string, rootPath: string) =>
+    invoke<number>("index_build_local", { key, root, rootPath }),
   search: (client: string, query: string, max = 200) =>
     invoke<string[]>("index_search", { client, query, max }),
 };

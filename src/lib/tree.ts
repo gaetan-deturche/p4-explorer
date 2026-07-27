@@ -9,6 +9,7 @@ export interface TreeNode {
   expanded: boolean;
   loaded: boolean; // children fetched from the server at least once
   loading: boolean;
+  untracked?: boolean; // Local source: on disk but not in the depot (ignored/uncommitted)
   children: TreeNode[];
 }
 

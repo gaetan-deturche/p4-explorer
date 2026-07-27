@@ -73,6 +73,8 @@ pub fn run() {
             commands::p4_env_port,
             index::index_status,
             index::index_build,
+            index::index_build_depot,
+            index::index_build_local,
             index::index_search,
         ])
         .run(tauri::generate_context!())

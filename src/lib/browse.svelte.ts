@@ -59,6 +59,20 @@ function base(p: string): string {
   return p.slice(p.lastIndexOf("/") + 1);
 }
 
+// Search-index keys, one namespace per source (see the index section below).
+function wsKey(): string {
+  return h!.conn().client;
+}
+function localKey(): string {
+  return "local:" + h!.conn().client;
+}
+function depotKey(): string {
+  return "depot:" + h!.conn().port;
+}
+function srcKey(): string {
+  return source === "depot" ? depotKey() : source === "local" ? localKey() : wsKey();
+}
+
 /** The root tree node for the current source: the `//` depots root for `depot`,
  *  else the workspace stream root (local & workspace share it; only the child
  *  listing differs). */
@@ -203,8 +217,22 @@ export const browse = {
     }
 
     if (source === "local") {
-      const local = await localChildren(clientRoot, rootPath, path);
-      node.children = local ? buildChildren(local) : [];
+      // Disk listing + the server listing for the same folder, so we can grey out
+      // entries that are on disk but not in the depot (ignored / uncommitted).
+      const q = browse.toQuery(path);
+      const [local, d, f] = await Promise.all([
+        localChildren(clientRoot, rootPath, path),
+        safe(() => p4.dirs(h!.conn(), q)),
+        safe(() => p4.files(h!.conn(), q)),
+      ]);
+      const sDirs = new Set(d.map((r) => base(r.dir ?? "").toLowerCase()));
+      const sFiles = new Set(f.map((r) => base(r.depotFile ?? "").toLowerCase()));
+      const kids = local ? buildChildren(local) : [];
+      for (const k of kids) {
+        const bn = base(k.path).toLowerCase();
+        k.untracked = k.isDir ? !sDirs.has(bn) : !sFiles.has(bn);
+      }
+      node.children = kids;
       node.loaded = true;
       node.loading = false;
       return;
@@ -276,32 +304,63 @@ export const browse = {
   },
 
   // --- fuzzy search index ----------------------------------------------------
-  // Build (or rebuild) the local fuzzy-search index for the current workspace.
+  // Each source has its own index, keyed distinctly: workspace = client name,
+  // local = local:<client>, depot = depot:<port> (shared per server).
+  // Build (or rebuild) the workspace (server-stream) index.
   async buildIndex() {
     if (!h || !h.connected() || !h.conn().client || !rootPath || indexing) return;
     indexing = true;
     try {
-      indexCount = await idx.build(h.conn(), h.conn().client, rootPath);
+      indexCount = await idx.build(h.conn(), wsKey(), rootPath);
     } catch {
       /* leave count as-is */
     } finally {
       indexing = false;
     }
   },
-  // Ensure an index exists (build in the background if this workspace is new).
+  // Rebuild the on-disk (Local) index in the background — disk state can change.
+  async buildLocalIndex() {
+    if (!h || !h.connected() || !h.conn().client || !clientRoot || !rootPath) return;
+    try {
+      await idx.buildLocal(localKey(), clientRoot, rootPath);
+    } catch {
+      /* best effort */
+    }
+  },
+  // Build the whole-depot index (eager, on connect). Can be large on big servers.
+  async buildDepotIndex() {
+    if (!h || !h.connected() || !h.conn().port) return;
+    try {
+      await idx.buildDepot(h.conn(), depotKey());
+    } catch {
+      /* best effort */
+    }
+  },
+  // Ensure the workspace index exists (build if new), and refresh the local one.
   async ensureIndex() {
     if (!h || !h.connected() || !h.conn().client) return;
     try {
-      indexCount = await idx.status(h.conn().client);
+      indexCount = await idx.status(wsKey());
     } catch {
       indexCount = 0;
     }
     if (indexCount === 0) browse.buildIndex();
+    browse.buildLocalIndex(); // fire-and-forget refresh of the on-disk index
   },
-  // Per-keystroke fuzzy search over the local index (case-insensitive, no p4).
+  // Ensure the whole-depot index exists (build once per server, eager on connect).
+  async ensureDepotIndex() {
+    if (!h || !h.connected() || !h.conn().port) return;
+    try {
+      if ((await idx.status(depotKey())) === 0) browse.buildDepotIndex();
+    } catch {
+      /* best effort */
+    }
+  },
+  // Per-keystroke fuzzy search over the CURRENT source's index (no p4 per key).
   async searchDepot(term: string): Promise<P4Record[]> {
-    if (!h || !term.trim() || !h.conn().client) return [];
-    const paths = await idx.search(h.conn().client, term.trim(), 200);
+    if (!h || !term.trim()) return [];
+    if (source !== "depot" && !h.conn().client) return [];
+    const paths = await idx.search(srcKey(), term.trim(), 200);
     return paths.map((p) => ({ depotFile: p }) as P4Record);
   },
   openResult(depotFile: string) {

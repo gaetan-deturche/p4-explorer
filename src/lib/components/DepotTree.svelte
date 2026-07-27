@@ -184,6 +184,8 @@
     {/if}
     <button
       class="main mono"
+      class:untracked={node.untracked}
+      title={node.untracked ? "Not in the depot (ignored / uncommitted)" : node.path}
       onclick={() => onSelect(node)}
       ondblclick={() => node.isDir && onExpand(node)}
       oncontextmenu={(e) => {
@@ -290,6 +292,13 @@
     color: var(--text);
     white-space: nowrap;
     cursor: pointer;
+  }
+  .main.untracked {
+    color: var(--text-dim);
+    opacity: 0.65;
+  }
+  .main.untracked .ic {
+    opacity: 0.5;
   }
   .ic {
     flex: none;
