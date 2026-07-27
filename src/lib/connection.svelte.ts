@@ -155,7 +155,7 @@ export const connection = {
     }
   },
 
-  async connect() {
+  async connect(opts?: { skipAuth?: boolean }) {
     if (!h) return;
     const conn = h.conn();
     busy = true;
@@ -205,14 +205,15 @@ export const connection = {
       if (conn.port !== origPort && origPort) connection.forgetServer(origPort);
       connection.rememberServer(conn.port);
       // Ensure this server's session is authenticated; prompt for a password and
-      // log in on demand (per-server tickets can be missing or expired).
-      const authed = await p4.loginStatus(conn).catch(() => true);
+      // log in on demand (per-server tickets can be missing or expired). Skip the
+      // check when the caller (relogin) has just logged in — some servers don't
+      // report the fresh ticket via `login -s` immediately, which re-prompted.
+      const authed = opts?.skipAuth || (await p4.loginStatus(conn).catch(() => true));
       if (!authed) {
         const cred = await h.promptLogin(conn.port, conn.user);
         if (!cred) {
           connected = false;
-          h.setNotice("Login cancelled.");
-          return;
+          return; // user cancelled — stay disconnected, no success toast
         }
         conn.user = cred.user;
         let loggedIn = false;
@@ -366,7 +367,8 @@ export const connection = {
       return;
     }
     h.setNotice("Logged in.");
-    await connection.connect(); // fresh ticket → connect won't re-prompt
+    saveCharsetFor(conn.port, conn.charset); // keep the charset login settled on
+    await connection.connect({ skipAuth: true }); // fresh ticket → don't re-prompt
   },
 
   async switchStream(stream: string) {
