@@ -729,6 +729,8 @@
 {#if newWorkspaceOpen}
   <NewWorkspaceDialog
     initialStream={browse.rootPath}
+    pickFolder={(s) => connection.pickFolder(s)}
+    loadStreams={() => connection.loadStreams()}
     onSubmit={(w) => {
       newWorkspaceOpen = false;
       connection.createWorkspace(w.name, w.root, w.stream);

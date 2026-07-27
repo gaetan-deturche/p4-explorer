@@ -26,6 +26,7 @@ pub fn run() {
             commands::p4_clients,
             commands::p4_new_client,
             commands::export_patch,
+            commands::pick_folder,
             commands::p4_dirs,
             commands::p4_files,
             commands::p4_changes,

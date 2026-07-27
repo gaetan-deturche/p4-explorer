@@ -53,6 +53,11 @@ export function isReleaseBuild(): Promise<boolean> {
   return invoke<boolean>("is_release_build");
 }
 
+/** Native folder-picker; returns the chosen directory or null if cancelled. */
+export function pickFolder(start = ""): Promise<string | null> {
+  return invoke<string | null>("pick_folder", { start });
+}
+
 // Gate every backend call through safe mode (the allow decision + labels live in
 // $lib/safe + $lib/p4cmds; reads and app-local calls pass straight through).
 function g<T>(cmd: string, args: Record<string, unknown> = {}): Promise<T> {

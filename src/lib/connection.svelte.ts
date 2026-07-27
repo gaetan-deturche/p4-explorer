@@ -3,7 +3,7 @@
 //! and the keep-alive/health-check poll. The `conn` object itself stays in the
 //! page (it is two-way bound by dialogs); this store drives everything around it.
 
-import { p4, type P4Conn, type P4Record } from "$lib/p4";
+import { p4, pickFolder as pickFolderCmd, type P4Conn, type P4Record } from "$lib/p4";
 import { loadServers, saveServers, withServer, withoutServer } from "$lib/servers";
 import {
   loadClientFor,
@@ -320,6 +320,18 @@ export const connection = {
     h.setNotice(`Workspace ${name.trim()} created.`);
     setClientList(await p4.clients(conn).catch(() => [])); // pick up the new client
     await connection.selectClient(name.trim());
+  },
+  /** Open the native folder-picker for the New-workspace Root field. */
+  pickFolder(start: string) {
+    return pickFolderCmd(start);
+  },
+  /** Existing streams on the current server, for the New-workspace stream picker. */
+  async loadStreams(): Promise<{ stream: string; name: string }[]> {
+    if (!h) return [];
+    const rows = await p4.streams(h.conn()).catch(() => [] as P4Record[]);
+    return rows
+      .filter((r) => r.Stream)
+      .map((r) => ({ stream: r.Stream, name: r.Name ?? r.Stream }));
   },
   /** Remember `port` and connect. Adding a server goes through the login flow so
    *  the user picks the account for it (the ambient P4USER may have no access to

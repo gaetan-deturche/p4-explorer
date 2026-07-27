@@ -5,6 +5,24 @@ use crate::p4::{self, P4Conn};
 use tauri::AppHandle;
 use tauri_plugin_dialog::DialogExt;
 
+/// Prompt the native folder-picker and return the chosen directory, or None if
+/// the user cancelled. `start` seeds the initial directory when it exists.
+#[tauri::command]
+pub async fn pick_folder(app: AppHandle, start: String) -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut dlg = app.dialog().file();
+        if !start.is_empty() && std::path::Path::new(&start).is_dir() {
+            dlg = dlg.set_directory(&start);
+        }
+        match dlg.blocking_pick_folder() {
+            Some(fp) => Ok(Some(fp.into_path().map_err(|e| e.to_string())?.display().to_string())),
+            None => Ok(None),
+        }
+    })
+    .await
+    .map_err(|e| format!("pick-folder task failed: {e}"))?
+}
+
 /// Generate a unified-diff `.patch` from `files` (or all opened files of
 /// `change` when `files` is empty), prompt a Save-As dialog, and write it.
 /// Returns the saved path, or None if the user cancelled.
