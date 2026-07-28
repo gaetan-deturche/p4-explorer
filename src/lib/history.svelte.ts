@@ -6,7 +6,8 @@
 //! selection (no competing cache), so it stays plain $state. Shared bits (conn,
 //! path translation, notices) come via init().
 
-import { p4, type P4Conn, type P4Record } from "$lib/p4";
+import { p4, openDiffWindow, type P4Conn, type P4Record } from "$lib/p4";
+import { editor } from "$lib/editor.svelte";
 import type { HistEntry } from "$lib/cache";
 import { storeGet, storeSet, storeSetMem, hydrate, storeClearScope } from "$lib/store.svelte";
 
@@ -241,7 +242,12 @@ export const history = {
   },
   async openFileDiff(depotFile: string, rev: number) {
     try {
-      await p4.openDiff(h!.conn(), depotFile, rev);
+      // In-app diff window or the external P4DIFF tool, per Options → Editor.
+      if (editor.diffTool === "inapp") {
+        await openDiffWindow(await p4.diffPairRev(h!.conn(), depotFile, rev));
+      } else {
+        await p4.openDiff(h!.conn(), depotFile, rev);
+      }
     } catch (e) {
       h!.setNotice(String(e), 5000);
     }

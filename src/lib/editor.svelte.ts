@@ -15,9 +15,12 @@ import { localPathFor } from "$lib/cache";
 import { cacheGetSync, cacheSet } from "$lib/store.svelte";
 
 const CHOICE_KEY = "editor"; // store scope `nav`: the chosen editor id
+const DIFF_KEY = "difftool"; // store scope `nav`: "inapp" | "external"
 
 let editors = $state<EditorInfo[]>([]);
 let chosenId = $state<string>("");
+export type DiffTool = "inapp" | "external";
+let diffTool = $state<DiffTool>("inapp");
 
 function resolve(): EditorInfo | null {
   return editors.find((e) => e.id === chosenId) ?? editors[0] ?? null;
@@ -27,6 +30,7 @@ export const editor = {
   /** Detect installed editors and pick the initial choice: the saved one, else
    *  the Windows default, else the first detected (Notepad always exists). */
   async init() {
+    diffTool = cacheGetSync("nav", DIFF_KEY) === "external" ? "external" : "inapp";
     editors = await detectEditors().catch(() => []);
     const saved = cacheGetSync("nav", CHOICE_KEY) ?? "";
     if (saved && editors.some((e) => e.id === saved)) {
@@ -49,6 +53,14 @@ export const editor = {
   setChosen(id: string) {
     chosenId = id;
     cacheSet("nav", CHOICE_KEY, id);
+  },
+  /** Which tool the double-click "view diff" actions use. */
+  get diffTool(): DiffTool {
+    return diffTool;
+  },
+  setDiffTool(t: DiffTool) {
+    diffTool = t;
+    cacheSet("nav", DIFF_KEY, t);
   },
 
   /** Open a local file in the preferred editor. */

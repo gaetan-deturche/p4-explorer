@@ -3,7 +3,8 @@
 //! file-content providers for PendingList. Shared bits come via `init()`.
 
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { p4, type P4Conn, type P4Record, type ReviewInfo } from "$lib/p4";
+import { p4, openDiffWindow, type P4Conn, type P4Record, type ReviewInfo } from "$lib/p4";
+import { editor } from "$lib/editor.svelte";
 import { cacheGetSync, cacheSet, storeGet, hydrate, storeSet } from "$lib/store.svelte";
 
 type Hooks = {
@@ -482,16 +483,26 @@ export const pending = {
   shelvedDiff(file: string, rev: number, change: string): Promise<string> {
     return p4.diffShelved(h!.conn(), file, rev, change);
   },
+  // Double-click diff: the in-app diff window, or the external P4DIFF tool,
+  // per the Options → Editor preference.
   async openLocalDiff(file: string) {
     try {
-      await p4.openDiffLocal(h!.conn(), file);
+      if (editor.diffTool === "inapp") {
+        await openDiffWindow(await p4.diffPairLocal(h!.conn(), file));
+      } else {
+        await p4.openDiffLocal(h!.conn(), file);
+      }
     } catch (e) {
       h!.setNotice(String(e), 5000);
     }
   },
   async openShelvedDiff(file: string, rev: number, change: string) {
     try {
-      await p4.openDiffShelved(h!.conn(), file, rev, change);
+      if (editor.diffTool === "inapp") {
+        await openDiffWindow(await p4.diffPairShelved(h!.conn(), file, rev, change));
+      } else {
+        await p4.openDiffShelved(h!.conn(), file, rev, change);
+      }
     } catch (e) {
       h!.setNotice(String(e), 5000);
     }

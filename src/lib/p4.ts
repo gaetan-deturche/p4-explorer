@@ -80,6 +80,19 @@ export function openInEditor(exe: string, file: string): Promise<void> {
   return invoke<void>("open_in_editor", { exe, file });
 }
 
+/** The two materialized sides of a diff, for the in-app diff window. */
+export interface DiffPair {
+  left: string;
+  right: string;
+  leftLabel: string;
+  rightLabel: string;
+  title: string;
+}
+/** Open the in-app side-by-side diff window on a materialized pair. */
+export function openDiffWindow(pair: DiffPair): Promise<void> {
+  return invoke<void>("open_diff_window", { pair });
+}
+
 // Gate every backend call through safe mode (the allow decision + labels live in
 // $lib/safe + $lib/p4cmds; reads and app-local calls pass straight through).
 function g<T>(cmd: string, args: Record<string, unknown> = {}): Promise<T> {
@@ -148,6 +161,12 @@ export const p4 = {
   openDiffLocal: (conn: P4Conn, depotFile: string) => g<void>("open_diff_local", { conn, depotFile }),
   /** p4 print a revision spec to a temp file; returns the temp path. */
   printToTemp: (conn: P4Conn, spec: string) => g<string>("print_to_temp", { conn, spec }),
+  // Materialize the two sides of a diff for the in-app diff window.
+  diffPairRev: (conn: P4Conn, depotFile: string, rev: number) =>
+    g<DiffPair>("diff_pair_rev", { conn, depotFile, rev }),
+  diffPairShelved: (conn: P4Conn, depotFile: string, rev: number, change: string) =>
+    g<DiffPair>("diff_pair_shelved", { conn, depotFile, rev, change }),
+  diffPairLocal: (conn: P4Conn, depotFile: string) => g<DiffPair>("diff_pair_local", { conn, depotFile }),
   revert: (conn: P4Conn, depotFile: string) => call("p4_revert", { conn, depotFile }),
   revertKeep: (conn: P4Conn, depotFile: string) => call("p4_revert_keep", { conn, depotFile }),
   reopen: (conn: P4Conn, depotFile: string, change: string) =>

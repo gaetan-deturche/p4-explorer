@@ -121,6 +121,30 @@
       {:else}
         <p class="hint dim">No editors detected.</p>
       {/if}
+      <div class="section"><span>Diff viewer</span></div>
+      <p class="hint dim">The tool opened when double-clicking a file to view its diff.</p>
+      <div class="edlist">
+        <label class="erow">
+          <input
+            type="radio"
+            name="difftool"
+            checked={editor.diffTool === "inapp"}
+            onchange={() => editor.setDiffTool("inapp")}
+          />
+          <span class="ename">In-app diff window</span>
+          <span class="epath mono dim">side-by-side, new window</span>
+        </label>
+        <label class="erow">
+          <input
+            type="radio"
+            name="difftool"
+            checked={editor.diffTool === "external"}
+            onchange={() => editor.setDiffTool("external")}
+          />
+          <span class="ename">External tool</span>
+          <span class="epath mono dim">P4DIFF (p4 set P4DIFF=…)</span>
+        </label>
+      </div>
     {:else}
       <label class="toggle">
         <input
