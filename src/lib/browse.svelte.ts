@@ -5,18 +5,18 @@
 
 import { p4, idx, type P4Conn, type P4Record } from "$lib/p4";
 import { makeNode, type TreeNode } from "$lib/tree";
-import {
-  loadFolder,
-  loadFolderAsync,
-  saveFolder,
-  clearClientCache,
-  buildChildren,
-  localChildren,
-  type FolderContents,
-} from "$lib/cache";
+import { clearClientCache, buildChildren, localChildren, type FolderContents } from "$lib/cache";
 import { history } from "$lib/history.svelte";
 import { pending } from "$lib/pending.svelte";
-import { cacheGetSync, cacheSet, cacheClearScope, storeGet, hydrate, storeSet } from "$lib/store.svelte";
+import {
+  cacheGetSync,
+  cacheSet,
+  cacheClearScope,
+  storeGet,
+  storeSet,
+  storeSetMem,
+  hydrate,
+} from "$lib/store.svelte";
 import { loadBrowseSource, saveBrowseSource, type ViewState } from "$lib/nav";
 
 type Tab = "history" | "pending" | "streams" | "log" | "notes";
@@ -31,7 +31,27 @@ type Hooks = {
 };
 
 let h: Hooks | null = null;
-const folderCache = new Map<string, FolderContents>();
+// Folders whose contents we've already refreshed from the server THIS session, so
+// a re-expand doesn't re-fetch (the store still holds them). Keyed `${source}:${path}`.
+const sessionFetched = new Set<string>();
+
+// Folder-contents store scopes, keyed by path. Children are ALWAYS built from
+// these (projectChildren); the p4 fetch only writes them (ensureFolder) — one
+// data path: p4 → store → view. `treeScope` MUST match cache.ts (Refresh's
+// clearClientCache drops it).
+const treeScope = (client: string) => `p4tree:${client}`; // workspace stream folder contents
+const depotScope = (port: string) => `p4depot:${port}`; // whole-depot folder contents
+const localScope = (client: string) => `p4local:${client}`; // on-disk structure
+const markScope = (client: string) => `p4localmark:${client}`; // server listing → local sync markers
+
+function parseFolder(s: string | undefined): FolderContents | null {
+  if (s === undefined) return null;
+  try {
+    return JSON.parse(s) as FolderContents;
+  } catch {
+    return null;
+  }
+}
 
 let rootPath = $state(""); // stream root, e.g. //Curiosity/main
 let clientRoot = $state(""); // local workspace root, e.g. H:\Dev\...\Curiosity
@@ -92,6 +112,10 @@ function streamsAreLoading(): boolean {
 // listing doesn't spawn a p4 process per subfolder at once, and cached.
 type FolderSync = { status: "synced" | "stale" | "nosync"; have: string; head: string };
 const folderSyncCache = new Map<string, FolderSync>();
+// A stale file's have-CL, keyed by path.toLowerCase(). Since projectChildren
+// rebuilds child nodes and can re-run on each store write, this stops the
+// per-stale-file `changesExact` query from re-firing on every re-projection.
+const fileHaveClCache = new Map<string, string>();
 let fsActive = 0;
 const fsWaiters: (() => void)[] = [];
 async function withFolderSyncSlot<T>(fn: () => Promise<T>): Promise<T> {
@@ -157,10 +181,18 @@ async function computeFolderSync(node: TreeNode): Promise<void> {
 /** A stale file's synced changelist (its head CL is already known from fstat). */
 async function computeFileHaveCl(node: TreeNode): Promise<void> {
   if (!h || node.haveCl) return;
+  const key = node.path.toLowerCase();
+  const hit = fileHaveClCache.get(key);
+  if (hit !== undefined) {
+    node.haveCl = hit;
+    return;
+  }
   const conn = h.conn();
   const spec = browse.toQuery(node.path) + "#have";
   const rows = await withFolderSyncSlot(() => safe(() => p4.changesExact(conn, spec)));
-  node.haveCl = rows[0]?.change ?? "";
+  const cl = rows[0]?.change ?? "";
+  fileHaveClCache.set(key, cl);
+  node.haveCl = cl;
 }
 
 /** Set a file node's have/head changelists for the sync tooltip: head from the
@@ -231,6 +263,113 @@ function rootForSource(): TreeNode {
   return n;
 }
 
+// Build node.children from the store ONLY (the single source). For Local, the
+// disk structure and the server-listing markers each come from their store scope;
+// for workspace/depot, the folder contents come from the store and the sync
+// markers are filled in the background (themselves store-backed via p4foldersync).
+// Called for the instant paint and again after ensureFolder writes fresh data.
+function projectChildren(node: TreeNode): void {
+  if (!h) return;
+  const path = node.path;
+  if (source === "local") {
+    const client = h.conn().client;
+    const local = parseFolder(storeGet(localScope(client), path));
+    const kids = local ? buildChildren(local) : [];
+    let mark: { dirs: string[]; files: P4Record[] } | null = null;
+    try {
+      const s = storeGet(markScope(client), path);
+      if (s) mark = JSON.parse(s) as { dirs: string[]; files: P4Record[] };
+    } catch {
+      /* corrupt */
+    }
+    // Apply markers BEFORE assigning children, so the sync dots paint in the same
+    // render as the files (not a tick later).
+    if (mark) applyLocalMarkers(kids, mark.dirs, mark.files);
+    node.children = kids;
+    return;
+  }
+  const scope = source === "depot" ? depotScope(h.conn().port) : treeScope(h.conn().client);
+  const c = parseFolder(storeGet(scope, path));
+  node.children = c ? buildChildren(c) : [];
+  // Background: subfolder sync markers; file have/head changelists for tooltips.
+  for (const k of node.children) {
+    if (k.isDir) computeFolderSync(k);
+    else if (k.rec) applyFileCl(k, k.rec);
+  }
+}
+
+// Fetch a folder's contents from the server and WRITE them to the store — the
+// only place the tree data is populated. Re-projects the node after each write so
+// the view updates progressively (matches the old cached-then-fresh paint) while
+// still flowing exclusively through the store. Dispatches on source.
+async function ensureFolder(node: TreeNode): Promise<void> {
+  if (!h) return;
+  const path = node.path;
+
+  if (source === "depot") {
+    let c: FolderContents;
+    if (path === "//") {
+      const depots = await safe(() => p4.depots(h!.conn()));
+      c = { dirs: depots.filter((d) => d.name).map((d) => ({ dir: "//" + d.name }) as P4Record), files: [] };
+    } else {
+      const [d, f] = await Promise.all([
+        safe(() => p4.dirs(h!.conn(), path)),
+        safe(() => p4.files(h!.conn(), path)),
+      ]);
+      c = { dirs: d, files: f };
+    }
+    storeSet(depotScope(h.conn().port), path, JSON.stringify(c));
+    projectChildren(node);
+    return;
+  }
+
+  if (source === "local") {
+    const client = h.conn().client;
+    // Disk structure first → show the files fast; the sync dots follow.
+    const local = await localChildren(clientRoot, rootPath, path);
+    if (local) {
+      storeSet(localScope(client), path, JSON.stringify(local));
+      projectChildren(node);
+    }
+    // Server listing → sync/ignored markers.
+    const q = browse.toQuery(path);
+    const [d, f] = await Promise.all([
+      safe(() => p4.dirs(h!.conn(), q)),
+      safe(() => p4.files(h!.conn(), q)),
+    ]);
+    const dirs = d.map((r) => base(r.dir ?? "")).filter(Boolean);
+    const files = f.filter((r) => r.depotFile);
+    storeSet(markScope(client), path, JSON.stringify({ dirs, files }));
+    projectChildren(node);
+    return;
+  }
+
+  // workspace (server stream). On a cold cache, seed a provisional on-disk listing
+  // (memory only — not persisted, the server result replaces it) so the folder
+  // isn't blank while p4 responds.
+  const client = h.conn().client;
+  if (storeGet(treeScope(client), path) === undefined) {
+    const local = await localChildren(clientRoot, rootPath, path);
+    if (local) {
+      storeSetMem(treeScope(client), path, JSON.stringify(local));
+      projectChildren(node);
+    }
+  }
+  // Query via the client view, but rebuild each child's path from the display
+  // parent + basename so the tree stays in stream-depot form (virtual streams too).
+  const q = browse.toQuery(path);
+  const [d, f] = await Promise.all([
+    safe(() => p4.dirs(h!.conn(), q)),
+    safe(() => p4.files(h!.conn(), q)),
+  ]);
+  const c: FolderContents = {
+    dirs: d.map((r) => (r.dir ? { ...r, dir: `${path}/${base(r.dir)}` } : r)),
+    files: f.map((r) => (r.depotFile ? { ...r, depotFile: `${path}/${base(r.depotFile)}` } : r)),
+  };
+  storeSet(treeScope(client), path, JSON.stringify(c));
+  projectChildren(node);
+}
+
 export const browse = {
   init(hooks: Hooks) {
     h = hooks;
@@ -286,8 +425,9 @@ export const browse = {
 
   /** Clear all browse state (on disconnect / workspace switch). */
   reset() {
-    folderCache.clear();
+    sessionFetched.clear();
     folderSyncCache.clear();
+    fileHaveClCache.clear();
     rootPath = "";
     clientRoot = "";
     tree = null;
@@ -336,121 +476,41 @@ export const browse = {
   },
 
   // --- file tree -------------------------------------------------------------
-  // Populate a directory node's children. Dispatches on the current source:
-  // depot (server, all depots), local (on-disk listing), or workspace (server
-  // stream with stale-while-revalidate caching).
+  // Populate a directory node's children. The children are DERIVED from the store
+  // (projectChildren); the server fetch only WRITES the store (ensureFolder) — so
+  // there is one data path, p4 → store → view, for both the instant (cached) paint
+  // and the refresh. Dispatches on the current source inside those two helpers.
   async loadNode(node: TreeNode) {
     if (!h || node.loading) return;
     node.loading = true;
     const path = node.path;
+    const client = h.conn().client;
+    const port = h.conn().port;
+    const key = `${source}:${path}`;
 
-    if (source === "depot") {
-      if (path === "//") {
-        const depots = await safe(() => p4.depots(h!.conn()));
-        node.children = depots.filter((d) => d.name).map((d) => makeNode("//" + d.name, true));
-      } else {
-        const [d, f] = await Promise.all([
-          safe(() => p4.dirs(h!.conn(), path)),
-          safe(() => p4.files(h!.conn(), path)),
-        ]);
-        node.children = buildChildren({ dirs: d, files: f });
-      }
-      node.loaded = true;
-      node.loading = false;
-      for (const k of node.children) {
-        if (k.isDir) computeFolderSync(k);
-        else if (k.rec) applyFileCl(k, k.rec);
-      }
-      return;
-    }
-
+    // 1) Instant paint: hydrate the persisted layers into the reactive map, then
+    //    project whatever the store already holds.
     if (source === "local") {
-      // Paint the cached disk listing AND cached sync/ignored markers instantly,
-      // then re-read the disk + fetch the server listing in the background to
-      // refresh both. Nothing here blocks folder-open.
-      const client = h.conn().client;
-      const localScope = `p4local:${client}`; // disk structure
-      const markScope = `p4localmark:${client}`; // server listing → sync markers
-      const parseJson = <T>(s: string | null): T | null => {
-        try {
-          return s ? (JSON.parse(s) as T) : null;
-        } catch {
-          return null;
-        }
-      };
-      const cachedLocal = parseJson<FolderContents>(cacheGetSync(localScope, path));
-      const cachedMark = parseJson<{ dirs: string[]; files: P4Record[] }>(
-        cacheGetSync(markScope, path),
-      );
-      const local = cachedLocal ?? (await localChildren(clientRoot, rootPath, path));
-      const kids = local ? buildChildren(local) : [];
-      // Apply cached markers BEFORE assigning children, so the sync dots paint in
-      // the same render as the files (not a tick later).
-      if (cachedMark) applyLocalMarkers(kids, cachedMark.dirs, cachedMark.files);
-      node.children = kids;
-      node.loaded = true;
-      node.loading = false;
-
-      const conn = h.conn();
-      const q = browse.toQuery(path);
-      void (async () => {
-        // Refresh the disk structure cache (self-corrects on the next load).
-        if (cachedLocal) {
-          const fresh = await localChildren(clientRoot, rootPath, path);
-          if (fresh) cacheSet(localScope, path, JSON.stringify(fresh));
-        } else if (local) {
-          cacheSet(localScope, path, JSON.stringify(local));
-        }
-        // Refresh the server listing → sync markers, and cache them.
-        const [d, f] = await Promise.all([
-          safe(() => p4.dirs(conn, q)),
-          safe(() => p4.files(conn, q)),
-        ]);
-        const dirs = d.map((r) => base(r.dir ?? "")).filter(Boolean);
-        const files = f.filter((r) => r.depotFile);
-        cacheSet(markScope, path, JSON.stringify({ dirs, files }));
-        applyLocalMarkers(node.children, dirs, files);
-      })();
-      return;
-    }
-
-    // workspace (server stream)
-    const mem = folderCache.get(path);
-    // Instant paint from the fast cache; on a miss consult the SQLite source of
-    // truth (cold/evicted localStorage) before falling back to disk.
-    let cached = mem ?? loadFolder(h.conn().client, path);
-    if (!cached && !mem) cached = await loadFolderAsync(h.conn().client, path);
-    if (cached) {
-      node.children = buildChildren(cached);
+      hydrate(localScope(client), path);
+      hydrate(markScope(client), path);
+    } else if (source === "depot") {
+      hydrate(depotScope(port), path);
     } else {
-      const local = await localChildren(clientRoot, rootPath, path);
-      if (local && node.children.length === 0) node.children = buildChildren(local);
+      hydrate(treeScope(client), path);
     }
+    projectChildren(node);
+    if (node.children.length > 0) node.loaded = true; // painted (stale-ok) content
 
-    // Refresh unless we already have it fresh in memory this session. Query via
-    // the client view, but rebuild each child's path from the display parent +
-    // basename so the tree stays in stream-depot form (and virtual streams show).
-    if (!mem) {
-      const q = browse.toQuery(path);
-      const [d, f] = await Promise.all([
-        safe(() => p4.dirs(h!.conn(), q)),
-        safe(() => p4.files(h!.conn(), q)),
-      ]);
-      const c = {
-        dirs: d.map((r) => (r.dir ? { ...r, dir: `${path}/${base(r.dir)}` } : r)),
-        files: f.map((r) => (r.depotFile ? { ...r, depotFile: `${path}/${base(r.depotFile)}` } : r)),
-      };
-      node.children = buildChildren(c);
-      folderCache.set(path, c);
-      saveFolder(h.conn().client, path, c);
+    // 2) Refresh the store from the server (Local always re-reads disk; stream/depot
+    //    once per session), re-projecting as fresh data lands. One path: p4 → store
+    //    → view. `sessionFetched` is claimed before the await so a re-entrant expand
+    //    can't double-fetch.
+    if (source === "local" || !sessionFetched.has(key)) {
+      sessionFetched.add(key);
+      await ensureFolder(node);
     }
     node.loaded = true;
     node.loading = false;
-    // Background: subfolder sync markers; file have/head changelists for tooltips.
-    for (const k of node.children) {
-      if (k.isDir) computeFolderSync(k);
-      else if (k.rec) applyFileCl(k, k.rec);
-    }
   },
 
   // Single click: select. File → its server history/details (works for tracked
@@ -571,8 +631,9 @@ export const browse = {
   async refresh() {
     if (!h || !h.connected() || refreshing) return;
     refreshing = true;
-    folderCache.clear();
+    sessionFetched.clear();
     folderSyncCache.clear();
+    fileHaveClCache.clear();
     cacheClearScope(`p4foldersync:${h.conn().client}`); // persisted folder-sync markers
     history.clearMemCache();
     clearClientCache(h.conn().client);
