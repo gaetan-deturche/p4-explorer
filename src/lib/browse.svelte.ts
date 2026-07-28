@@ -34,6 +34,10 @@ let h: Hooks | null = null;
 // Folders whose contents we've already refreshed from the server THIS session, so
 // a re-expand doesn't re-fetch (the store still holds them). Keyed `${source}:${path}`.
 const sessionFetched = new Set<string>();
+// The root TreeNode per source, kept so switching source and back restores the
+// prior expansion (the children data still lives in the store). Cleared on
+// workspace switch / disconnect (reset) and Refresh.
+const treeBySource = new Map<BrowseSource, TreeNode>();
 
 // Folder-contents store scopes, keyed by path. Children are ALWAYS built from
 // these (projectChildren); the p4 fetch only writes them (ensureFolder) — one
@@ -433,11 +437,19 @@ export const browse = {
    *  rebuild its tree. Depot needs no open workspace; the others need `rootPath`. */
   async setSource(s: BrowseSource) {
     if (!h || s === source) return;
+    if (tree) treeBySource.set(source, tree); // remember the outgoing source's tree
     source = s;
     saveBrowseSource(s); // persist across workspace switch + restart
     selectedTreePath = "";
     if (s !== "depot" && !rootPath) {
       tree = null;
+      return;
+    }
+    // Restore the prior tree for this source (expansion intact; the children data
+    // is still in the store). Only build + load fresh on the first visit.
+    const prior = treeBySource.get(s);
+    if (prior) {
+      tree = prior;
       return;
     }
     tree = rootForSource();
@@ -447,6 +459,7 @@ export const browse = {
   /** Clear all browse state (on disconnect / workspace switch). */
   reset() {
     sessionFetched.clear();
+    treeBySource.clear();
     folderSyncCache.clear();
     fileHaveClCache.clear();
     rootPath = "";
@@ -661,6 +674,7 @@ export const browse = {
     if (!h || !h.connected() || refreshing) return;
     refreshing = true;
     sessionFetched.clear();
+    treeBySource.clear(); // drop other sources' cached trees (their data was just cleared)
     folderSyncCache.clear();
     fileHaveClCache.clear();
     cacheClearScope(`p4foldersync:${h.conn().client}`); // persisted folder-sync markers
