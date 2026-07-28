@@ -24,9 +24,17 @@ fn base_name(depot_file: &str) -> &str {
 }
 
 /// Print `spec` to a temp file named for the diff window; empty `spec` creates
-/// an EMPTY temp file (the left side of an added file's diff).
+/// an EMPTY temp file (the left side of an added file's diff). Names are
+/// uniquified per call — a running editor holds previously-diffed files open
+/// (locked and cached), so reusing a name would collide or show stale content —
+/// and the read-only attribute `p4 print` sets is cleared (UE's -diff copies
+/// the file, and the copy inherits the attribute).
 fn print_side(conn: &P4Conn, spec: &str, file_tag: &str) -> Result<String, String> {
-    let tmp = std::env::temp_dir().join(format!("p4gui_diff_{file_tag}"));
+    let uniq = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let tmp = std::env::temp_dir().join(format!("p4gui_diff_{uniq}_{file_tag}"));
     let tmp_s = tmp.to_str().ok_or("bad temp path")?.to_string();
     if spec.is_empty() {
         std::fs::write(&tmp, "").map_err(|e| e.to_string())?;
@@ -35,6 +43,13 @@ fn print_side(conn: &P4Conn, spec: &str, file_tag: &str) -> Result<String, Strin
     p4::run_raw(conn, &["print", "-q", "-o", &tmp_s, spec])?;
     if !tmp.is_file() {
         return Err(format!("p4 print produced no file for {spec}"));
+    }
+    if let Ok(md) = std::fs::metadata(&tmp) {
+        let mut perm = md.permissions();
+        if perm.readonly() {
+            perm.set_readonly(false);
+            let _ = std::fs::set_permissions(&tmp, perm);
+        }
     }
     Ok(tmp_s)
 }
@@ -174,12 +189,65 @@ fn find_uproject(root: &std::path::Path) -> Option<std::path::PathBuf> {
     None
 }
 
-/// Diff two UE asset files in Unreal's asset-diff tool:
-/// `UnrealEditor.exe <project> -diff <left> <right>`. The editor + .uproject are
-/// located from the workspace root (`p4 info` clientRoot).
+/// Strip characters that would break out of a Python string literal.
+fn py_safe(s: &str) -> String {
+    s.replace(['\'', '"', '\\', '\n', '\r'], "_")
+}
+
+/// The in-editor diff script: load both packages (LoadPackage accepts raw file
+/// paths — temp files get a transient package, the workspace file resolves to
+/// its mounted /Game package, i.e. the LIVE asset), find the asset by name (an
+/// asset's object name == its file base name), and open the class-specific diff
+/// via IAssetTools::DiffAssets (BlueprintCallable → exposed to Python).
+fn diff_script(left: &str, right: &str, name: &str, left_rev: &str, right_rev: &str) -> String {
+    // Paths go through raw strings; quotes/newlines are stripped defensively.
+    let (l, r) = (left.replace('\'', "_"), right.replace('\'', "_"));
+    let (name, lrev, rrev) = (py_safe(name), py_safe(left_rev), py_safe(right_rev));
+    format!(
+        r#"import unreal
+_lp = unreal.load_package(r'{l}')
+_rp = unreal.load_package(r'{r}')
+_la = unreal.find_object(_lp, '{name}') if _lp else None
+_ra = unreal.find_object(_rp, '{name}') if _rp else None
+if not _la or not _ra:
+    raise RuntimeError('Auger: asset {name} not found (left ok=%s, right ok=%s)' % (_la is not None, _ra is not None))
+_li = unreal.RevisionInfo()
+_ri = unreal.RevisionInfo()
+try:
+    _li.revision = '{lrev}'
+    _ri.revision = '{rrev}'
+except Exception:
+    pass
+unreal.AssetToolsHelpers.get_asset_tools().diff_assets(_la, _ra, _li, _ri)
+"#
+    )
+}
+
+/// Diff two UE asset files in Unreal's asset-diff tool. Prefers an ALREADY
+/// RUNNING editor (Python remote execution → in-place DiffAssets); falls back
+/// to launching `UnrealEditor.exe <project> -diff <left> <right>`. Returns
+/// "remote" or "launched" for the caller's notice.
 #[tauri::command]
-pub async fn open_unreal_diff(conn: P4Conn, left: String, right: String) -> Result<(), String> {
+pub async fn open_unreal_diff(
+    conn: P4Conn,
+    left: String,
+    right: String,
+    name: String,
+    left_rev: String,
+    right_rev: String,
+) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        // In-place first: a running editor with remote execution enabled.
+        let script = diff_script(&left, &right, &name, &left_rev, &right_rev);
+        match super::unreal_remote::run_python_in_editor(&script) {
+            Ok(Some(())) => return Ok("remote".to_string()),
+            Ok(None) => {} // no editor running — launch one
+            Err(e) => {
+                // An editor answered but the in-place diff failed (e.g. remote
+                // exec misconfigured mid-run) — fall back to a fresh instance.
+                eprintln!("in-place Unreal diff failed, launching an instance: {e}");
+            }
+        }
         let recs = p4::run(&conn, &["info"])?;
         let root = recs
             .first()
@@ -195,7 +263,7 @@ pub async fn open_unreal_diff(conn: P4Conn, left: String, right: String) -> Resu
         let mut c = std::process::Command::new(editor);
         c.arg(project).arg("-diff").arg(&left).arg(&right);
         c.spawn().map_err(|e| format!("failed to launch Unreal diff: {e}"))?;
-        Ok(())
+        Ok("launched".to_string())
     })
     .await
     .map_err(|e| format!("unreal diff task failed: {e}"))?

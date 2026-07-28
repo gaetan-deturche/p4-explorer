@@ -28,6 +28,12 @@ export function isUnrealAsset(path: string): boolean {
   return /\.(uasset|umap)$/i.test(path);
 }
 
+/** A UE asset's object name: its file base name (an editor invariant). */
+export function unrealAssetName(depotFile: string): string {
+  const base = depotFile.split("/").pop() ?? depotFile;
+  return base.replace(/\.[^.]+$/, "");
+}
+
 function resolve(): EditorInfo | null {
   return editors.find((e) => e.id === chosenId) ?? editors[0] ?? null;
 }

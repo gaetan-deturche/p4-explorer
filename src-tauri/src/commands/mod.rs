@@ -16,6 +16,7 @@ mod editor;
 mod pending;
 mod server;
 mod sync;
+mod unreal_remote;
 
 // Re-export every command so the registration in `lib.rs` can keep referring to
 // them as `commands::<name>` regardless of which submodule they live in.

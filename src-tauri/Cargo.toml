@@ -35,4 +35,6 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 # Swarm REST API for review status. native-tls → schannel on Windows, so it
 # trusts the corporate CA in the Windows cert store (unlike bundled rustls roots).
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "native-tls"] }
+# SO_REUSEADDR before bind for UE's remote-execution multicast port (std can't).
+socket2 = "0.5"
 

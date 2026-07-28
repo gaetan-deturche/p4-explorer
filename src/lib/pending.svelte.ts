@@ -4,7 +4,7 @@
 
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { p4, openDiffWindow, type P4Conn, type P4Record, type ReviewInfo } from "$lib/p4";
-import { editor, isUnrealAsset } from "$lib/editor.svelte";
+import { editor, isUnrealAsset, unrealAssetName } from "$lib/editor.svelte";
 import { cacheGetSync, cacheSet, storeGet, hydrate, storeSet } from "$lib/store.svelte";
 
 type Hooks = {
@@ -489,7 +489,10 @@ export const pending = {
     try {
       if (isUnrealAsset(file)) {
         const pair = await p4.diffPairLocal(h!.conn(), file);
-        await p4.openUnrealDiff(h!.conn(), pair.left, pair.right);
+        const mode = await p4.openUnrealDiff(
+          h!.conn(), pair.left, pair.right, unrealAssetName(file), pair.leftLabel, pair.rightLabel,
+        );
+        if (mode === "remote") h!.setNotice("Diff opened in the running Unreal Editor.");
       } else if (editor.diffTool === "inapp") {
         await openDiffWindow(await p4.diffPairLocal(h!.conn(), file));
       } else {
@@ -503,7 +506,10 @@ export const pending = {
     try {
       if (isUnrealAsset(file)) {
         const pair = await p4.diffPairShelved(h!.conn(), file, rev, change);
-        await p4.openUnrealDiff(h!.conn(), pair.left, pair.right);
+        const mode = await p4.openUnrealDiff(
+          h!.conn(), pair.left, pair.right, unrealAssetName(file), pair.leftLabel, pair.rightLabel,
+        );
+        if (mode === "remote") h!.setNotice("Diff opened in the running Unreal Editor.");
       } else if (editor.diffTool === "inapp") {
         await openDiffWindow(await p4.diffPairShelved(h!.conn(), file, rev, change));
       } else {
