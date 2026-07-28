@@ -202,17 +202,61 @@ pub async fn p4_sync(conn: P4Conn, path: Option<String>) -> Res {
 /// Re-sync specific files. Plain retry (for files that were locked and are now
 /// free) unless `force` is set, in which case `-f` overwrites writable/stuck
 /// files — DISCARDING local changes (caller must confirm).
+///
+/// A non-force retry additionally EXCLUDES files that carry offline
+/// modifications (per `p4 reconcile -n`): "noclobber" only refuses WRITABLE
+/// files, so a modified-but-read-only file — or any file on a clobber client —
+/// would be silently replaced by a plain sync, losing the local work. Excluded
+/// files come back as `{action:"protected", depotFile}` records so the caller
+/// keeps them listed; overwriting them requires `force`.
 #[tauri::command]
 pub async fn p4_resync(conn: P4Conn, files: Vec<String>, force: bool) -> Res {
     if files.is_empty() {
         return Ok(Vec::new());
     }
-    let mut args = vec!["sync".to_string()];
-    if force {
-        args.push("-f".to_string());
-    }
-    args.extend(files);
-    run(conn, args).await
+    tauri::async_runtime::spawn_blocking(move || {
+        let run_ref = |args: &[String]| {
+            let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+            p4::run(&conn, &refs)
+        };
+        if force {
+            let mut args = vec!["sync".to_string(), "-f".to_string()];
+            args.extend(files);
+            return run_ref(&args);
+        }
+        // Which of the targets have offline edits? Fail CLOSED — if the check
+        // itself fails, sync nothing rather than risk overwriting local work.
+        let mut rec = vec!["reconcile".into(), "-n".into(), "-e".into(), "-m".into()];
+        rec.extend(files.iter().cloned());
+        let modified = run_ref(&rec)
+            .map_err(|e| format!("offline-change check failed — nothing was synced: {e}"))?;
+        let norm = |s: &str| s.replace('\\', "/").to_lowercase();
+        let mut protected: Vec<String> = Vec::new();
+        for r in &modified {
+            for key in ["depotFile", "clientFile"] {
+                if let Some(v) = r.get(key).and_then(|v| v.as_str()) {
+                    protected.push(norm(v));
+                }
+            }
+        }
+        let (kept, to_sync): (Vec<String>, Vec<String>) =
+            files.into_iter().partition(|f| protected.contains(&norm(f)));
+        let mut out = Vec::new();
+        if !to_sync.is_empty() {
+            let mut args = vec!["sync".to_string()];
+            args.extend(to_sync);
+            out.extend(run_ref(&args)?);
+        }
+        for f in kept {
+            let mut r = crate::p4::Record::new();
+            r.insert("action".into(), "protected".into());
+            r.insert("depotFile".into(), f.into());
+            out.push(r);
+        }
+        Ok(out)
+    })
+    .await
+    .map_err(|e| format!("resync task failed: {e}"))?
 }
 
 /// Reconcile offline work under `path` (`p4 reconcile <path>/...`): open files

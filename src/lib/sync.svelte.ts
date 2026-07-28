@@ -247,9 +247,23 @@ export const sync = {
     }
     busyFile = file;
     try {
-      await p4.resync(h.conn(), [file], force);
-      const rest = errors.items.filter((i) => i.file !== file);
-      errors = rest.length ? { ...errors, items: rest } : null;
+      const rows = await p4.resync(h.conn(), [file], force);
+      // A non-force retry refuses files with offline modifications (see
+      // p4_resync) — keep the item listed and say why, instead of removing it.
+      if (rows.some((r) => r.action === "protected")) {
+        errors = {
+          ...errors,
+          items: errors.items.map((i) =>
+            i.file === file
+              ? { ...i, line: `${file} — kept: it has offline changes (use Force to overwrite)` }
+              : i,
+          ),
+        };
+        h.setNotice("File kept — it has offline changes. Use Force to overwrite.", 6000);
+      } else {
+        const rest = errors.items.filter((i) => i.file !== file);
+        errors = rest.length ? { ...errors, items: rest } : null;
+      }
       await h.refresh();
       h.loadPending();
     } catch (e) {
@@ -273,9 +287,35 @@ export const sync = {
     const targets = this.targets();
     busyFile = "*";
     try {
-      await p4.resync(h.conn(), targets, force);
-      errors = null;
-      h.setNotice(force ? "Force re-synced the affected files." : "Re-synced the affected files.");
+      const rows = await p4.resync(h.conn(), targets, force);
+      // Non-force: files with offline modifications were excluded (see
+      // p4_resync) — keep them listed with the reason; the rest were synced.
+      const kept = new Set(
+        rows.filter((r) => r.action === "protected").map((r) => r.depotFile),
+      );
+      if (kept.size) {
+        const items = errors.items
+          .filter((i) => i.file && kept.has(i.file))
+          .map((i) => ({
+            ...i,
+            line: `${i.file} — kept: it has offline changes (use Force to overwrite)`,
+          }));
+        errors = {
+          ...errors,
+          items: items.length
+            ? items
+            : [...kept].map((f) => ({
+                file: f,
+                line: `${f} — kept: it has offline changes (use Force to overwrite)`,
+              })),
+        };
+        h.setNotice(
+          `Re-synced; ${kept.size} file${kept.size === 1 ? "" : "s"} with offline changes kept.`,
+        );
+      } else {
+        errors = null;
+        h.setNotice(force ? "Force re-synced the affected files." : "Re-synced the affected files.");
+      }
       await h.refresh();
       h.loadPending();
     } catch (e) {
