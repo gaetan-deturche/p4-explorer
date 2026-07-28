@@ -1,11 +1,17 @@
-//! Browse feature store: the left depot tree (stale-while-revalidate folder
-//! cache + fuzzy search index), the Streams and Repo browser tabs, and the
-//! workspace refresh. History/details loads are delegated to the history store.
-//! Shared bits (conn, connected, center tab) come via init().
+//! Browse feature store: the left depot tree, the Streams tab, and the workspace
+//! refresh. History/details loads are delegated to the history store. Shared bits
+//! (conn, connected, center tab) come via init().
+//!
+//! The tree is DERIVED from the store: the only view state is which folders are
+//! expanded (per source) + the selection; children, sync markers, and loaded/
+//! loading states are computed from the store scopes + marker caches on every
+//! change. Commands (expand, refresh, source switch) never build UI state — they
+//! fetch from p4/disk and WRITE the store; the derived tree re-renders. One data
+//! path: p4 → store → view.
 
 import { p4, idx, type P4Conn, type P4Record } from "$lib/p4";
 import { makeNode, type TreeNode } from "$lib/tree";
-import { clearClientCache, buildChildren, localChildren, type FolderContents } from "$lib/cache";
+import { localChildren, type FolderContents } from "$lib/cache";
 import { history } from "$lib/history.svelte";
 import { pending } from "$lib/pending.svelte";
 import {
@@ -34,24 +40,38 @@ let h: Hooks | null = null;
 // Folders whose contents we've already refreshed from the server THIS session, so
 // a re-expand doesn't re-fetch (the store still holds them). Keyed `${source}:${path}`.
 const sessionFetched = new Set<string>();
-// The root TreeNode per source, kept so switching source and back restores the
-// prior expansion (the children data still lives in the store). Cleared on
-// workspace switch / disconnect (reset) and Refresh.
-const treeBySource = new Map<BrowseSource, TreeNode>();
 
-// Folder-contents store scopes, keyed by path. Children are ALWAYS built from
-// these (projectChildren); the p4 fetch only writes them (ensureFolder) — one
-// data path: p4 → store → view. `treeScope` MUST match cache.ts (Refresh's
-// clearClientCache drops it).
+// --- tree view state (ALL of it) ---------------------------------------------
+// Which folders are expanded, per source — survives source switches. Plain Sets;
+// `treeVer` bumps re-run the derived tree (the store's own $state map re-triggers
+// it for data changes; the bump covers these plain structures).
+const expandedBySource = new Map<BrowseSource, Set<string>>();
+// Folder fetches in flight (`${source}:${path}`) — drives the per-node "…".
+const loadingPaths = new Set<string>();
+let treeVer = $state(0);
+
+function expandedSet(): Set<string> {
+  let s = expandedBySource.get(source);
+  if (!s) {
+    s = new Set();
+    expandedBySource.set(source, s);
+  }
+  return s;
+}
+
+// Folder-contents store scopes, keyed by path. The derived tree ALWAYS builds
+// children from these; the p4 fetch only writes them (ensureFolder). `treeScope`
+// MUST stay in sync with the history/refresh clears.
 const treeScope = (client: string) => `p4tree:${client}`; // workspace stream folder contents
 const depotScope = (port: string) => `p4depot:${port}`; // whole-depot folder contents
 const localScope = (client: string) => `p4local:${client}`; // on-disk structure
 const markScope = (client: string) => `p4localmark:${client}`; // server listing → local sync markers
+const syncScope = (client: string) => `p4foldersync:${client}`; // folder sync markers
 
-function parseFolder(s: string | undefined): FolderContents | null {
-  if (s === undefined) return null;
+function parseJson<T>(s: string | undefined | null): T | null {
+  if (s === undefined || s === null) return null;
   try {
-    return JSON.parse(s) as FolderContents;
+    return JSON.parse(s) as T;
   } catch {
     return null;
   }
@@ -59,7 +79,6 @@ function parseFolder(s: string | undefined): FolderContents | null {
 
 let rootPath = $state(""); // stream root, e.g. //Curiosity/main
 let clientRoot = $state(""); // local workspace root, e.g. H:\Dev\...\Curiosity
-let tree = $state<TreeNode | null>(null);
 let selectedTreePath = $state("");
 let source = $state<BrowseSource>(loadBrowseSource()); // Files pane data source (persisted)
 let refreshing = $state(false);
@@ -95,13 +114,7 @@ function currentStreamRows(): P4Record[] {
   if (!h || !h.connected()) return [];
   const port = h.conn().port;
   if (!port) return [];
-  const json = storeGet("p4:streams", port);
-  if (json === undefined) return [];
-  try {
-    return JSON.parse(json) as P4Record[];
-  } catch {
-    return [];
-  }
+  return parseJson<P4Record[]>(storeGet("p4:streams", port)) ?? [];
 }
 // Loading = connected to a server whose stream list isn't in the store yet.
 function streamsAreLoading(): boolean {
@@ -111,15 +124,15 @@ function streamsAreLoading(): boolean {
   return !!port && storeGet("p4:streams", port) === undefined;
 }
 
-// Folder sync markers: have-change vs head-change under a folder (same signal
-// the History view shows). Computed lazily per folder, throttled so a wide
-// listing doesn't spawn a p4 process per subfolder at once, and cached.
+// --- sync markers (command side: fetch → cache; the derive only READS) --------
+// Folder markers: have-change vs head-change under a folder (same signal the
+// History view shows). Computed lazily per folder, throttled so a wide listing
+// doesn't spawn a p4 process per subfolder at once, cached in memory + store.
 type FolderSync = { status: "synced" | "stale" | "nosync"; have: string; head: string };
 const folderSyncCache = new Map<string, FolderSync>();
-// A stale file's have-CL, keyed by path.toLowerCase(). Since projectChildren
-// rebuilds child nodes and can re-run on each store write, this stops the
-// per-stale-file `changesExact` query from re-firing on every re-projection.
+// A stale file's have-CL, keyed by path.toLowerCase().
 const fileHaveClCache = new Map<string, string>();
+const markersInflight = new Set<string>(); // paths being fetched (either kind)
 let fsActive = 0;
 const fsWaiters: (() => void)[] = [];
 async function withFolderSyncSlot<T>(fn: () => Promise<T>): Promise<T> {
@@ -132,104 +145,88 @@ async function withFolderSyncSlot<T>(fn: () => Promise<T>): Promise<T> {
     fsWaiters.shift()?.();
   }
 }
-/** Fill in a directory node's sync marker + have/head changelists (mutate node).
- *  Instant from the in-memory or persisted (store) cache; only queries p4 on a
- *  cold miss. Refresh clears the store scope so it recomputes. */
-async function computeFolderSync(node: TreeNode): Promise<void> {
+
+/** Fetch a folder's sync marker into the caches (memory + store) and bump the
+ *  tree. No-op if cached or already in flight; instant from the persisted store
+ *  on repeat visits (Refresh clears it so it recomputes). */
+async function computeFolderSync(path: string): Promise<void> {
   if (!h) return;
-  const cacheKey = node.path.toLowerCase();
-  const apply = (r: FolderSync) => {
-    node.folderSync = r.status;
-    node.haveCl = r.have;
-    node.headCl = r.head;
-  };
-  const hit = folderSyncCache.get(cacheKey);
-  if (hit) {
-    apply(hit);
-    return;
-  }
+  const cacheKey = path.toLowerCase();
+  if (folderSyncCache.has(cacheKey) || markersInflight.has(cacheKey)) return;
   const client = h.conn().client;
-  const scope = `p4foldersync:${client}`;
-  try {
-    const s = cacheGetSync(scope, node.path);
-    if (s) {
-      const stored = JSON.parse(s) as FolderSync;
-      folderSyncCache.set(cacheKey, stored);
-      apply(stored); // instant on repeat visits — no p4 (refreshed via Refresh)
-      return;
-    }
-  } catch {
-    /* corrupt */
-  }
-  const conn = h.conn();
-  const q = browse.toQuery(node.path);
-  const res = await withFolderSyncSlot(async () => {
-    const [head, have] = await Promise.all([
-      safe(() => p4.changes(conn, q, 1)),
-      safe(() => p4.haveChange(conn, q)),
-    ]);
-    const headCl = head[0]?.change ?? "";
-    const haveCl = have[0]?.change ?? "";
-    const status: "synced" | "stale" | "nosync" = !haveCl
-      ? "nosync"
-      : haveCl === headCl
-        ? "synced"
-        : "stale";
-    return { status, have: haveCl, head: headCl };
-  });
-  folderSyncCache.set(cacheKey, res);
-  cacheSet(scope, node.path, JSON.stringify(res));
-  apply(res);
-}
-
-/** A stale file's synced changelist (its head CL is already known from fstat). */
-async function computeFileHaveCl(node: TreeNode): Promise<void> {
-  if (!h || node.haveCl) return;
-  const key = node.path.toLowerCase();
-  const hit = fileHaveClCache.get(key);
-  if (hit !== undefined) {
-    node.haveCl = hit;
+  const stored = parseJson<FolderSync>(cacheGetSync(syncScope(client), path));
+  if (stored) {
+    folderSyncCache.set(cacheKey, stored);
+    treeVer++;
     return;
   }
-  const conn = h.conn();
-  const spec = browse.toQuery(node.path) + "#have";
-  const rows = await withFolderSyncSlot(() => safe(() => p4.changesExact(conn, spec)));
-  const cl = rows[0]?.change ?? "";
-  fileHaveClCache.set(key, cl);
-  node.haveCl = cl;
+  markersInflight.add(cacheKey);
+  try {
+    const conn = h.conn();
+    const q = browse.toQuery(path);
+    const res = await withFolderSyncSlot(async () => {
+      const [head, have] = await Promise.all([
+        safe(() => p4.changes(conn, q, 1)),
+        safe(() => p4.haveChange(conn, q)),
+      ]);
+      const headCl = head[0]?.change ?? "";
+      const haveCl = have[0]?.change ?? "";
+      const status: "synced" | "stale" | "nosync" = !haveCl
+        ? "nosync"
+        : haveCl === headCl
+          ? "synced"
+          : "stale";
+      return { status, have: haveCl, head: headCl };
+    });
+    folderSyncCache.set(cacheKey, res);
+    cacheSet(syncScope(client), path, JSON.stringify(res));
+    treeVer++;
+  } finally {
+    markersInflight.delete(cacheKey);
+  }
 }
 
-/** Set a file node's have/head changelists for the sync tooltip: head from the
- *  fstat record; have == head when synced, else fetched in the background. */
-function applyFileCl(node: TreeNode, rec: P4Record): void {
-  const have = rec.haveRev;
-  const head = rec.headRev ?? "";
-  node.headCl = rec.headChange ?? "";
-  if (!have) return; // not synced → no have CL
-  if (have === head) node.haveCl = node.headCl; // synced → same changelist
-  else computeFileHaveCl(node); // stale → fetch the synced (have) CL in the background
+/** Fetch a stale file's synced (have) changelist into the cache. */
+async function computeFileHaveCl(path: string): Promise<void> {
+  if (!h) return;
+  const key = path.toLowerCase();
+  if (fileHaveClCache.has(key) || markersInflight.has(key)) return;
+  markersInflight.add(key);
+  try {
+    const conn = h.conn();
+    const spec = browse.toQuery(path) + "#have";
+    const rows = await withFolderSyncSlot(() => safe(() => p4.changesExact(conn, spec)));
+    fileHaveClCache.set(key, rows[0]?.change ?? "");
+    treeVer++;
+  } finally {
+    markersInflight.delete(key);
+  }
 }
 
-/** Apply the Local-source sync/ignored markers to a folder's children from a
- *  server listing: `dirs` = subfolder basenames present in the depot, `files` =
- *  fstat records (have/head). Anything on disk but absent is `untracked`. */
-function applyLocalMarkers(children: TreeNode[], dirs: string[], files: P4Record[]): void {
-  const sDirs = new Set(dirs.map((x) => x.toLowerCase()));
-  const sFiles = new Map<string, P4Record>();
-  for (const r of files) if (r.depotFile) sFiles.set(base(r.depotFile).toLowerCase(), r);
-  for (const k of children) {
-    const bn = base(k.path).toLowerCase();
-    if (k.isDir) {
-      k.untracked = !sDirs.has(bn);
-      if (!k.untracked) computeFolderSync(k);
-    } else {
-      const rec = sFiles.get(bn);
-      k.untracked = !rec;
-      if (rec) {
-        k.rec = rec;
-        applyFileCl(k, rec);
-      }
+/** Kick the marker fetches a folder's children need (dir sync markers; stale
+ *  files' have-CLs). Called from the command side whenever a folder's contents
+ *  are (re)available — never from the derive. */
+function kickMarkers(path: string): void {
+  if (!h) return;
+  const c = readFolder(path);
+  if (!c) return;
+  if (source === "local") {
+    const mark = parseJson<{ dirs: string[]; files: P4Record[] }>(
+      storeGet(markScope(h.conn().client), path),
+    );
+    if (!mark) return; // markers arrive with the server listing; kicked again then
+    const sDirs = new Set(mark.dirs.map((x) => x.toLowerCase()));
+    for (const d of c.dirs) {
+      if (d.dir && sDirs.has(base(d.dir).toLowerCase())) computeFolderSync(d.dir);
     }
+    for (const r of mark.files) {
+      if (r.depotFile && r.haveRev && r.haveRev !== (r.headRev ?? "")) computeFileHaveCl(r.depotFile);
+    }
+    return;
+  }
+  for (const d of c.dirs) if (d.dir) computeFolderSync(d.dir);
+  for (const f of c.files) {
+    if (f.depotFile && f.haveRev && f.haveRev !== (f.headRev ?? "")) computeFileHaveCl(f.depotFile);
   }
 }
 
@@ -247,91 +244,109 @@ function srcKey(): string {
   return source === "depot" ? depotKey() : source === "local" ? localKey() : wsKey();
 }
 
-/** The root tree node for the current source: the `//` depots root for `depot`,
- *  else the workspace stream root (local & workspace share it; only the child
- *  listing differs). */
-function rootForSource(): TreeNode {
-  if (source === "depot") {
-    return {
-      path: "//",
-      name: "Depots",
-      isDir: true,
-      expanded: true,
-      loaded: false,
-      loading: false,
-      children: [],
-    };
+// --- the derived tree ---------------------------------------------------------
+
+/** The current source's root path ("//" for depot, else the stream root). */
+function rootPathForSource(): string {
+  return source === "depot" ? "//" : rootPath;
+}
+
+/** Read a folder's contents from the store for the current source (reactive). */
+function readFolder(path: string): FolderContents | null {
+  if (!h) return null;
+  const scope =
+    source === "depot"
+      ? depotScope(h.conn().port)
+      : source === "local"
+        ? localScope(h.conn().client)
+        : treeScope(h.conn().client);
+  return parseJson<FolderContents>(storeGet(scope, path));
+}
+
+/** Build one node of the derived tree: state from the view sets, children from
+ *  the store, markers from the caches. Recurses into expanded directories. */
+function buildDirNode(path: string, name: string): TreeNode {
+  const node = makeNode(path, true);
+  if (name) node.name = name;
+  const exp = expandedSet().has(path);
+  node.expanded = exp;
+  node.loading = loadingPaths.has(`${source}:${path}`);
+  const c = readFolder(path);
+  node.loaded = c !== null;
+  // Folder sync marker (memory cache; hydrated from the store on compute).
+  const fs = folderSyncCache.get(path.toLowerCase());
+  if (fs) {
+    node.folderSync = fs.status;
+    node.haveCl = fs.have;
+    node.headCl = fs.head;
   }
-  const n = makeNode(rootPath, true);
-  n.expanded = true;
-  return n;
-}
-
-// Reconcile a node's children against a freshly-built desired list: reuse the
-// existing node for a matching path so its VIEW state (expanded / loaded / its own
-// children / already-computed markers) survives a re-projection; only the data
-// (name, fstat rec) is refreshed. New paths are added, gone paths dropped, order
-// follows `desired`. Without this, re-projecting would collapse expanded subtrees.
-function reconcileChildren(existing: TreeNode[], desired: TreeNode[]): TreeNode[] {
-  if (existing.length === 0) return desired;
-  const byPath = new Map(existing.map((n) => [n.path, n]));
-  return desired.map((d) => {
-    const cur = byPath.get(d.path);
-    if (cur && cur.isDir === d.isDir) {
-      cur.name = d.name;
-      if (d.rec) cur.rec = d.rec; // fresh fstat when the source carries one
-      return cur;
-    }
-    return d;
-  });
-}
-
-// Build node.children from the store ONLY (the single source), reconciled against
-// the current children so expansion is preserved. For Local, the disk structure
-// and the server-listing markers each come from their store scope; for
-// workspace/depot, the folder contents come from the store and the sync markers
-// are filled in the background (themselves store-backed via p4foldersync). Called
-// for the instant paint and again after ensureFolder writes fresh data.
-function projectChildren(node: TreeNode): void {
-  if (!h) return;
-  const path = node.path;
+  if (!exp || !c) return node; // collapsed (or not yet loaded) — children unrendered
+  // Local source: the server listing marks dirs/files present in the depot;
+  // anything on disk but absent is `untracked` (ignored / uncommitted).
+  let mark: { dirs: string[]; files: P4Record[] } | null = null;
   if (source === "local") {
-    const client = h.conn().client;
-    const local = parseFolder(storeGet(localScope(client), path));
-    const desired = local ? buildChildren(local) : [];
-    node.children = reconcileChildren(node.children, desired);
-    let mark: { dirs: string[]; files: P4Record[] } | null = null;
-    try {
-      const s = storeGet(markScope(client), path);
-      if (s) mark = JSON.parse(s) as { dirs: string[]; files: P4Record[] };
-    } catch {
-      /* corrupt */
+    mark = parseJson<{ dirs: string[]; files: P4Record[] }>(
+      storeGet(markScope(h!.conn().client), path),
+    );
+  }
+  const sDirs = mark ? new Set(mark.dirs.map((x) => x.toLowerCase())) : null;
+  const sFiles = mark ? new Map<string, P4Record>() : null;
+  if (mark && sFiles) {
+    for (const r of mark.files) if (r.depotFile) sFiles.set(base(r.depotFile).toLowerCase(), r);
+  }
+  const kids: TreeNode[] = [];
+  for (const d of c.dirs) {
+    if (!d.dir) continue;
+    const k = buildDirNode(d.dir, "");
+    if (sDirs) k.untracked = !sDirs.has(base(d.dir).toLowerCase());
+    kids.push(k);
+  }
+  for (const f of c.files) {
+    if (!f.depotFile) continue;
+    const k = makeNode(f.depotFile, false, f);
+    if (sFiles) {
+      const rec = sFiles.get(base(f.depotFile).toLowerCase());
+      k.untracked = !rec;
+      if (rec) k.rec = rec;
     }
-    // Apply markers to the reconciled children (in place, so reused nodes keep
-    // their expansion). Only reapplied when the server listing is present.
-    if (mark) applyLocalMarkers(node.children, mark.dirs, mark.files);
-    return;
+    // have/head changelists for the sync tooltip: head from fstat; have == head
+    // when synced, else from the async cache (computeFileHaveCl fills it).
+    const rec = k.rec;
+    if (rec) {
+      k.headCl = rec.headChange ?? "";
+      if (rec.haveRev) {
+        k.haveCl =
+          rec.haveRev === (rec.headRev ?? "") ? k.headCl : fileHaveClCache.get(f.depotFile.toLowerCase());
+      }
+    }
+    kids.push(k);
   }
-  const scope = source === "depot" ? depotScope(h.conn().port) : treeScope(h.conn().client);
-  const c = parseFolder(storeGet(scope, path));
-  const desired = c ? buildChildren(c) : [];
-  node.children = reconcileChildren(node.children, desired);
-  // Background: subfolder sync markers; file have/head changelists for tooltips.
-  for (const k of node.children) {
-    if (k.isDir) computeFolderSync(k);
-    else if (k.rec) applyFileCl(k, k.rec);
-  }
+  node.children = kids;
+  return node;
 }
 
-// Fetch a folder's contents from the server and WRITE them to the store — the
-// only place the tree data is populated. Re-projects the node after each write so
-// the view updates progressively (matches the old cached-then-fresh paint) while
-// still flowing exclusively through the store. Dispatches on source.
-async function ensureFolder(node: TreeNode): Promise<void> {
-  if (!h) return;
-  const path = node.path;
+// The whole visible tree, derived from view state + store + marker caches.
+// `void treeVer` is read FIRST so the derive always subscribes (never sticks on
+// an early null); the storeGet reads subscribe it to every visible folder's data.
+const tree: TreeNode | null = $derived.by(() => {
+  void treeVer;
+  if (!h) return null;
+  const rootP = rootPathForSource();
+  if (!rootP) return null;
+  const root = buildDirNode(rootP, source === "depot" ? "Depots" : "");
+  return root;
+});
 
-  if (source === "depot") {
+// --- commands: fetch p4/disk → write the store ---------------------------------
+
+/** Fetch a folder's contents from the server/disk and WRITE them to the store —
+ *  the only place tree data is populated. The store write re-runs the derived
+ *  tree; markers are kicked after each write. */
+async function ensureFolder(path: string): Promise<void> {
+  if (!h) return;
+  const src = source; // snapshot: ignore results if the source changed mid-fetch
+
+  if (src === "depot") {
     let c: FolderContents;
     if (path === "//") {
       const depots = await safe(() => p4.depots(h!.conn()));
@@ -344,18 +359,15 @@ async function ensureFolder(node: TreeNode): Promise<void> {
       c = { dirs: d, files: f };
     }
     storeSet(depotScope(h.conn().port), path, JSON.stringify(c));
-    projectChildren(node);
+    if (source === src) kickMarkers(path);
     return;
   }
 
-  if (source === "local") {
+  if (src === "local") {
     const client = h.conn().client;
     // Disk structure first → show the files fast; the sync dots follow.
     const local = await localChildren(clientRoot, rootPath, path);
-    if (local) {
-      storeSet(localScope(client), path, JSON.stringify(local));
-      projectChildren(node);
-    }
+    if (local) storeSet(localScope(client), path, JSON.stringify(local));
     // Server listing → sync/ignored markers.
     const q = browse.toQuery(path);
     const [d, f] = await Promise.all([
@@ -365,7 +377,7 @@ async function ensureFolder(node: TreeNode): Promise<void> {
     const dirs = d.map((r) => base(r.dir ?? "")).filter(Boolean);
     const files = f.filter((r) => r.depotFile);
     storeSet(markScope(client), path, JSON.stringify({ dirs, files }));
-    projectChildren(node);
+    if (source === src) kickMarkers(path);
     return;
   }
 
@@ -375,10 +387,7 @@ async function ensureFolder(node: TreeNode): Promise<void> {
   const client = h.conn().client;
   if (storeGet(treeScope(client), path) === undefined) {
     const local = await localChildren(clientRoot, rootPath, path);
-    if (local) {
-      storeSetMem(treeScope(client), path, JSON.stringify(local));
-      projectChildren(node);
-    }
+    if (local) storeSetMem(treeScope(client), path, JSON.stringify(local));
   }
   // Query via the client view, but rebuild each child's path from the display
   // parent + basename so the tree stays in stream-depot form (virtual streams too).
@@ -392,7 +401,45 @@ async function ensureFolder(node: TreeNode): Promise<void> {
     files: f.map((r) => (r.depotFile ? { ...r, depotFile: `${path}/${base(r.depotFile)}` } : r)),
   };
   storeSet(treeScope(client), path, JSON.stringify(c));
-  projectChildren(node);
+  if (source === src) kickMarkers(path);
+}
+
+/** Open a folder: hydrate the persisted layers (instant cached paint via the
+ *  derive), then refresh from the server — Local always (disk changes), the
+ *  server sources once per session. The spinner shows only while nothing is in
+ *  the store to render. */
+async function openFolder(path: string): Promise<void> {
+  if (!h) return;
+  const client = h.conn().client;
+  const key = `${source}:${path}`;
+
+  if (source === "local") {
+    hydrate(localScope(client), path);
+    hydrate(markScope(client), path);
+  } else if (source === "depot") {
+    hydrate(depotScope(h.conn().port), path);
+  } else {
+    hydrate(treeScope(client), path);
+  }
+  treeVer++; // re-derive with whatever hydration brought in
+  kickMarkers(path); // markers for the cached children (no-ops when unavailable)
+
+  if (source === "local") {
+    // Always re-read disk + markers, in the BACKGROUND — the store writes
+    // re-derive the tree; no spinner (its server listing is slow on the root).
+    void ensureFolder(path);
+    return;
+  }
+  if (sessionFetched.has(key)) return; // fresh this session — the store is current
+  sessionFetched.add(key); // claimed before the await so a re-expand can't double-fetch
+  loadingPaths.add(key);
+  treeVer++;
+  try {
+    await ensureFolder(path);
+  } finally {
+    loadingPaths.delete(key);
+    treeVer++;
+  }
 }
 
 export const browse = {
@@ -433,39 +480,36 @@ export const browse = {
   get source() {
     return source;
   },
-  /** Switch the Files pane between on-disk / workspace-server / whole-depot and
-   *  rebuild its tree. Depot needs no open workspace; the others need `rootPath`. */
+  /** Switch the Files pane between on-disk / workspace-server / whole-depot. The
+   *  tree re-derives for the new source; its expansion set (per source) is intact
+   *  from the last visit, so switching back restores the open folders. */
   async setSource(s: BrowseSource) {
     if (!h || s === source) return;
-    if (tree) treeBySource.set(source, tree); // remember the outgoing source's tree
     source = s;
     saveBrowseSource(s); // persist across workspace switch + restart
     selectedTreePath = "";
-    if (s !== "depot" && !rootPath) {
-      tree = null;
-      return;
-    }
-    // Restore the prior tree for this source (expansion intact; the children data
-    // is still in the store). Only build + load fresh on the first visit.
-    const prior = treeBySource.get(s);
-    if (prior) {
-      tree = prior;
-      return;
-    }
-    tree = rootForSource();
-    await browse.loadNode(tree);
+    const rootP = rootPathForSource();
+    if (!rootP) return; // no workspace open (derive renders nothing)
+    const exp = expandedSet();
+    if (exp.size === 0) exp.add(rootP); // first visit: expand the root
+    treeVer++;
+    // Load every expanded folder (instant from the store on a revisit; fetches on
+    // a cold first visit). Parents first so provisional listings nest correctly.
+    const open = [...exp].sort((a, b) => a.length - b.length);
+    for (const p of open) void openFolder(p);
   },
 
   /** Clear all browse state (on disconnect / workspace switch). */
   reset() {
     sessionFetched.clear();
-    treeBySource.clear();
+    expandedBySource.clear();
+    loadingPaths.clear();
     folderSyncCache.clear();
     fileHaveClCache.clear();
     rootPath = "";
     clientRoot = "";
-    tree = null;
     selectedTreePath = "";
+    treeVer++;
     history.reset();
     pending.clear();
     streamsVer++; // re-run the streams getters (clears them on disconnect)
@@ -480,7 +524,6 @@ export const browse = {
     clientRoot = root;
     rootPath = stream;
     queryRoot = "//" + h.conn().client; // browse through the client view
-    tree = rootForSource(); // honor the user's persisted source (Local by default)
 
     // Restore the saved selection only for the stream-rooted sources; the Depot
     // source has no per-workspace subject (it browses //).
@@ -506,55 +549,15 @@ export const browse = {
     if (tab === "streams") browse.loadStreams();
     browse.ensureIndex(); // background: build the fuzzy-search index if new
     h.setTab(tab);
-    await browse.loadNode(tree); // `tree` is the reactive proxy — mutate through it
+
+    // Open the root (expanded by default); the derive renders as data lands.
+    const rootP = rootPathForSource();
+    expandedSet().add(rootP);
+    treeVer++;
+    await openFolder(rootP);
   },
 
   // --- file tree -------------------------------------------------------------
-  // Populate a directory node's children. The children are DERIVED from the store
-  // (projectChildren); the server fetch only WRITES the store (ensureFolder) — so
-  // there is one data path, p4 → store → view, for both the instant (cached) paint
-  // and the refresh. Dispatches on the current source inside those two helpers.
-  async loadNode(node: TreeNode) {
-    if (!h || node.loading) return;
-    node.loading = true;
-    const path = node.path;
-    const client = h.conn().client;
-    const port = h.conn().port;
-    const key = `${source}:${path}`;
-
-    // 1) Instant paint: hydrate the persisted layers into the reactive map, then
-    //    project whatever the store already holds.
-    if (source === "local") {
-      hydrate(localScope(client), path);
-      hydrate(markScope(client), path);
-    } else if (source === "depot") {
-      hydrate(depotScope(port), path);
-    } else {
-      hydrate(treeScope(client), path);
-    }
-    projectChildren(node);
-    if (node.children.length > 0) node.loaded = true; // painted (stale-ok) content
-
-    // 2) Refresh the store from the server, re-projecting as fresh data lands
-    //    (ensureFolder does that). One path: p4 → store → view.
-    if (source === "local") {
-      // Local always re-reads disk + markers, but in the BACKGROUND — it re-projects
-      // itself, so don't hold the spinner (its server listing is slow on the root).
-      node.loaded = true;
-      node.loading = false;
-      void ensureFolder(node);
-      return;
-    }
-    // Stream/depot: one awaited fetch per session (nothing to show until it returns,
-    // so the spinner is warranted). Claimed before the await to avoid a double-fetch.
-    if (!sessionFetched.has(key)) {
-      sessionFetched.add(key);
-      await ensureFolder(node);
-    }
-    node.loaded = true;
-    node.loading = false;
-  },
-
   // Single click: select. File → its server history/details (works for tracked
   // files in every source). Folder → its history in workspace/local; in the
   // depot source (no folder-history subject) it just folds/unfolds.
@@ -569,24 +572,19 @@ export const browse = {
     else history.selectFile(node.path);
   },
 
-  // Triangle / double click: toggle fold state, loading children on first open.
+  // Triangle / double click: toggle fold state. Expanding loads the folder
+  // (instant from the store when cached; fetches otherwise).
   expandNode(node: TreeNode) {
-    node.expanded = !node.expanded;
-    if (node.expanded && !node.loaded) browse.loadNode(node);
-  },
-
-  // Re-fetch an expanded node's children, preserving which descendants were open.
-  async reloadNode(node: TreeNode) {
-    if (!node.isDir || !node.expanded) return;
-    const openPaths = new Set(node.children.filter((c) => c.isDir && c.expanded).map((c) => c.path));
-    node.loaded = false;
-    await browse.loadNode(node);
-    for (const child of node.children) {
-      if (openPaths.has(child.path)) {
-        child.expanded = true;
-        await browse.reloadNode(child);
-      }
+    if (!node.isDir) return;
+    const exp = expandedSet();
+    if (exp.has(node.path)) {
+      exp.delete(node.path);
+      treeVer++;
+      return;
     }
+    exp.add(node.path);
+    treeVer++;
+    void openFolder(node.path);
   },
 
   // --- fuzzy search index ----------------------------------------------------
@@ -670,25 +668,24 @@ export const browse = {
   },
 
   // --- refresh ---------------------------------------------------------------
+  /** Re-fetch everything visible. Stale-while-revalidate: the tree scopes are NOT
+   *  cleared (the current view stays up while fresh data replaces it store write
+   *  by store write); the sync-marker caches ARE cleared so they recompute. */
   async refresh() {
     if (!h || !h.connected() || refreshing) return;
     refreshing = true;
     sessionFetched.clear();
-    treeBySource.clear(); // drop other sources' cached trees (their data was just cleared)
     folderSyncCache.clear();
     fileHaveClCache.clear();
-    cacheClearScope(`p4foldersync:${h.conn().client}`); // persisted folder-sync markers
+    cacheClearScope(syncScope(h.conn().client)); // persisted folder-sync markers
     history.clearMemCache();
-    clearClientCache(h.conn().client);
-    // Re-fetch the tree + history in the BACKGROUND so a caller (e.g. a submit)
-    // isn't blocked on reloading every expanded folder — the panes update when
-    // their data arrives.
+    treeVer++; // drop the marker dots until they recompute
+    // Re-fetch the expanded folders + history in the BACKGROUND so a caller (e.g.
+    // a submit) isn't blocked — the derived tree updates as each write lands.
     void (async () => {
       try {
-        if (tree) {
-          tree.expanded = true;
-          await browse.reloadNode(tree);
-        }
+        const open = [...expandedSet()].sort((a, b) => a.length - b.length);
+        await Promise.all(open.map((p) => ensureFolder(p)));
         if (selectedTreePath && history.mode === "file") await history.selectFile(selectedTreePath);
         else if (selectedTreePath) await history.loadFolder(selectedTreePath);
         browse.buildIndex(); // rebuild the fuzzy-search index in the background
