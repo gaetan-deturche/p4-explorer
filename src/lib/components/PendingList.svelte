@@ -338,15 +338,19 @@
             <div class="finfo dim">Loading files…</div>
           {:else}
             {#if s.shelved.length}
-              <button class="subfolder" onclick={() => toggleShelved(r.change)}>
-                <span class="tw">{s.shelvedOpen ? "▾" : "▸"}</span>
-                <span class="ic">📁</span> Shelved <span class="dim">({s.shelved.length})</span>
-              </button>
-              {#if s.shelvedOpen}
-                {#each s.shelved as f (f.depotFile)}
-                  {@render fileRow(f, r.change, "shelved", 2)}
-                {/each}
-              {/if}
+              <!-- Same sticky treatment as the CL header: pinned just below it
+                   (top = CL header height), bounded by its own section. -->
+              <div class="shsec">
+                <button class="subfolder" onclick={() => toggleShelved(r.change)}>
+                  <span class="tw">{s.shelvedOpen ? "▾" : "▸"}</span>
+                  <span class="ic">📁</span> Shelved <span class="dim">({s.shelved.length})</span>
+                </button>
+                {#if s.shelvedOpen}
+                  {#each s.shelved as f (f.depotFile)}
+                    {@render fileRow(f, r.change, "shelved", 2)}
+                  {/each}
+                {/if}
+              </div>
             {/if}
             {#each s.local as f (f.depotFile)}
               {@render fileRow(f, r.change, "local", 1)}
@@ -592,7 +596,12 @@
     width: 100%;
     text-align: left;
     border: none;
-    background: none;
+    /* Sticky under the CL header (top = its 27px: 4+4 padding + 18 line + 1
+       border), bounded by .shsec; below the header's z-index so it slides under. */
+    position: sticky;
+    top: 27px;
+    z-index: 1;
+    background: var(--bg-panel);
     border-radius: 0;
     padding: 3px 10px 3px 20px;
     font-size: 12px;
