@@ -46,7 +46,10 @@ function currentPendingRows(): P4Record[] {
 // changelist). Scanned on its own low-rate timer — a workspace-wide p4 scan is
 // slow, so it's decoupled from the fast pending refresh and eased off further
 // when the app is in the background.
-let offline = $state<P4Record[]>([]);
+// Offline list is DERIVED from the store (scope `p4:offline`, key = client); the
+// scan only writes it. `offlineVer` bumps to re-run the getter (bootstrap + after
+// a scan). `offlineScanning` is transient status, not data — it stays $state.
+let offlineVer = $state(0);
 let offlineScanning = $state(false);
 let offlineTimer: number | null = null;
 let offlineStopped = true;
@@ -57,10 +60,15 @@ const OFFLINE_MS_BG = 1_800_000; // 30 min in the background
 // Persist the last offline result per workspace (store scope `p4:offline`) so
 // switching back shows it instantly; a fresh scan then refreshes it. Durable in
 // SQLite, mirrored in localStorage for the instant read.
-function loadOfflineCache(client: string): P4Record[] {
+function currentOffline(): P4Record[] {
+  void offlineVer;
+  if (!h || !h.connected()) return [];
+  const client = h.conn().client;
   if (!client) return [];
+  const json = storeGet("p4:offline", client);
+  if (json === undefined) return [];
   try {
-    return JSON.parse(cacheGetSync("p4:offline", client) ?? "[]") as P4Record[];
+    return JSON.parse(json) as P4Record[];
   } catch {
     return [];
   }
@@ -133,7 +141,7 @@ export const pending = {
     return reviews;
   },
   get offline() {
-    return offline;
+    return currentOffline();
   },
   get offlineScanning() {
     return offlineScanning;
@@ -143,7 +151,7 @@ export const pending = {
    *  derived from the store, so they follow the client automatically. */
   clear() {
     reviews = {};
-    offline = [];
+    offlineVer++; // re-run the offline getter (clears it on disconnect/switch)
     pending.stopOfflineScan();
   },
 
@@ -153,7 +161,7 @@ export const pending = {
    *  scan must never run more than once at a time. */
   async scanOffline(): Promise<boolean> {
     if (!h || !h.connected() || !h.conn().client) {
-      offline = [];
+      offlineVer++;
       return true;
     }
     const w = window as unknown as { __p4guiOfflineBusy?: boolean };
@@ -171,10 +179,11 @@ export const pending = {
       }
       // Keep only real change entries (an action + a file).
       const result = recs.filter((r) => (r.action ?? r.status) && (r.clientFile || r.depotFile));
-      saveOfflineCache(client, result); // cache under the scanned workspace (not the current one)
-      // Only show it if we're STILL on that workspace — a switch may have happened
-      // during the (~30s) scan, and a stale result must not overwrite the new view.
-      if (h && h.conn().client === client) offline = result;
+      saveOfflineCache(client, result); // store write, keyed by the scanned workspace
+      // No "still on that workspace?" guard needed: the getter reads the CURRENT
+      // client's store entry, so a stale scan writing another client's key can't
+      // leak into the view — it just populates that workspace's cache for later.
+      offlineVer++;
       return true;
     } finally {
       offlineScanning = false;
@@ -186,7 +195,8 @@ export const pending = {
    *  loop is already running, just refresh the cached display. */
   startOfflineScan() {
     if (!h) return;
-    offline = loadOfflineCache(h.conn().client); // instant: last known set for this workspace
+    hydrate("p4:offline", h.conn().client); // instant: last known set for this workspace
+    offlineVer++;
     if (!offlineStopped) return; // a loop is already active — don't spawn another
     offlineStopped = false;
     runOfflineLoop();
