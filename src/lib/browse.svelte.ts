@@ -16,7 +16,7 @@ import {
 } from "$lib/cache";
 import { history } from "$lib/history.svelte";
 import { pending } from "$lib/pending.svelte";
-import { cacheGetSync, cacheSet, cacheClearScope } from "$lib/store.svelte";
+import { cacheGetSync, cacheSet, cacheClearScope, storeGet, hydrate, storeSet } from "$lib/store.svelte";
 import { loadBrowseSource, saveBrowseSource, type ViewState } from "$lib/nav";
 
 type Tab = "history" | "pending" | "streams" | "log" | "notes";
@@ -41,8 +41,10 @@ let source = $state<BrowseSource>(loadBrowseSource()); // Files pane data source
 let refreshing = $state(false);
 let indexing = $state(false);
 let indexCount = $state(0);
-let streamRows = $state<P4Record[]>([]);
-let streamsLoading = $state(false);
+// Streams are DERIVED from the store (scope `p4:streams`, key = port) — the same
+// single-path rule as the pending list. `loadStreams()` only writes the store;
+// `streamsVer` bumps so the getters re-run even before the hooks were wired.
+let streamsVer = $state(0);
 
 async function safe<T>(fn: () => Promise<T[]>): Promise<T[]> {
   try {
@@ -61,17 +63,28 @@ function base(p: string): string {
   return p.slice(p.lastIndexOf("/") + 1);
 }
 
-// Cached stream list per server (store scope `p4:streams`, key = port).
-function loadStreamsCache(port: string): P4Record[] {
+// The stream list for the current server, read from the store (scope `p4:streams`,
+// key = port). `void streamsVer` subscribes to (re)loads so the getter re-runs
+// after loadStreams() even if the hooks weren't wired on the first evaluation.
+function currentStreamRows(): P4Record[] {
+  void streamsVer;
+  if (!h || !h.connected()) return [];
+  const port = h.conn().port;
   if (!port) return [];
+  const json = storeGet("p4:streams", port);
+  if (json === undefined) return [];
   try {
-    return JSON.parse(cacheGetSync("p4:streams", port) ?? "[]") as P4Record[];
+    return JSON.parse(json) as P4Record[];
   } catch {
     return [];
   }
 }
-function saveStreamsCache(port: string, rows: P4Record[]): void {
-  if (port) cacheSet("p4:streams", port, JSON.stringify(rows));
+// Loading = connected to a server whose stream list isn't in the store yet.
+function streamsAreLoading(): boolean {
+  void streamsVer;
+  if (!h || !h.connected()) return false;
+  const port = h.conn().port;
+  return !!port && storeGet("p4:streams", port) === undefined;
 }
 
 // Folder sync markers: have-change vs head-change under a folder (same signal
@@ -248,10 +261,10 @@ export const browse = {
     return indexing;
   },
   get streamRows() {
-    return streamRows;
+    return currentStreamRows();
   },
   get streamsLoading() {
-    return streamsLoading;
+    return streamsAreLoading();
   },
   get source() {
     return source;
@@ -281,7 +294,7 @@ export const browse = {
     selectedTreePath = "";
     history.reset();
     pending.clear();
-    streamRows = [];
+    streamsVer++; // re-run the streams getters (clears them on disconnect)
   },
 
   /** Point the browser at a workspace stream and load its data, restoring the
@@ -546,16 +559,12 @@ export const browse = {
     h.setTab("streams");
     if (!h.connected()) return;
     const port = h.conn().port;
-    if (streamRows.length === 0) {
-      const cached = loadStreamsCache(port); // instant from cache
-      if (cached.length) streamRows = cached;
-      else streamsLoading = true;
-    }
+    hydrate("p4:streams", port); // fill the store from localStorage/SQLite (instant paint)
+    streamsVer++;
     const rows = await safe(() => p4.streams(h!.conn()));
-    streamsLoading = false;
     if (h.conn().port !== port) return; // switched server during the fetch
-    streamRows = rows;
-    saveStreamsCache(port, rows);
+    storeSet("p4:streams", port, JSON.stringify(rows)); // ONE write → the getters re-derive
+    streamsVer++;
   },
 
   // --- refresh ---------------------------------------------------------------
