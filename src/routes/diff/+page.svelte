@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { diffLines, changeBlocks, type DiffRow } from "$lib/linediff";
+  import { langForFile, tokenizeLines, type TokenRun } from "$lib/syntax";
 
   // Opened by the Rust `open_diff_window` command with the two (already
   // materialized) sides as query params: left/right = file paths on disk,
@@ -18,6 +19,9 @@
   let loading = $state(true);
   let current = $state(-1); // index into blocks (prev/next navigation)
   let body = $state<HTMLDivElement>();
+  // Per-line syntax tokens for each side (Shiki), or null → plain text.
+  let ltoks = $state<TokenRun[][] | null>(null);
+  let rtoks = $state<TokenRun[][] | null>(null);
 
   onMount(async () => {
     try {
@@ -29,6 +33,20 @@
       blocks = changeBlocks(rows);
       loading = false;
       if (blocks.length) goTo(0); // land on the first change, like P4Merge
+      // Syntax coloration in the background — the diff is already readable, the
+      // colors land when Shiki finishes. Language from the file paths (the temp
+      // names keep the real extension last; labels carry #rev suffixes).
+      const base = (p: string) => p.split(/[\\/]/).pop() ?? "";
+      const lang = langForFile(base(rightPath)) ?? langForFile(base(leftPath));
+      if (lang) {
+        const dark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+        const [lt, rt] = await Promise.all([
+          tokenizeLines(l, lang, dark),
+          tokenizeLines(r, lang, dark),
+        ]);
+        ltoks = lt;
+        rtoks = rt;
+      }
     } catch (e) {
       error = String(e);
       loading = false;
@@ -53,12 +71,37 @@
     }
   }
 
-  const changed = $derived(rows.filter((r) => r.type !== "same").length);
+  // A renderable run of a cell: text + syntax color + changed-range membership.
+  type Piece = { t: string; c?: string; m: boolean };
 
-  // Render a mod row's text as [same][changed][same] using the intra-line range.
-  function seg(text: string, h?: [number, number]): { pre: string; mid: string; post: string } {
-    if (!h) return { pre: text, mid: "", post: "" };
-    return { pre: text.slice(0, h[0]), mid: text.slice(h[0], h[1]), post: text.slice(h[1]) };
+  // Combine a line's syntax tokens with the intra-line changed range: split the
+  // colored runs at the range boundaries so the change marker overlays cleanly.
+  // Falls back to one plain run without tokens (or if they don't cover the text).
+  function pieces(text: string, toks: TokenRun[] | undefined, range?: [number, number]): Piece[] {
+    let base: Piece[];
+    if (toks && toks.reduce((n, t) => n + t.content.length, 0) === text.length) {
+      base = toks.map((t) => ({ t: t.content, c: t.color, m: false }));
+    } else {
+      base = text ? [{ t: text, m: false }] : [];
+    }
+    if (!range || range[0] === range[1]) return base;
+    const out: Piece[] = [];
+    let pos = 0;
+    for (const p of base) {
+      let s = 0;
+      while (s < p.t.length) {
+        let end = p.t.length;
+        for (const b of range) {
+          const rel = b - pos;
+          if (rel > s && rel < end) end = rel;
+        }
+        const abs = pos + s;
+        out.push({ t: p.t.slice(s, end), c: p.c, m: abs >= range[0] && abs < range[1] });
+        s = end;
+      }
+      pos += p.t.length;
+    }
+    return out;
   }
 </script>
 
@@ -95,8 +138,8 @@
     {:else}
       <div class="grid mono">
         {#each rows as row, i (i)}
-          {@const l = seg(row.l?.text ?? "", row.lh)}
-          {@const r = seg(row.r?.text ?? "", row.rh)}
+          {@const lp = row.l ? pieces(row.l.text, ltoks?.[row.l.no - 1], row.lh) : []}
+          {@const rp = row.r ? pieces(row.r.text, rtoks?.[row.r.no - 1], row.rh) : []}
           <span class="num" class:hl={row.type === "del" || row.type === "mod"} data-row={i}>
             {row.l?.no ?? ""}
           </span>
@@ -104,10 +147,7 @@
             class="code left"
             class:del={row.type === "del" || row.type === "mod"}
             class:void={!row.l}
-          >
-            {#if row.type === "mod"}{l.pre}<span class="chg chg-del">{l.mid}</span>{l.post}
-            {:else}{row.l?.text ?? ""}{/if}
-          </span>
+          >{#each lp as p, j (j)}<span class="run" class:chg-del={p.m} style:color={p.c}>{p.t}</span>{/each}</span>
           <span class="num sep" class:hl={row.type === "add" || row.type === "mod"}>
             {row.r?.no ?? ""}
           </span>
@@ -115,10 +155,7 @@
             class="code"
             class:add={row.type === "add" || row.type === "mod"}
             class:void={!row.r}
-          >
-            {#if row.type === "mod"}{r.pre}<span class="chg chg-add">{r.mid}</span>{r.post}
-            {:else}{row.r?.text ?? ""}{/if}
-          </span>
+          >{#each rp as p, j (j)}<span class="run" class:chg-add={p.m} style:color={p.c}>{p.t}</span>{/each}</span>
         {/each}
       </div>
     {/if}
@@ -227,8 +264,9 @@
         transparent 8px
       );
   }
-  /* Intra-line changed range (mod rows) — stronger than the line tint. */
-  .chg {
+  /* Intra-line changed range (mod rows) — stronger than the line tint; sits
+     under the syntax color (background only, text color comes from the token). */
+  .run {
     border-radius: 2px;
   }
   .chg-del {
