@@ -23,6 +23,8 @@
     contextChange,
     onContext,
     onFileContext,
+    onShelvedContext,
+    onOfflineContext,
     onMoveFile,
   }: {
     rows: P4Record[];
@@ -47,6 +49,8 @@
     onContext: (cl: P4Record, e: MouseEvent) => void; // right-click a changelist
     // right-click a file → (file, change, event, selected depot files)
     onFileContext: (file: P4Record, change: string, e: MouseEvent, files: string[]) => void;
+    onShelvedContext?: (file: P4Record, change: string, e: MouseEvent) => void; // right-click a shelved file
+    onOfflineContext?: (file: P4Record, e: MouseEvent) => void; // right-click an offline file
     onMoveFile: (file: string, toChange: string) => void; // drag a file onto another CL
   } = $props();
 
@@ -382,6 +386,12 @@
                 style="padding-left:20px"
                 title={"Double-click to open in external diff\n" + (f.clientFile ?? f.depotFile ?? "")}
                 ondblclick={() => onOpenOfflineDiff(f.depotFile ?? "")}
+                oncontextmenu={(e) => {
+                  if (onOfflineContext) {
+                    e.preventDefault();
+                    onOfflineContext(f, e);
+                  }
+                }}
               >
                 <button class="fchev" title="Show diff" onclick={() => toggleOfflineDiff(f)}>
                   {od?.open ? "▾" : "▸"}
@@ -443,6 +453,9 @@
           anchor = f.depotFile;
         }
         onFileContext(f, change, e, [...selected]);
+      } else if (onShelvedContext) {
+        e.preventDefault();
+        onShelvedContext(f, change, e);
       }
     }}
     ondragstart={(e) => {

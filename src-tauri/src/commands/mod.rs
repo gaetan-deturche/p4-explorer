@@ -11,6 +11,7 @@ use crate::p4::{self, P4Conn, Record};
 
 mod browse;
 mod diff;
+mod editor;
 mod pending;
 mod server;
 mod sync;
@@ -19,6 +20,7 @@ mod sync;
 // them as `commands::<name>` regardless of which submodule they live in.
 pub use browse::*;
 pub use diff::*;
+pub use editor::*;
 pub use pending::*;
 pub use server::*;
 pub use sync::*;

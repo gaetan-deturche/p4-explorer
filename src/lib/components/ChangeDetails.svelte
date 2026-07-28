@@ -8,12 +8,14 @@
     loading,
     onDiff,
     onOpenDiff,
+    onFileContext,
   }: {
     change: string;
     rows: P4Record[];
     loading: boolean;
     onDiff: (depotFile: string, rev: number) => Promise<string>;
     onOpenDiff: (depotFile: string, rev: number) => void;
+    onFileContext?: (file: P4Record, e: MouseEvent) => void; // right-click a file row
   } = $props();
 
   // Inline diff state per file. Reset whenever the changelist changes.
@@ -131,6 +133,12 @@
                 class="filecell mono"
                 title="Double-click to open in external diff"
                 ondblclick={() => onOpenDiff(f.depotFile, Number(f.rev))}
+                oncontextmenu={(e) => {
+                  if (onFileContext) {
+                    e.preventDefault();
+                    onFileContext(f, e);
+                  }
+                }}
                 onpointerenter={(e) => showTip(e, f.depotFile)}
                 onpointermove={moveTip}
                 onpointerleave={hideTip}

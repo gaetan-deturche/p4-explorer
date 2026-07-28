@@ -43,6 +43,7 @@ export const P4_COMMANDS: P4Cmd[] = [
   { key: "swarm_review", label: "swarm review", read: true },
   { key: "sync_cancel", label: "cancel sync", read: true },
   { key: "export_patch", label: "diff (export patch)", read: true },
+  { key: "print_to_temp", label: "print (open in editor)", read: true },
   // non-reads (need approval by default)
   { key: "p4_sync", label: "sync", read: false },
   { key: "p4_sync_stream", label: "sync", read: false },

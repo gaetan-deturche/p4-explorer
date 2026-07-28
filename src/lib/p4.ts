@@ -61,6 +61,25 @@ export function pickFolder(start = ""): Promise<string | null> {
   return invoke<string | null>("pick_folder", { start });
 }
 
+/** An installed text editor the app can open files with. */
+export interface EditorInfo {
+  id: string;
+  name: string;
+  path: string;
+}
+/** Editors detected on this machine (Notepad always; Notepad++/VS Code/…). */
+export function detectEditors(): Promise<EditorInfo[]> {
+  return invoke<EditorInfo[]>("detect_editors");
+}
+/** The detected-editor id Windows opens .txt with, or "" if unrecognized. */
+export function defaultEditorId(): Promise<string> {
+  return invoke<string>("default_editor_id");
+}
+/** Launch `exe file` detached (app-local — no p4, no safe-mode gate). */
+export function openInEditor(exe: string, file: string): Promise<void> {
+  return invoke<void>("open_in_editor", { exe, file });
+}
+
 // Gate every backend call through safe mode (the allow decision + labels live in
 // $lib/safe + $lib/p4cmds; reads and app-local calls pass straight through).
 function g<T>(cmd: string, args: Record<string, unknown> = {}): Promise<T> {
@@ -127,6 +146,8 @@ export const p4 = {
   exportPatch: (conn: P4Conn, change: string, files: string[], defaultName: string) =>
     g<string | null>("export_patch", { conn, change, files, defaultName }),
   openDiffLocal: (conn: P4Conn, depotFile: string) => g<void>("open_diff_local", { conn, depotFile }),
+  /** p4 print a revision spec to a temp file; returns the temp path. */
+  printToTemp: (conn: P4Conn, spec: string) => g<string>("print_to_temp", { conn, spec }),
   revert: (conn: P4Conn, depotFile: string) => call("p4_revert", { conn, depotFile }),
   revertKeep: (conn: P4Conn, depotFile: string) => call("p4_revert_keep", { conn, depotFile }),
   reopen: (conn: P4Conn, depotFile: string, change: string) =>

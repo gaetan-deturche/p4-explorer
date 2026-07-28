@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { P4Conn } from "$lib/p4";
   import { safe } from "$lib/safe.svelte";
+  import { editor } from "$lib/editor.svelte";
   import { P4_COMMAND_LIST } from "$lib/p4cmds";
 
   let {
@@ -25,7 +26,7 @@
     onClose: () => void;
   } = $props();
 
-  let tab = $state<"servers" | "connection" | "safe">("servers");
+  let tab = $state<"servers" | "connection" | "editor" | "safe">("servers");
   let newServer = $state("");
   function add() {
     const v = newServer.trim();
@@ -46,6 +47,7 @@
       <button class:active={tab === "connection"} onclick={() => (tab = "connection")}>
         Connection
       </button>
+      <button class:active={tab === "editor"} onclick={() => (tab = "editor")}>Editor</button>
       <button class:active={tab === "safe"} onclick={() => (tab = "safe")}>Safe</button>
     </div>
 
@@ -96,6 +98,29 @@
           {busy ? "Connecting…" : "Connect"}
         </button>
       </div>
+    {:else if tab === "editor"}
+      <p class="hint dim">
+        The editor used by the "Open in …" file actions. Defaults to the one Windows opens text
+        files with.
+      </p>
+      {#if editor.list.length}
+        <div class="edlist">
+          {#each editor.list as e (e.id)}
+            <label class="erow" title={e.path}>
+              <input
+                type="radio"
+                name="editor"
+                checked={editor.current?.id === e.id}
+                onchange={() => editor.setChosen(e.id)}
+              />
+              <span class="ename">{e.name}</span>
+              <span class="epath mono dim">{e.path}</span>
+            </label>
+          {/each}
+        </div>
+      {:else}
+        <p class="hint dim">No editors detected.</p>
+      {/if}
     {:else}
       <label class="toggle">
         <input
@@ -196,6 +221,35 @@
     display: flex;
     flex-direction: column;
     gap: 4px;
+  }
+  .edlist {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  label.erow {
+    flex-direction: row;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 6px;
+    border-radius: 5px;
+    color: var(--text);
+  }
+  label.erow input {
+    width: auto;
+  }
+  .ename {
+    flex: none;
+    font-size: 12px;
+  }
+  .epath {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 11px;
+    text-align: right;
   }
   .allowlist {
     display: grid;

@@ -10,6 +10,7 @@
   import { connection } from "$lib/connection.svelte";
   import { cmdlog } from "$lib/cmdlog.svelte";
   import { notifications } from "$lib/notifications.svelte";
+  import { editor } from "$lib/editor.svelte";
   import {
     loadLastServer,
     loadUserFor,
@@ -277,6 +278,7 @@
     const patchLabel = files.length > 1 ? `Generate patch (${files.length} files)…` : "Generate patch…";
     return [
       { label: "View diff", action: () => pending.openLocalDiff(file.depotFile) },
+      { label: openInLabel, action: () => openLocalInEditor(file.depotFile) },
       { label: patchLabel, action: () => generatePatch("", files.length ? files : [file.depotFile]) },
       { label: "Revert file…", action: () => pending.revert(file.depotFile) },
       {
@@ -292,6 +294,28 @@
     centerTab = "pending";
     pending.load();
   }
+
+  // --- "Open in <editor>" ------------------------------------------------------
+  // The menu label for the preferred editor ("Open in Notepad++"). Editors are
+  // detected in the background; Notepad always exists, so this is never empty
+  // once init resolves.
+  const openInLabel = $derived(`Open in ${editor.current?.name ?? "editor"}`);
+  function editorOpen(fn: () => Promise<void>) {
+    fn().catch((e) => setError(String(e)));
+  }
+  /** A workspace-local file by depot path (opened/pending/tree-Local files). */
+  function openLocalInEditor(depotFile: string) {
+    editorOpen(() => editor.openDepotLocal(conn, browse.clientRoot, browse.rootPath, depotFile));
+  }
+  /** A server revision (depot/workspace head, history #rev, shelved @=change). */
+  function openSpecInEditor(spec: string) {
+    editorOpen(() => editor.openSpec(conn, spec));
+  }
+
+  // Context state for the two file lists that had no menu before.
+  let shelvedCtx = $state<{ x: number; y: number; file: P4Record; change: string } | null>(null);
+  let offlineCtx = $state<{ x: number; y: number; file: P4Record } | null>(null);
+  let detailsCtx = $state<{ x: number; y: number; file: P4Record } | null>(null);
 
   // --- history row context menu: "update to this changelist" ----------------
   function openHistContext(change: string, e: MouseEvent) {
@@ -326,6 +350,7 @@
 
   onMount(() => {
     cmdlog.start(); // record p4 commands for the Commands view
+    editor.init(); // detect editors + resolve the preferred one (background)
     history.init({
       conn: () => conn,
       setNotice,
@@ -546,6 +571,9 @@
           onOpenShelvedDiff={pending.openShelvedDiff}
           onContext={onPendingContext}
           onFileContext={onPendingFileContext}
+          onShelvedContext={(f, change, e) =>
+            (shelvedCtx = { x: e.clientX, y: e.clientY, file: f, change })}
+          onOfflineContext={(f, e) => (offlineCtx = { x: e.clientX, y: e.clientY, file: f })}
           onMoveFile={pending.reopen}
         />
       {:else}
@@ -577,6 +605,7 @@
               loading={history.descLoading}
               onDiff={(f, r) => history.fileDiff(f, r)}
               onOpenDiff={(f, r) => history.openFileDiff(f, r)}
+              onFileContext={(f, e) => (detailsCtx = { x: e.clientX, y: e.clientY, file: f })}
             />
           </div>
         </div>
@@ -685,6 +714,19 @@
     x={treeCtx.x}
     y={treeCtx.y}
     items={[
+      // Files: Local source opens the on-disk file; Workspace/Depot download the
+      // head revision from the server (p4 print to temp) and open that.
+      ...(dir
+        ? []
+        : [
+            {
+              label: browse.source === "local" ? openInLabel : `${openInLabel} (from server)`,
+              action: () =>
+                browse.source === "local"
+                  ? openLocalInEditor(p)
+                  : openSpecInEditor(browse.source === "depot" ? p : browse.toQuery(p)),
+            },
+          ]),
       { label: `Sync ${kind} “${name}”`, action: () => sync.syncPath(p, dir) },
       { label: `Reconcile ${kind} “${name}”`, action: () => sync.reconcilePath(p, dir) },
     ]}
@@ -705,6 +747,55 @@
     y={fileCtx.y}
     items={fileMenuItems(fileCtx.file, fileCtx.change, fileCtx.files)}
     onClose={() => (fileCtx = null)}
+  />
+{/if}
+
+{#if shelvedCtx}
+  {@const f = shelvedCtx.file}
+  {@const ch = shelvedCtx.change}
+  <ContextMenu
+    x={shelvedCtx.x}
+    y={shelvedCtx.y}
+    items={[
+      // The shelved content lives on the server — download @=change and open.
+      { label: `${openInLabel} (shelved)`, action: () => openSpecInEditor(`${f.depotFile}@=${ch}`) },
+    ]}
+    onClose={() => (shelvedCtx = null)}
+  />
+{/if}
+
+{#if offlineCtx}
+  {@const f = offlineCtx.file}
+  <ContextMenu
+    x={offlineCtx.x}
+    y={offlineCtx.y}
+    items={[
+      {
+        label: openInLabel,
+        action: () => {
+          const local = f.clientFile;
+          if (local) editorOpen(() => editor.openLocal(local));
+          else if (f.depotFile) openLocalInEditor(f.depotFile);
+        },
+      },
+    ]}
+    onClose={() => (offlineCtx = null)}
+  />
+{/if}
+
+{#if detailsCtx}
+  {@const f = detailsCtx.file}
+  <ContextMenu
+    x={detailsCtx.x}
+    y={detailsCtx.y}
+    items={[
+      // The submitted revision from the server (not the local file, which may differ).
+      {
+        label: `${openInLabel} (revision #${f.rev})`,
+        action: () => openSpecInEditor(`${f.depotFile}#${f.rev}`),
+      },
+    ]}
+    onClose={() => (detailsCtx = null)}
   />
 {/if}
 
