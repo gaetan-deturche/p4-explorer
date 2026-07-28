@@ -782,7 +782,11 @@
   .app {
     display: flex;
     flex-direction: column;
-    height: 100vh;
+    /* 100% (of html/body, which fill the webview) not 100vh: in the Tauri WebView2
+       the viewport unit overshoots the real client area, pushing the status bar
+       partly off-screen. overflow:hidden guards any residual sub-pixel overflow. */
+    height: 100%;
+    overflow: hidden;
   }
   .error {
     background: var(--warn);
