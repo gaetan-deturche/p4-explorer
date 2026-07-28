@@ -52,6 +52,7 @@ export const P4_COMMANDS: P4Cmd[] = [
   { key: "p4_sync", label: "sync", read: false },
   { key: "p4_sync_stream", label: "sync", read: false },
   { key: "p4_resync", label: "sync (re-sync)", read: false },
+  { key: "p4_flush", label: "flush (repair sync record)", read: false },
   { key: "p4_reconcile", label: "reconcile", read: false },
   { key: "p4_switch", label: "switch", read: false },
   { key: "p4_submit", label: "submit", read: false },

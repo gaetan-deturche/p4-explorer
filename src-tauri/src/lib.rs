@@ -40,6 +40,7 @@ pub fn run() {
             commands::p4_resync,
             commands::p4_reconcile,
             commands::p4_status,
+            commands::p4_flush,
             commands::cancel_offline_scan,
             commands::p4_sync_stream,
             commands::sync_cancel,

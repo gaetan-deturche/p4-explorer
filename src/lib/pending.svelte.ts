@@ -52,6 +52,7 @@ function currentPendingRows(): P4Record[] {
 // a scan). `offlineScanning` is transient status, not data — it stays $state.
 let offlineVer = $state(0);
 let offlineScanning = $state(false);
+let offlineScannedAt = $state<number | null>(null); // last completed scan (freshness stamp)
 let offlineTimer: number | null = null;
 let offlineStopped = true;
 let offlineFocused = true;
@@ -147,12 +148,16 @@ export const pending = {
   get offlineScanning() {
     return offlineScanning;
   },
+  get offlineScannedAt() {
+    return offlineScannedAt;
+  },
 
   /** Drop transient state (on disconnect / workspace switch). rows/loading are
    *  derived from the store, so they follow the client automatically. */
   clear() {
     reviews = {};
     offlineVer++; // re-run the offline getter (clears it on disconnect/switch)
+    offlineScannedAt = null; // the stamp belongs to the previous workspace
     pending.stopOfflineScan();
   },
 
@@ -185,6 +190,7 @@ export const pending = {
       // client's store entry, so a stale scan writing another client's key can't
       // leak into the view — it just populates that workspace's cache for later.
       offlineVer++;
+      if (h && h.conn().client === client) offlineScannedAt = Date.now(); // freshness stamp
       return true;
     } finally {
       offlineScanning = false;
@@ -479,6 +485,16 @@ export const pending = {
   },
   offlineDiff(file: string): Promise<string> {
     return p4.diffOffline(h!.conn(), file); // -f: diff an unopened (offline) file
+  },
+  /** Repair a have/disk desync (`p4 flush #head` — record only, disk untouched),
+   *  then rescan so the ghost offline entry clears promptly. */
+  async repairDesync(file: string) {
+    await pending.mutate(
+      () => p4.flush(h!.conn(), [file]),
+      "Sync record repaired (have = head, file untouched).",
+      { refresh: false },
+    );
+    void pending.scanOffline();
   },
   shelvedDiff(file: string, rev: number, change: string): Promise<string> {
     return p4.diffShelved(h!.conn(), file, rev, change);

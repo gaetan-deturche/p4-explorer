@@ -119,6 +119,8 @@ export const p4 = {
   fstat: (conn: P4Conn, file: string) => call("p4_fstat", { conn, file }),
   sync: (conn: P4Conn, path?: string) => call("p4_sync", { conn, path: path ?? null }),
   reconcile: (conn: P4Conn, path: string) => call("p4_reconcile", { conn, path }),
+  /** Repair have/disk desyncs: update the have record to #head, disk untouched. */
+  flush: (conn: P4Conn, files: string[]) => call("p4_flush", { conn, files }),
   status: (conn: P4Conn) => call("p4_status", { conn }),
   cancelOfflineScan: () => g<void>("cancel_offline_scan"),
   resync: (conn: P4Conn, files: string[], force: boolean) =>

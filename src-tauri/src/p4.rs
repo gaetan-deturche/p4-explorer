@@ -203,6 +203,18 @@ pub fn run_raw_stdout_diff(conn: &P4Conn, args: &[&str]) -> Result<String, Strin
 /// `Err` only when there are no data records (data masks errors — fine for
 /// reads; `run_strict` is the strict variant for mutations).
 fn parse_records(stdout: &[u8], success: bool, stderr: &[u8]) -> Result<Vec<Record>, String> {
+    let (records, _errors) = parse_records_full(stdout, success, stderr)?;
+    Ok(records)
+}
+
+/// As `parse_records`, but ALSO returns the error strings that data records
+/// would otherwise mask — for batch mutations (e.g. a multi-file sync) where a
+/// partial failure must not disappear behind the successes.
+fn parse_records_full(
+    stdout: &[u8],
+    success: bool,
+    stderr: &[u8],
+) -> Result<(Vec<Record>, Vec<String>), String> {
     let stdout = String::from_utf8_lossy(stdout);
     let mut records: Vec<Record> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
@@ -244,10 +256,16 @@ fn parse_records(stdout: &[u8], success: bool, stderr: &[u8]) -> Result<Vec<Reco
             }
         }
     }
-    Ok(records)
+    Ok((records, errors))
 }
 
 pub fn run(conn: &P4Conn, args: &[&str]) -> Result<Vec<Record>, String> {
+    run_full(conn, args).map(|(records, _errors)| records)
+}
+
+/// As `run`, but also surfaces the per-record errors a batch's data records
+/// would mask (for multi-file mutations — partial failures must be reported).
+pub fn run_full(conn: &P4Conn, args: &[&str]) -> Result<(Vec<Record>, Vec<String>), String> {
     let mut cmd = Command::new("p4");
     cmd.arg("-ztag").arg("-Mj");
     for g in conn.global_args() {
@@ -271,7 +289,7 @@ pub fn run(conn: &P4Conn, args: &[&str]) -> Result<Vec<Record>, String> {
         .output()
         .map_err(|e| format!("failed to launch p4: {e} (is p4 on PATH?)"))?;
     log_command(args, start.elapsed().as_millis(), out.status.success());
-    parse_records(&out.stdout, out.status.success(), &out.stderr)
+    parse_records_full(&out.stdout, out.status.success(), &out.stderr)
 }
 
 /// Like `run`, but spawns the child and records its PID in `pid_slot` so a long

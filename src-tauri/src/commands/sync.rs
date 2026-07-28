@@ -219,10 +219,33 @@ pub async fn p4_resync(conn: P4Conn, files: Vec<String>, force: bool) -> Res {
             let refs: Vec<&str> = args.iter().map(String::as_str).collect();
             p4::run(&conn, &refs)
         };
+        // Sync the batch surfacing PARTIAL failures: successes' data records
+        // would otherwise mask error records (lenient parse), silently clearing
+        // a still-broken file from the error dialog. Each error is paired back
+        // to its file (the message text carries the path) and returned as an
+        // {action:"failed"} record so the caller keeps it listed.
+        let sync_batch = |targets: Vec<String>, force: bool| -> Res {
+            let mut args = vec!["sync".to_string()];
+            if force {
+                args.push("-f".to_string());
+            }
+            args.extend(targets.iter().cloned());
+            let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+            let (mut out, errs) = p4::run_full(&conn, &refs)?;
+            let norm = |s: &str| s.replace('\\', "/").to_lowercase();
+            for e in errs {
+                let en = norm(&e);
+                let file = targets.iter().find(|f| en.contains(&norm(f))).cloned();
+                let mut r = crate::p4::Record::new();
+                r.insert("action".into(), "failed".into());
+                r.insert("depotFile".into(), file.unwrap_or_default().into());
+                r.insert("message".into(), e.into());
+                out.push(r);
+            }
+            Ok(out)
+        };
         if force {
-            let mut args = vec!["sync".to_string(), "-f".to_string()];
-            args.extend(files);
-            return run_ref(&args);
+            return sync_batch(files, true);
         }
         // Which of the targets have offline edits? Fail CLOSED — if the check
         // itself fails, sync nothing rather than risk overwriting local work.
@@ -243,9 +266,7 @@ pub async fn p4_resync(conn: P4Conn, files: Vec<String>, force: bool) -> Res {
             files.into_iter().partition(|f| protected.contains(&norm(f)));
         let mut out = Vec::new();
         if !to_sync.is_empty() {
-            let mut args = vec!["sync".to_string()];
-            args.extend(to_sync);
-            out.extend(run_ref(&args)?);
+            out.extend(sync_batch(to_sync, false)?);
         }
         for f in kept {
             let mut r = crate::p4::Record::new();
@@ -257,6 +278,19 @@ pub async fn p4_resync(conn: P4Conn, files: Vec<String>, force: bool) -> Res {
     })
     .await
     .map_err(|e| format!("resync task failed: {e}"))?
+}
+
+/// Repair a have/disk desync: `p4 flush file#head` updates the have record to
+/// head WITHOUT touching the file on disk — the right fix when the disk content
+/// already matches head but the record lags (see `mark_desyncs`).
+#[tauri::command]
+pub async fn p4_flush(conn: P4Conn, files: Vec<String>) -> Res {
+    if files.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut args = vec!["flush".to_string()];
+    args.extend(files.into_iter().map(|f| format!("{f}#head")));
+    run(conn, args).await
 }
 
 /// Reconcile offline work under `path` (`p4 reconcile <path>/...`): open files
@@ -301,10 +335,65 @@ pub async fn p4_status(
         if abort.swap(false, Ordering::SeqCst) {
             return Err("offline scan cancelled".to_string());
         }
-        res
+        let mut recs = res?;
+        mark_desyncs(&conn, &mut recs);
+        Ok(recs)
     })
     .await
     .map_err(|e| format!("status task failed: {e}"))?
+}
+
+/// Distinguish REAL offline edits from have/disk desyncs: a file whose disk
+/// content matches HEAD while the have record lags behind (e.g. an interrupted
+/// sync that wrote the file but never recorded it) diffs against have exactly
+/// like an offline edit. For edit-flagged files with have != head, diff the
+/// client file against #head (`p4 diff -f -sa file#head` lists only files that
+/// DIFFER); the ones that don't differ are marked `desync: true` so the UI can
+/// present them as a repairable record problem, not local work. Best effort —
+/// on any failure the records stay as plain edits.
+fn mark_desyncs(conn: &P4Conn, recs: &mut [p4::Record]) {
+    let edits: Vec<String> = recs
+        .iter()
+        .filter(|r| r.get("action").and_then(|v| v.as_str()) == Some("edit"))
+        .filter_map(|r| r.get("depotFile").and_then(|v| v.as_str()).map(String::from))
+        .collect();
+    if edits.is_empty() {
+        return;
+    }
+    // have vs head for the flagged files (one fstat).
+    let mut args: Vec<String> = vec!["fstat".into(), "-T".into(), "depotFile,haveRev,headRev".into()];
+    args.extend(edits.iter().cloned());
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let Ok(stats) = p4::run(conn, &refs) else { return };
+    let behind: Vec<String> = stats
+        .iter()
+        .filter(|r| {
+            let have = r.get("haveRev").and_then(|v| v.as_str()).unwrap_or("");
+            let head = r.get("headRev").and_then(|v| v.as_str()).unwrap_or("");
+            !have.is_empty() && !head.is_empty() && have != head
+        })
+        .filter_map(|r| r.get("depotFile").and_then(|v| v.as_str()).map(String::from))
+        .collect();
+    if behind.is_empty() {
+        return;
+    }
+    // Which of those actually differ from head on disk? (-sa lists differing.)
+    let mut args: Vec<String> = vec!["diff".into(), "-f".into(), "-sa".into()];
+    args.extend(behind.iter().map(|f| format!("{f}#head")));
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let Ok(differing) = p4::run(conn, &refs) else { return };
+    let differs: Vec<String> = differing
+        .iter()
+        .filter_map(|r| r.get("depotFile").and_then(|v| v.as_str()))
+        .map(|s| s.to_lowercase())
+        .collect();
+    for r in recs.iter_mut() {
+        let Some(df) = r.get("depotFile").and_then(|v| v.as_str()) else { continue };
+        let dfl = df.to_lowercase();
+        if behind.iter().any(|b| b.to_lowercase() == dfl) && !differs.contains(&dfl) {
+            r.insert("desync".into(), true.into());
+        }
+    }
 }
 
 /// Kill the in-flight offline-changes scan (called before an interactive write

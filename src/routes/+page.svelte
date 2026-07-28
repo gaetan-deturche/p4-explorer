@@ -402,7 +402,10 @@
       setError,
       askConfirm,
       refresh: () => browse.refresh(),
-      loadPending: () => pending.load(),
+      loadPending: () => {
+        pending.load();
+        void pending.scanOffline(); // a sync/retry changes offline state — refresh the list
+      },
       rootPath: () => browse.rootPath,
       histSubject: () => history.subject,
       histMode: () => history.mode,
@@ -558,6 +561,7 @@
           reviews={pending.reviews}
           offline={pending.offline}
           offlineScanning={pending.offlineScanning}
+          offlineScannedAt={pending.offlineScannedAt}
           onOfflineDiff={pending.offlineDiff}
           onOpenOfflineDiff={pending.openLocalDiff}
           contextChange={pendingCtx?.cl.change ?? ""}
@@ -770,6 +774,15 @@
     x={offlineCtx.x}
     y={offlineCtx.y}
     items={[
+      // Desync entries aren't local edits — offer the record repair (p4 flush).
+      ...(f.desync
+        ? [
+            {
+              label: "Repair sync record (file untouched)",
+              action: () => pending.repairDesync(f.depotFile),
+            },
+          ]
+        : []),
       {
         label: openInLabel,
         action: () => {

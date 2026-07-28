@@ -10,6 +10,7 @@
     reviews,
     offline,
     offlineScanning,
+    offlineScannedAt,
     onOfflineDiff,
     onOpenOfflineDiff,
     onLocalFiles,
@@ -34,6 +35,7 @@
     reviews: Record<string, ReviewInfo | null>; // change → Swarm review status
     offline: P4Record[]; // files changed on disk but not open in any changelist
     offlineScanning: boolean; // an offline-change scan is in progress
+    offlineScannedAt: number | null; // when the last scan completed (freshness)
     onOfflineDiff: (depotFile: string) => Promise<string>; // forced local-vs-server diff
     onOpenOfflineDiff: (depotFile: string) => void; // open the offline diff externally
     contextChange: string; // the changelist whose context menu is open (highlight it)
@@ -370,7 +372,16 @@
           <span class="tw">{offlineOpen ? "▾" : "▸"}</span>
           <span class="cnum mono">Offline</span>
           <span class="desc">modified on disk, not checked out</span>
-          <span class="user dim">{offlineScanning ? "scanning…" : offline.length}</span>
+          <!-- Freshness: this list is a cached scan result — make its age visible. -->
+          <span class="date dim">
+            {offlineScanning
+              ? "scanning…"
+              : offlineScannedAt
+                ? "scanned " +
+                  new Date(offlineScannedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+                : "cached"}
+          </span>
+          <span class="user dim">{offlineScanning ? "" : offline.length}</span>
         </button>
         {#if offlineOpen}
           {#if offline.length === 0}
@@ -384,7 +395,10 @@
               <div
                 class="frow mono"
                 style="padding-left:20px"
-                title={"Double-click to open in external diff\n" + (f.clientFile ?? f.depotFile ?? "")}
+                title={f.desync
+                  ? "Not a local edit: the file matches the latest revision but the sync record is behind (interrupted sync). Right-click → Repair sync record.\n" +
+                    (f.clientFile ?? f.depotFile ?? "")
+                  : "Double-click to open in external diff\n" + (f.clientFile ?? f.depotFile ?? "")}
                 ondblclick={() => onOpenOfflineDiff(f.depotFile ?? "")}
                 oncontextmenu={(e) => {
                   if (onOfflineContext) {
@@ -396,7 +410,11 @@
                 <button class="fchev" title="Show diff" onclick={() => toggleOfflineDiff(f)}>
                   {od?.open ? "▾" : "▸"}
                 </button>
-                <span class="act act-{f.action}">{f.action ?? ""}</span>
+                {#if f.desync}
+                  <span class="act act-desync">desync</span>
+                {:else}
+                  <span class="act act-{f.action}">{f.action ?? ""}</span>
+                {/if}
                 <span class="fpath"><span class="pfile">{sp.name}</span><span class="pdir dim">{sp.dir}</span></span>
               </div>
               {#if od?.open}
@@ -685,6 +703,10 @@
   }
   .act-edit {
     color: var(--accent);
+  }
+  .act-desync {
+    color: var(--text-dim);
+    font-style: italic;
   }
   .fpath {
     display: flex;

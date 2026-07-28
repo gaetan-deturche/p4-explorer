@@ -122,7 +122,10 @@ export const sync = {
     h.setSyncing(true);
     try {
       const n = await this.run("Sync workspace", undefined);
-      if (n !== null) await h.refresh();
+      if (n !== null) {
+        await h.refresh();
+        h.loadPending(); // offline state changed — refresh list + rescan
+      }
     } finally {
       h.setSyncing(false);
     }
@@ -147,7 +150,10 @@ export const sync = {
     h.setSyncing(true);
     try {
       const n = await this.run(`Update to @${change}`, spec);
-      if (n !== null) await h.refresh();
+      if (n !== null) {
+        await h.refresh();
+        h.loadPending();
+      }
     } finally {
       h.setSyncing(false);
     }
@@ -161,7 +167,10 @@ export const sync = {
     h.setSyncing(true);
     try {
       const n = await this.run(`Sync ${name}`, spec);
-      if (n !== null) await h.refresh();
+      if (n !== null) {
+        await h.refresh();
+        h.loadPending();
+      }
     } finally {
       h.setSyncing(false);
     }
@@ -248,8 +257,10 @@ export const sync = {
     busyFile = file;
     try {
       const rows = await p4.resync(h.conn(), [file], force);
-      // A non-force retry refuses files with offline modifications (see
-      // p4_resync) — keep the item listed and say why, instead of removing it.
+      // A non-force retry refuses files with offline modifications, and a sync
+      // that still fails comes back as a "failed" record (see p4_resync) — in
+      // both cases keep the item listed with the fresh reason.
+      const failed = rows.find((r) => r.action === "failed");
       if (rows.some((r) => r.action === "protected")) {
         errors = {
           ...errors,
@@ -260,6 +271,14 @@ export const sync = {
           ),
         };
         h.setNotice("File kept — it has offline changes. Use Force to overwrite.", 6000);
+      } else if (failed) {
+        errors = {
+          ...errors,
+          items: errors.items.map((i) =>
+            i.file === file ? { ...i, line: failed.message || `${file} — still failing` } : i,
+          ),
+        };
+        h.setNotice("File still failing — see the updated error.", 6000);
       } else {
         const rest = errors.items.filter((i) => i.file !== file);
         errors = rest.length ? { ...errors, items: rest } : null;
@@ -288,29 +307,27 @@ export const sync = {
     busyFile = "*";
     try {
       const rows = await p4.resync(h.conn(), targets, force);
-      // Non-force: files with offline modifications were excluded (see
-      // p4_resync) — keep them listed with the reason; the rest were synced.
-      const kept = new Set(
-        rows.filter((r) => r.action === "protected").map((r) => r.depotFile),
-      );
-      if (kept.size) {
-        const items = errors.items
-          .filter((i) => i.file && kept.has(i.file))
-          .map((i) => ({
-            ...i,
-            line: `${i.file} — kept: it has offline changes (use Force to overwrite)`,
-          }));
-        errors = {
-          ...errors,
-          items: items.length
-            ? items
-            : [...kept].map((f) => ({
-                file: f,
-                line: `${f} — kept: it has offline changes (use Force to overwrite)`,
-              })),
-        };
+      // Keep listing what is STILL broken: files excluded for offline changes
+      // ("protected", non-force only) and files whose sync failed again
+      // ("failed") — only genuinely synced files leave the dialog.
+      const still: ErrItem[] = [];
+      for (const r of rows) {
+        if (r.action === "protected") {
+          still.push({
+            file: r.depotFile,
+            line: `${r.depotFile} — kept: it has offline changes (use Force to overwrite)`,
+          });
+        } else if (r.action === "failed") {
+          still.push({ file: r.depotFile || null, line: r.message || "sync failed" });
+        }
+      }
+      if (still.length) {
+        errors = { ...errors, items: still };
+        const nKept = still.filter((i) => i.line.includes("offline changes")).length;
         h.setNotice(
-          `Re-synced; ${kept.size} file${kept.size === 1 ? "" : "s"} with offline changes kept.`,
+          nKept === still.length
+            ? `Re-synced; ${nKept} file${nKept === 1 ? "" : "s"} with offline changes kept.`
+            : `Re-synced; ${still.length} file${still.length === 1 ? "" : "s"} still need attention.`,
         );
       } else {
         errors = null;
