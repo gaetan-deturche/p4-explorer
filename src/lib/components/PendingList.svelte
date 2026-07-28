@@ -291,6 +291,10 @@
         {@const s = cls[r.change]}
         {@const rv = reviews[r.change]}
         {@const empty = !!s && !s.loading && s.local.length === 0 && s.shelved.length === 0}
+        <!-- Section wrapper = the sticky header's containing block, so the pinned
+             CL row is pushed out by its own section's end (clean hand-off to the
+             next CL) instead of being painted over mid-overlap. -->
+        <div class="clsec">
         <button
           class="cl"
           class:dropinto={dragOver === r.change}
@@ -349,9 +353,11 @@
             {/each}
           {/if}
         {/if}
+        </div>
       {/each}
 
       {#if offline.length > 0 || offlineScanning}
+        <div class="clsec">
         <button class="cl offlinehdr" onclick={() => (offlineOpen = !offlineOpen)}>
           <span class="tw">{offlineOpen ? "▾" : "▸"}</span>
           <span class="cnum mono">Offline</span>
@@ -391,6 +397,7 @@
             {/each}
           {/if}
         {/if}
+        </div>
       {/if}
     {/if}
   </div>
