@@ -504,7 +504,13 @@
     width: 100%;
     text-align: left;
     border: none;
-    background: none;
+    /* Sticky: the owning changelist stays pinned at the top while its (long) file
+       list scrolls, so files are always attributable; the next CL row slides in
+       over it. Needs the opaque background (was none). */
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    background: var(--bg-panel);
     border-radius: 0;
     padding: 4px 10px;
     font-size: 12px;
