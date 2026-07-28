@@ -263,18 +263,39 @@ function rootForSource(): TreeNode {
   return n;
 }
 
-// Build node.children from the store ONLY (the single source). For Local, the
-// disk structure and the server-listing markers each come from their store scope;
-// for workspace/depot, the folder contents come from the store and the sync
-// markers are filled in the background (themselves store-backed via p4foldersync).
-// Called for the instant paint and again after ensureFolder writes fresh data.
+// Reconcile a node's children against a freshly-built desired list: reuse the
+// existing node for a matching path so its VIEW state (expanded / loaded / its own
+// children / already-computed markers) survives a re-projection; only the data
+// (name, fstat rec) is refreshed. New paths are added, gone paths dropped, order
+// follows `desired`. Without this, re-projecting would collapse expanded subtrees.
+function reconcileChildren(existing: TreeNode[], desired: TreeNode[]): TreeNode[] {
+  if (existing.length === 0) return desired;
+  const byPath = new Map(existing.map((n) => [n.path, n]));
+  return desired.map((d) => {
+    const cur = byPath.get(d.path);
+    if (cur && cur.isDir === d.isDir) {
+      cur.name = d.name;
+      if (d.rec) cur.rec = d.rec; // fresh fstat when the source carries one
+      return cur;
+    }
+    return d;
+  });
+}
+
+// Build node.children from the store ONLY (the single source), reconciled against
+// the current children so expansion is preserved. For Local, the disk structure
+// and the server-listing markers each come from their store scope; for
+// workspace/depot, the folder contents come from the store and the sync markers
+// are filled in the background (themselves store-backed via p4foldersync). Called
+// for the instant paint and again after ensureFolder writes fresh data.
 function projectChildren(node: TreeNode): void {
   if (!h) return;
   const path = node.path;
   if (source === "local") {
     const client = h.conn().client;
     const local = parseFolder(storeGet(localScope(client), path));
-    const kids = local ? buildChildren(local) : [];
+    const desired = local ? buildChildren(local) : [];
+    node.children = reconcileChildren(node.children, desired);
     let mark: { dirs: string[]; files: P4Record[] } | null = null;
     try {
       const s = storeGet(markScope(client), path);
@@ -282,15 +303,15 @@ function projectChildren(node: TreeNode): void {
     } catch {
       /* corrupt */
     }
-    // Apply markers BEFORE assigning children, so the sync dots paint in the same
-    // render as the files (not a tick later).
-    if (mark) applyLocalMarkers(kids, mark.dirs, mark.files);
-    node.children = kids;
+    // Apply markers to the reconciled children (in place, so reused nodes keep
+    // their expansion). Only reapplied when the server listing is present.
+    if (mark) applyLocalMarkers(node.children, mark.dirs, mark.files);
     return;
   }
   const scope = source === "depot" ? depotScope(h.conn().port) : treeScope(h.conn().client);
   const c = parseFolder(storeGet(scope, path));
-  node.children = c ? buildChildren(c) : [];
+  const desired = c ? buildChildren(c) : [];
+  node.children = reconcileChildren(node.children, desired);
   // Background: subfolder sync markers; file have/head changelists for tooltips.
   for (const k of node.children) {
     if (k.isDir) computeFolderSync(k);
@@ -501,11 +522,19 @@ export const browse = {
     projectChildren(node);
     if (node.children.length > 0) node.loaded = true; // painted (stale-ok) content
 
-    // 2) Refresh the store from the server (Local always re-reads disk; stream/depot
-    //    once per session), re-projecting as fresh data lands. One path: p4 → store
-    //    → view. `sessionFetched` is claimed before the await so a re-entrant expand
-    //    can't double-fetch.
-    if (source === "local" || !sessionFetched.has(key)) {
+    // 2) Refresh the store from the server, re-projecting as fresh data lands
+    //    (ensureFolder does that). One path: p4 → store → view.
+    if (source === "local") {
+      // Local always re-reads disk + markers, but in the BACKGROUND — it re-projects
+      // itself, so don't hold the spinner (its server listing is slow on the root).
+      node.loaded = true;
+      node.loading = false;
+      void ensureFolder(node);
+      return;
+    }
+    // Stream/depot: one awaited fetch per session (nothing to show until it returns,
+    // so the spinner is warranted). Claimed before the await to avoid a double-fetch.
+    if (!sessionFetched.has(key)) {
       sessionFetched.add(key);
       await ensureFolder(node);
     }
