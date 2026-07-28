@@ -244,7 +244,12 @@
   .panel {
     display: flex;
     flex-direction: column;
-    height: 100%;
+    /* flex:1 (take the space left by the Files header + source buttons above),
+       NOT height:100% — that ignored those siblings and overflowed the column,
+       pushing the scroll body's bottom under the status bar. min-height:0 lets the
+       .scroll body actually scroll instead of growing to its content. */
+    flex: 1;
+    min-height: 0;
     background: var(--bg-panel);
   }
   .search {
