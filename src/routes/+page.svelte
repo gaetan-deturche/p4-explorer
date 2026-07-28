@@ -906,7 +906,9 @@
      the app layout. */
   .toasts {
     position: fixed;
-    top: 110px;
+    /* At the Refresh/Sync button-row level: that band is mostly empty, so the
+       toast masks chrome rather than content below. */
+    top: 64px;
     left: 50%;
     transform: translateX(-50%);
     z-index: 45;
