@@ -4,6 +4,7 @@
     items,
     busyFile,
     onFixFile,
+    onIgnoreFile,
     onRetryAll,
     onForceAll,
     onClose,
@@ -12,14 +13,16 @@
     items: { line: string; file: string | null }[];
     busyFile: string | null;
     onFixFile: (file: string, force: boolean) => void;
+    onIgnoreFile: (file: string) => void; // drop the line, leave the file alone
     onRetryAll: () => void;
     onForceAll: () => void;
     onClose: () => void;
   } = $props();
 
-  type Cat = "locked" | "clobber" | "resolve" | "other";
+  type Cat = "locked" | "clobber" | "resolve" | "protected" | "other";
   function categorize(line: string): Cat {
     const l = line.toLowerCase();
+    if (l.includes("offline changes")) return "protected"; // kept by the retry guard
     if (
       l.includes("another process") ||
       l.includes("autre processus") ||
@@ -71,6 +74,22 @@
                 <span class="dim">—</span>
               {:else if cat === "resolve"}
                 <button disabled title="Resolve in P4V / p4 resolve">Resolve</button>
+              {:else if cat === "protected"}
+                <button
+                  class="danger-btn"
+                  disabled={busy}
+                  title="Overwrite with the depot version — the offline changes are DISCARDED"
+                  onclick={() => onFixFile(it.file!, true)}
+                >
+                  {busyFile === it.file ? "…" : "Overwrite"}
+                </button>
+                <button
+                  disabled={busy}
+                  title="Keep the file as it is and dismiss this entry (the file stays un-synced)"
+                  onclick={() => onIgnoreFile(it.file!)}
+                >
+                  Ignore
+                </button>
               {:else if cat === "clobber"}
                 <button class="danger-btn" disabled={busy} onclick={() => onFixFile(it.file!, true)}>
                   {busyFile === it.file ? "…" : "Force"}
@@ -179,6 +198,8 @@
   }
   .act {
     flex: none;
+    display: flex;
+    gap: 4px;
   }
   .act button {
     font-size: 11px;

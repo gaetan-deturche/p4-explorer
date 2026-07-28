@@ -242,6 +242,13 @@ export const sync = {
     const files = Array.from(new Set(errors.items.map((i) => i.file).filter((f): f is string => !!f)));
     return files.length ? files : [errors.path ?? (h && h.rootPath() ? `${h!.rootPath()}/...` : "...")];
   },
+  /** Dismiss one entry without touching the file (e.g. keep offline changes and
+   *  skip this update). Closes the dialog when it was the last entry. */
+  ignoreFile(file: string) {
+    if (!errors) return;
+    const rest = errors.items.filter((i) => i.file !== file);
+    errors = rest.length ? { ...errors, items: rest } : null;
+  },
   async fixFile(file: string, force: boolean) {
     if (!h || !errors || busyFile) return;
     if (

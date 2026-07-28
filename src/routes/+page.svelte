@@ -719,6 +719,7 @@
     items={sync.errors.items}
     busyFile={sync.busyFile}
     onFixFile={(f, force) => sync.fixFile(f, force)}
+    onIgnoreFile={(f) => sync.ignoreFile(f)}
     onRetryAll={() => sync.fixAll(false)}
     onForceAll={() => sync.fixAll(true)}
     onClose={() => sync.dismissErrors()}
