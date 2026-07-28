@@ -468,11 +468,16 @@
     onReconcile={() => sync.reconcile()}
   />
 
-  {#if error}
-    <div class="error mono">{error}</div>
-  {/if}
-  {#if notice}
-    <div class="notice">{notice}</div>
+  <!-- Floating toasts: overlaid, so appearing/disappearing never reflows the app. -->
+  {#if error || notice}
+    <div class="toasts">
+      {#if error}
+        <div class="error mono">{error}</div>
+      {/if}
+      {#if notice}
+        <div class="notice">{notice}</div>
+      {/if}
+    </div>
   {/if}
 
   <div class="cols">
@@ -897,19 +902,37 @@
     height: 100%;
     overflow: hidden;
   }
+  /* Overlay container just below the toolbar; the toasts inside never affect
+     the app layout. */
+  .toasts {
+    position: fixed;
+    top: 110px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 45;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    max-width: min(720px, 90vw);
+    pointer-events: none; /* don't block clicks on the UI beneath */
+  }
+  .error,
+  .notice {
+    pointer-events: auto; /* but allow selecting/copying the message text */
+    border-radius: 6px;
+    box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35);
+    padding: 6px 14px;
+    font-size: 12px;
+  }
   .error {
     background: var(--warn);
     color: white;
-    padding: 6px 12px;
-    font-size: 12px;
     white-space: pre-wrap;
   }
   .notice {
     background: var(--have-bg);
     color: var(--have);
-    border-bottom: 1px solid var(--have);
-    padding: 5px 12px;
-    font-size: 12px;
+    border: 1px solid var(--have);
   }
   .cols {
     flex: 1;
