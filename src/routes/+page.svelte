@@ -1,7 +1,8 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import { getVersion } from "@tauri-apps/api/app";
-  import { isReleaseBuild, emptyConn, firstLine, type P4Conn, type P4Record } from "$lib/p4";
+  import { isReleaseBuild, emptyConn, firstLine, setClipboard, p4, type P4Conn, type P4Record } from "$lib/p4";
+  import { localPathFor } from "$lib/cache";
   import { updates } from "$lib/updates.svelte";
   import { sync } from "$lib/sync.svelte";
   import { pending } from "$lib/pending.svelte";
@@ -279,6 +280,7 @@
     return [
       { label: "View diff", action: () => pending.openLocalDiff(file.depotFile) },
       { label: openInLabel, action: () => openLocalInEditor(file.depotFile) },
+      copyMenu(file.depotFile, file.clientFile),
       { label: patchLabel, action: () => generatePatch("", files.length ? files : [file.depotFile]) },
       { label: "Revert file…", action: () => pending.revert(file.depotFile) },
       {
@@ -316,6 +318,37 @@
   let shelvedCtx = $state<{ x: number; y: number; file: P4Record; change: string } | null>(null);
   let offlineCtx = $state<{ x: number; y: number; file: P4Record } | null>(null);
   let detailsCtx = $state<{ x: number; y: number; file: P4Record } | null>(null);
+
+  // --- Copy name / depot path / workspace path -------------------------------
+  function copied(text: string, label: string) {
+    setClipboard(text)
+      .then(() => setNotice(`Copied ${label}.`, 2500))
+      .catch((e) => setError(String(e)));
+  }
+  /** The local (workspace) path of a depot path: stream mapping first, `p4 fstat`
+   *  for files outside it. */
+  async function copyWorkspacePath(depotFile: string, known?: string) {
+    if (known) return copied(known, "workspace path");
+    const mapped = localPathFor(browse.clientRoot, browse.rootPath, depotFile);
+    if (mapped) return copied(mapped, "workspace path");
+    const recs = await p4.fstat(conn, depotFile).catch(() => [] as P4Record[]);
+    const local = recs[0]?.clientFile;
+    if (local) copied(local, "workspace path");
+    else setError("This file has no workspace path here.");
+  }
+  /** The shared "Copy" submenu for any file/folder path shown in the app.
+   *  `clientFile` short-circuits the workspace-path lookup when already known. */
+  function copyMenu(depotPath: string, clientFile?: string) {
+    const name = depotPath.replace(/\/+$/, "").split("/").pop() || depotPath;
+    return {
+      label: "Copy",
+      submenu: [
+        { label: "File name", action: () => copied(name, "file name") },
+        { label: "Depot path", action: () => copied(depotPath, "depot path") },
+        { label: "Workspace path", action: () => void copyWorkspacePath(depotPath, clientFile) },
+      ],
+    };
+  }
 
   // --- history row context menu: "update to this changelist" ----------------
   function openHistContext(change: string, e: MouseEvent) {
@@ -736,6 +769,7 @@
                   : openSpecInEditor(browse.source === "depot" ? p : browse.toQuery(p)),
             },
           ]),
+      copyMenu(p),
       { label: `Sync ${kind} “${name}”`, action: () => sync.syncPath(p, dir) },
       { label: `Reconcile ${kind} “${name}”`, action: () => sync.reconcilePath(p, dir) },
     ]}
@@ -768,6 +802,7 @@
     items={[
       // The shelved content lives on the server — download @=change and open.
       { label: `${openInLabel} (shelved)`, action: () => openSpecInEditor(`${f.depotFile}@=${ch}`) },
+      copyMenu(f.depotFile),
     ]}
     onClose={() => (shelvedCtx = null)}
   />
@@ -796,6 +831,7 @@
           else if (f.depotFile) openLocalInEditor(f.depotFile);
         },
       },
+      copyMenu(f.depotFile ?? f.clientFile ?? "", f.clientFile),
     ]}
     onClose={() => (offlineCtx = null)}
   />
@@ -812,6 +848,7 @@
         label: `${openInLabel} (revision #${f.rev})`,
         action: () => openSpecInEditor(`${f.depotFile}#${f.rev}`),
       },
+      copyMenu(f.depotFile),
     ]}
     onClose={() => (detailsCtx = null)}
   />

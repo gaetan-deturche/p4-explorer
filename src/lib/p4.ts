@@ -61,6 +61,11 @@ export function pickFolder(start = ""): Promise<string | null> {
   return invoke<string | null>("pick_folder", { start });
 }
 
+/** Put text on the system clipboard (app-local — no p4, no safe-mode gate). */
+export function setClipboard(text: string): Promise<void> {
+  return invoke<void>("set_clipboard", { text });
+}
+
 /** An installed text editor the app can open files with. */
 export interface EditorInfo {
   id: string;

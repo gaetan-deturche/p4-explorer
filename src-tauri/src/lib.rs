@@ -54,6 +54,7 @@ pub fn run() {
             commands::p4_diff_local,
             commands::p4_diff_local_forced,
             commands::open_diff_local,
+            commands::set_clipboard,
             commands::detect_editors,
             commands::default_editor_id,
             commands::open_in_editor,
