@@ -7,7 +7,7 @@
 //! path translation, notices) come via init().
 
 import { p4, openDiffWindow, type P4Conn, type P4Record } from "$lib/p4";
-import { editor } from "$lib/editor.svelte";
+import { editor, isUnrealAsset } from "$lib/editor.svelte";
 import type { HistEntry } from "$lib/cache";
 import { storeGet, storeSet, storeSetMem, hydrate, storeClearScope } from "$lib/store.svelte";
 
@@ -242,8 +242,12 @@ export const history = {
   },
   async openFileDiff(depotFile: string, rev: number) {
     try {
-      // In-app diff window or the external P4DIFF tool, per Options → Editor.
-      if (editor.diffTool === "inapp") {
+      // UE assets → Unreal's asset-diff tool; text → the in-app diff window or
+      // the external P4DIFF tool, per Options → Editor.
+      if (isUnrealAsset(depotFile)) {
+        const pair = await p4.diffPairRev(h!.conn(), depotFile, rev);
+        await p4.openUnrealDiff(h!.conn(), pair.left, pair.right);
+      } else if (editor.diffTool === "inapp") {
         await openDiffWindow(await p4.diffPairRev(h!.conn(), depotFile, rev));
       } else {
         await p4.openDiff(h!.conn(), depotFile, rev);

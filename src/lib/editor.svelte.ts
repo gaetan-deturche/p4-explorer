@@ -22,6 +22,12 @@ let chosenId = $state<string>("");
 export type DiffTool = "inapp" | "external";
 let diffTool = $state<DiffTool>("inapp");
 
+/** Binary UE assets — text diffs are useless; diff them in Unreal's asset-diff
+ *  tool (`UnrealEditor -diff`) instead. */
+export function isUnrealAsset(path: string): boolean {
+  return /\.(uasset|umap)$/i.test(path);
+}
+
 function resolve(): EditorInfo | null {
   return editors.find((e) => e.id === chosenId) ?? editors[0] ?? null;
 }

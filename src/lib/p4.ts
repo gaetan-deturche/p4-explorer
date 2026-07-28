@@ -167,6 +167,9 @@ export const p4 = {
   diffPairShelved: (conn: P4Conn, depotFile: string, rev: number, change: string) =>
     g<DiffPair>("diff_pair_shelved", { conn, depotFile, rev, change }),
   diffPairLocal: (conn: P4Conn, depotFile: string) => g<DiffPair>("diff_pair_local", { conn, depotFile }),
+  /** Diff two UE asset files in Unreal's asset-diff tool (UnrealEditor -diff). */
+  openUnrealDiff: (conn: P4Conn, left: string, right: string) =>
+    g<void>("open_unreal_diff", { conn, left, right }),
   revert: (conn: P4Conn, depotFile: string) => call("p4_revert", { conn, depotFile }),
   revertKeep: (conn: P4Conn, depotFile: string) => call("p4_revert_keep", { conn, depotFile }),
   reopen: (conn: P4Conn, depotFile: string, change: string) =>

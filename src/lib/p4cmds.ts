@@ -47,6 +47,7 @@ export const P4_COMMANDS: P4Cmd[] = [
   { key: "diff_pair_rev", label: "diff", read: true },
   { key: "diff_pair_shelved", label: "diff (shelved)", read: true },
   { key: "diff_pair_local", label: "diff", read: true },
+  { key: "open_unreal_diff", label: "diff (unreal)", read: true },
   // non-reads (need approval by default)
   { key: "p4_sync", label: "sync", read: false },
   { key: "p4_sync_stream", label: "sync", read: false },

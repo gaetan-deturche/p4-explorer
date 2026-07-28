@@ -4,7 +4,7 @@
 
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { p4, openDiffWindow, type P4Conn, type P4Record, type ReviewInfo } from "$lib/p4";
-import { editor } from "$lib/editor.svelte";
+import { editor, isUnrealAsset } from "$lib/editor.svelte";
 import { cacheGetSync, cacheSet, storeGet, hydrate, storeSet } from "$lib/store.svelte";
 
 type Hooks = {
@@ -483,11 +483,14 @@ export const pending = {
   shelvedDiff(file: string, rev: number, change: string): Promise<string> {
     return p4.diffShelved(h!.conn(), file, rev, change);
   },
-  // Double-click diff: the in-app diff window, or the external P4DIFF tool,
-  // per the Options → Editor preference.
+  // Double-click diff: UE assets go to Unreal's asset-diff tool; text goes to
+  // the in-app diff window or the external P4DIFF tool, per Options → Editor.
   async openLocalDiff(file: string) {
     try {
-      if (editor.diffTool === "inapp") {
+      if (isUnrealAsset(file)) {
+        const pair = await p4.diffPairLocal(h!.conn(), file);
+        await p4.openUnrealDiff(h!.conn(), pair.left, pair.right);
+      } else if (editor.diffTool === "inapp") {
         await openDiffWindow(await p4.diffPairLocal(h!.conn(), file));
       } else {
         await p4.openDiffLocal(h!.conn(), file);
@@ -498,7 +501,10 @@ export const pending = {
   },
   async openShelvedDiff(file: string, rev: number, change: string) {
     try {
-      if (editor.diffTool === "inapp") {
+      if (isUnrealAsset(file)) {
+        const pair = await p4.diffPairShelved(h!.conn(), file, rev, change);
+        await p4.openUnrealDiff(h!.conn(), pair.left, pair.right);
+      } else if (editor.diffTool === "inapp") {
         await openDiffWindow(await p4.diffPairShelved(h!.conn(), file, rev, change));
       } else {
         await p4.openDiffShelved(h!.conn(), file, rev, change);

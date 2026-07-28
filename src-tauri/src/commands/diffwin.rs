@@ -134,6 +134,73 @@ pub async fn read_text_file(path: String) -> Result<String, String> {
     .map_err(|e| format!("read task failed: {e}"))?
 }
 
+/// `UnrealEditor.exe` above `root` (the engine sits at or above the workspace —
+/// e.g. a Games/<Project> client under the repo root).
+fn find_unreal_editor(root: &std::path::Path) -> Option<std::path::PathBuf> {
+    let mut dir = Some(root);
+    for _ in 0..5 {
+        let d = dir?;
+        let exe = d.join("Engine").join("Binaries").join("Win64").join("UnrealEditor.exe");
+        if exe.is_file() {
+            return Some(exe);
+        }
+        dir = d.parent();
+    }
+    None
+}
+
+/// The first `.uproject` in `root`, its direct children, or `root\Games\*`.
+fn find_uproject(root: &std::path::Path) -> Option<std::path::PathBuf> {
+    let has_uproject = |d: &std::path::Path| -> Option<std::path::PathBuf> {
+        std::fs::read_dir(d).ok()?.flatten().map(|e| e.path()).find(|p| {
+            p.extension().is_some_and(|x| x.eq_ignore_ascii_case("uproject"))
+        })
+    };
+    if let Some(p) = has_uproject(root) {
+        return Some(p);
+    }
+    for base in [root.to_path_buf(), root.join("Games")] {
+        if let Ok(rd) = std::fs::read_dir(&base) {
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    if let Some(u) = has_uproject(&p) {
+                        return Some(u);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Diff two UE asset files in Unreal's asset-diff tool:
+/// `UnrealEditor.exe <project> -diff <left> <right>`. The editor + .uproject are
+/// located from the workspace root (`p4 info` clientRoot).
+#[tauri::command]
+pub async fn open_unreal_diff(conn: P4Conn, left: String, right: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let recs = p4::run(&conn, &["info"])?;
+        let root = recs
+            .first()
+            .and_then(|r| r.get("clientRoot"))
+            .and_then(|v| v.as_str())
+            .ok_or("no workspace root (p4 info clientRoot)")?
+            .to_string();
+        let root = std::path::PathBuf::from(root);
+        let editor = find_unreal_editor(&root)
+            .ok_or("UnrealEditor.exe not found at or above the workspace root")?;
+        let project = find_uproject(&root)
+            .ok_or("No .uproject found under the workspace root")?;
+        let mut c = std::process::Command::new(editor);
+        c.arg(project).arg("-diff").arg(&left).arg(&right);
+        c.spawn().map_err(|e| format!("failed to launch Unreal diff: {e}"))?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("unreal diff task failed: {e}"))?
+}
+
 /// Minimal percent-encoding for query-string values (RFC 3986 unreserved kept).
 fn enc(s: &str) -> String {
     let mut out = String::with_capacity(s.len());

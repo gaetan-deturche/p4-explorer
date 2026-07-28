@@ -62,6 +62,7 @@ pub fn run() {
             commands::diff_pair_local,
             commands::read_text_file,
             commands::open_diff_window,
+            commands::open_unreal_diff,
             commands::p4_submit,
             commands::p4_shelve,
             commands::p4_shelve_delete,
