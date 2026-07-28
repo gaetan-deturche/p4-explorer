@@ -506,6 +506,10 @@
           </div>
         {/each}
       </div>
+      <!-- Flex wrapper so every tab panel fills the space left by .tabs; without it
+           a panel's own height:100% ignores the tab bar and overflows under the
+           status bar (as the tree did). -->
+      <div class="tabbody">
       {#if !TABS.some((t) => views[t.key])}
         <div class="msg dim">All views are closed — reopen one from the View menu.</div>
       {:else if centerTab === "streams"}
@@ -577,6 +581,7 @@
           </div>
         </div>
       {/if}
+      </div>
     </section>
   </div>
 
@@ -848,6 +853,14 @@
   }
   .center {
     background: var(--bg-panel);
+  }
+  /* Holds the active tab's panel; fills the space under .tabs so a panel's own
+     height:100% resolves against this (not the whole column). */
+  .tabbody {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
   }
   .tabs {
     display: flex;
