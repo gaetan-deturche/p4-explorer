@@ -12,6 +12,8 @@
     selectedChange,
     onSelectChange,
     onContextMenu,
+    onDeepen,
+    deepening = false,
   }: {
     mode: "folder" | "file";
     subject: string;
@@ -23,6 +25,8 @@
     selectedChange: string;
     onSelectChange: (change: string) => void;
     onContextMenu?: (change: string, e: MouseEvent) => void;
+    onDeepen?: () => void; // fetch older history (search covers loaded rows only)
+    deepening?: boolean;
   } = $props();
 
   // Changelist number the workspace is synced to (the "you are here" anchor).
@@ -38,16 +42,28 @@
     return Number.isFinite(anchorNum) && Number(r.change) > anchorNum;
   }
 
-  // Fuzzy search over changelist id, user, and description. Every whitespace-
-  // separated term must subsequence-match at least one field (order preserved —
-  // history stays chronological, rows just drop out).
+  // Search over changelist id, user, and description. Every whitespace-
+  // separated term must match at least one field (order preserved — history
+  // stays chronological, rows just drop out). A term matches as a SUBSTRING,
+  // or — for short simple terms — as a subsequence of a single WORD (typo
+  // tolerance: "jlclp" finds "Jellyclip"). Whole-text subsequence matching is
+  // deliberately avoided: a long term scatter-matches almost any description.
   let query = $state("");
-  function fuzzy(term: string, text: string): boolean {
+  function fuzzyWord(term: string, word: string): boolean {
     let i = 0;
-    for (const ch of text) {
+    for (const ch of word) {
       if (ch === term[i] && ++i === term.length) return true;
     }
     return term.length === 0;
+  }
+  function termMatches(term: string, field: string): boolean {
+    if (field.includes(term)) return true;
+    if (term.length <= 8 && /^[a-z0-9]+$/.test(term)) {
+      for (const w of field.split(/[^a-z0-9]+/)) {
+        if (w.length >= term.length && fuzzyWord(term, w)) return true;
+      }
+    }
+    return false;
   }
   const shown = $derived.by(() => {
     const terms = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
@@ -59,7 +75,7 @@
         r.user ?? "",
         r.desc ?? "",
       ].map((f) => f.toLowerCase());
-      return terms.every((t) => fields.some((f) => fuzzy(t, f)));
+      return terms.every((t) => fields.some((f) => termMatches(t, f)));
     });
   });
 </script>
@@ -88,7 +104,14 @@
     {:else if rows.length === 0}
       <div class="msg dim">No history. Pick a file or a folder on the left.</div>
     {:else if shown.length === 0}
-      <div class="msg dim">No changelists matching “{query.trim()}”.</div>
+      <div class="msg dim">No changelists matching “{query.trim()}” in the {rows.length} loaded.</div>
+      {#if onDeepen}
+        <div class="deepen">
+          <button disabled={deepening} onclick={onDeepen}>
+            {deepening ? "Loading older history…" : "Load older history"}
+          </button>
+        </div>
+      {/if}
     {:else if mode === "folder"}
       <table class="grid">
         <thead>
@@ -142,6 +165,16 @@
     {/if}
     {#if more}
       <div class="more dim">loading more…</div>
+    {/if}
+    <!-- While a search is active the coverage matters: say how far back the
+         loaded rows go and offer to page deeper. -->
+    {#if query.trim() && rows.length > 0 && shown.length > 0 && onDeepen}
+      <div class="deepen">
+        <span class="dim">searching the {rows.length} loaded changelists</span>
+        <button disabled={deepening} onclick={onDeepen}>
+          {deepening ? "Loading older history…" : "Load older history"}
+        </button>
+      </div>
     {/if}
   </div>
 </div>
@@ -212,5 +245,16 @@
     padding: 6px 10px;
     font-size: 11px;
     font-style: italic;
+  }
+  .deepen {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 10px;
+    font-size: 11px;
+  }
+  .deepen button {
+    font-size: 11px;
+    padding: 2px 10px;
   }
 </style>

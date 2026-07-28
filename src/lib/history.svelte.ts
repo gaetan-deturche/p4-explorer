@@ -34,6 +34,7 @@ const histScope = (client: string) => `p4hist:${client}`;
 let currentId = $state(""); // selected subject id — the key the view reads
 let histVer = $state(0); // bumps on every (re)load so the derived getters re-run
 let more = $state(false); // background paging of older changelists in flight
+let deepening = $state(false); // an explicit "load older history" fetch is running
 let selectedChange = $state(""); // details-pane selection
 let descRows = $state<P4Record[]>([]);
 let descLoading = $state(false);
@@ -113,6 +114,9 @@ export const history = {
   get more() {
     return more;
   },
+  get deepening() {
+    return deepening;
+  },
   get selectedChange() {
     return selectedChange;
   },
@@ -121,6 +125,45 @@ export const history = {
   },
   get descLoading() {
     return descLoading;
+  },
+
+  /** Extend the current subject's history further into the past (for searching
+   *  beyond the default cap): folder mode pages older changelists from the
+   *  oldest loaded one; file mode refetches the filelog with a larger max. Adds
+   *  up to `extra` rows per call, progressively visible. */
+  async deepen(extra = 1000) {
+    if (!h || !currentId || deepening) return;
+    const e = entry;
+    if (!e) return;
+    const seq = loadSeq; // invalidated by any selection change
+    const client = h.conn().client;
+    const id = currentId;
+    deepening = true;
+    try {
+      if (e.mode === "file") {
+        const rev = await safe(() => p4.filelog(h!.conn(), h!.toQuery(e.subject), e.rows.length + extra));
+        if (seq !== loadSeq) return;
+        if (rev.length > e.rows.length) writeHist(client, id, { ...e, rows: rev });
+        return;
+      }
+      const q = h.toQuery(e.subject);
+      let all = e.rows;
+      const target = all.length + extra;
+      let before = Math.min(...all.map((b) => Number(b.change))) - 1;
+      while (all.length < target && Number.isFinite(before) && before > 0) {
+        const batch = await safe(() => p4.changes(h!.conn(), q, CHUNK, before));
+        if (seq !== loadSeq) return;
+        if (batch.length === 0) break;
+        all = [...all, ...batch];
+        writeHist(client, id, { ...e, rows: all }, true); // progressive (mem only)
+        const min = Math.min(...batch.map((b) => Number(b.change)));
+        if (batch.length < CHUNK || !Number.isFinite(min) || min <= 1) break;
+        before = min - 1;
+      }
+      writeHist(client, id, { ...e, rows: all }); // persist once at the end
+    } finally {
+      deepening = false;
+    }
   },
 
   /** Drop the persisted + in-memory history cache for the client (on Refresh). */

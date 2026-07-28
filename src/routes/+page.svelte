@@ -632,6 +632,8 @@
               selectedChange={history.selectedChange}
               onSelectChange={(c) => history.selectChange(c)}
               onContextMenu={openHistContext}
+              onDeepen={() => history.deepen()}
+              deepening={history.deepening}
             />
           </div>
           <div
