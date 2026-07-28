@@ -37,11 +37,42 @@
   function isAhead(r: P4Record): boolean {
     return Number.isFinite(anchorNum) && Number(r.change) > anchorNum;
   }
+
+  // Fuzzy search over changelist id, user, and description. Every whitespace-
+  // separated term must subsequence-match at least one field (order preserved —
+  // history stays chronological, rows just drop out).
+  let query = $state("");
+  function fuzzy(term: string, text: string): boolean {
+    let i = 0;
+    for (const ch of text) {
+      if (ch === term[i] && ++i === term.length) return true;
+    }
+    return term.length === 0;
+  }
+  const shown = $derived.by(() => {
+    const terms = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    if (!terms.length) return rows;
+    return rows.filter((r) => {
+      const fields = [
+        "@" + (r.change ?? ""),
+        r.rev ? "#" + r.rev : "",
+        r.user ?? "",
+        r.desc ?? "",
+      ].map((f) => f.toLowerCase());
+      return terms.every((t) => fields.some((f) => fuzzy(t, f)));
+    });
+  });
 </script>
 
 <div class="panel">
   <div class="head">
     <span class="title mono" title={subject}>{subject || "History"}</span>
+    <input
+      class="search"
+      placeholder="Search @cl / user / message"
+      bind:value={query}
+      spellcheck="false"
+    />
     {#if mode === "folder" && haveChange}
       <span class="synced-badge" title="Workspace is synced up to this changelist">
         synced @ {haveChange}
@@ -56,13 +87,15 @@
       <div class="msg dim">Loading…</div>
     {:else if rows.length === 0}
       <div class="msg dim">No history. Pick a file or a folder on the left.</div>
+    {:else if shown.length === 0}
+      <div class="msg dim">No changelists matching “{query.trim()}”.</div>
     {:else if mode === "folder"}
       <table class="grid">
         <thead>
           <tr><th>Change</th><th>Date</th><th>User</th><th>Description</th></tr>
         </thead>
         <tbody>
-          {#each rows as r (r.change)}
+          {#each shown as r (r.change)}
             <tr
               class:have={r.change === haveChange}
               class:ahead={isAhead(r)}
@@ -86,7 +119,7 @@
           <tr><th>Rev</th><th>Change</th><th>Date</th><th>Action</th><th>User</th><th>Description</th></tr>
         </thead>
         <tbody>
-          {#each rows as r (r.rev)}
+          {#each shown as r (r.rev)}
             <tr
               class:have={r.rev === haveRev}
               class:ahead={isAhead(r)}
@@ -134,6 +167,12 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     flex: 1;
+  }
+  .search {
+    flex: none;
+    width: 15rem;
+    font-size: 12px;
+    padding: 2px 8px;
   }
   .synced-badge {
     font-size: 11px;
