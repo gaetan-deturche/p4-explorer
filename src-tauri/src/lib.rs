@@ -1,4 +1,4 @@
-mod commands;
+pub mod commands; // pub: the uediscover dev bin exercises unreal_remote directly
 mod index;
 mod p4;
 

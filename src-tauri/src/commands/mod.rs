@@ -16,7 +16,7 @@ mod editor;
 mod pending;
 mod server;
 mod sync;
-mod unreal_remote;
+pub mod unreal_remote; // pub: exercised by the uediscover dev bin
 
 // Re-export every command so the registration in `lib.rs` can keep referring to
 // them as `commands::<name>` regardless of which submodule they live in.

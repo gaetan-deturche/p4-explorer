@@ -29,16 +29,20 @@ fn msg(node: &str, type_: &str, dest: Option<&str>, data: Option<Value>) -> Vec<
     m.to_string().into_bytes()
 }
 
-/// The multicast discovery socket: SO_REUSEADDR (the editor holds the same
-/// port), bound to 127.0.0.1:6766, member of the group, loopback enabled.
+/// The multicast discovery socket, mirroring the engine's remote_execution.py:
+/// SO_REUSEADDR (the editor holds the same port), bound to 127.0.0.1:6766,
+/// member of the group, loopback enabled, and — critically — IP_MULTICAST_IF
+/// pointed at the loopback interface: without it the ping egresses via the
+/// default NIC and the loopback-bound editor never hears it.
 fn discovery_socket() -> std::io::Result<UdpSocket> {
     let s = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::DGRAM, Some(socket2::Protocol::UDP))?;
     s.set_reuse_address(true)?;
     s.bind(&SocketAddr::from((BIND_ADDR, MULTICAST_PORT)).into())?;
+    s.set_multicast_if_v4(&BIND_ADDR)?; // send pings out the loopback interface
+    s.set_multicast_loop_v4(true)?;
+    s.set_multicast_ttl_v4(0)?; // local host only (matches the editor default)
     let sock: UdpSocket = s.into();
     sock.join_multicast_v4(&MULTICAST_GROUP, &BIND_ADDR)?;
-    sock.set_multicast_loop_v4(true)?;
-    sock.set_multicast_ttl_v4(0)?; // local host only (matches the editor default)
     Ok(sock)
 }
 
@@ -97,6 +101,9 @@ pub fn run_python_in_editor(script: &str) -> Result<Option<()>, String> {
     let Some(mut stream) = stream else {
         return Err("the running editor did not open a command connection".into());
     };
+    // The accepted stream inherits the listener's non-blocking mode — undo it
+    // (reads must block up to the timeout, or they fail with WSAEWOULDBLOCK).
+    stream.set_nonblocking(false).map_err(|e| e.to_string())?;
     stream.set_nodelay(true).ok();
     stream
         .set_read_timeout(Some(Duration::from_secs(30)))
