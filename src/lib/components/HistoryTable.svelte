@@ -102,6 +102,21 @@
       onDeepen();
     }
   }
+
+  // While a search is active, keep loading older history automatically as long
+  // as the results don't fill the view (no scrollbar → the scroll trigger can
+  // never fire). Stops when the view fills (scrolling takes over), the query
+  // clears, or history is exhausted.
+  let body = $state<HTMLDivElement>();
+  $effect(() => {
+    void shown.length; // re-check as results stream in
+    if (!body || !onDeepen || deepening || exhausted || loading) return;
+    if (!query.trim() || rows.length === 0) return;
+    if (body.scrollHeight <= body.clientHeight + 50) {
+      lenBeforeDeepen = rows.length;
+      onDeepen();
+    }
+  });
 </script>
 
 <div class="panel">
@@ -122,18 +137,20 @@
     {/if}
   </div>
 
-  <div class="scroll body" onscroll={onScroll}>
+  <div class="scroll body" bind:this={body} onscroll={onScroll}>
     {#if loading}
       <div class="msg dim">Loading…</div>
     {:else if rows.length === 0}
       <div class="msg dim">No history. Pick a file or a folder on the left.</div>
     {:else if shown.length === 0}
-      <div class="msg dim">No changelists matching “{query.trim()}” in the {rows.length} loaded.</div>
-      {#if onDeepen}
-        <div class="deepen">
-          <button disabled={deepening} onclick={onDeepen}>
-            {deepening ? "Loading older history…" : "Load older history"}
-          </button>
+      {#if exhausted || !onDeepen}
+        <div class="msg dim">
+          No changelists matching “{query.trim()}” in the full history ({rows.length} changelists).
+        </div>
+      {:else}
+        <!-- Auto-deepening (see the fill effect) — keep the user informed. -->
+        <div class="msg dim">
+          No matches in the {rows.length} newest changelists — searching older history…
         </div>
       {/if}
     {:else if mode === "folder"}
