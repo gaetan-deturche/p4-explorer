@@ -291,24 +291,12 @@ pub async fn open_unreal_diff(
     right_rev: String,
 ) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let recs = p4::run(&conn, &["info"])?;
-        let root = recs
-            .first()
-            .and_then(|r| r.get("clientRoot"))
-            .and_then(|v| v.as_str())
-            .ok_or("no workspace root (p4 info clientRoot)")?
-            .to_string();
-        let root = std::path::PathBuf::from(root);
-        let project = find_uproject(&root)
-            .ok_or("No .uproject found under the workspace root")?;
-        let project_dir = project.parent().unwrap_or(&root).to_path_buf();
-
-        // In-place first: a running editor with remote execution enabled. The
+        let t0 = std::time::Instant::now();
+        // In-place first: a running editor with remote execution enabled. Its
         // pong tells us WHICH project it runs (its Saved dir backs the /Temp
-        // package root the copies load through); fall back to the workspace's
-        // project dir when the pong omits it.
+        // package root the copies load through) — no p4 round trip needed; the
+        // workspace lookup only happens on the fallback-launch path.
         let in_place = || -> Result<Option<()>, String> {
-            let wp = project_dir.clone();
             let (left, right) = (left.clone(), right.clone());
             let (name, left_rev, right_rev) = (name.clone(), left_rev.clone(), right_rev.clone());
             super::unreal_remote::run_python_in_editor_with(move |node| {
@@ -323,21 +311,35 @@ pub async fn open_unreal_diff(
                             pb
                         }
                     })
-                    .unwrap_or(wp);
+                    .ok_or("editor pong carried no project_root")?;
                 let l = loadable_spec(&editor_dir, &left)?;
                 let r = loadable_spec(&editor_dir, &right)?;
                 Ok(diff_script(&l, &r, &name, &left_rev, &right_rev))
             })
         };
         match in_place() {
-            Ok(Some(())) => return Ok("remote".to_string()),
-            Ok(None) => {} // no editor running — launch one
+            Ok(Some(())) => {
+                eprintln!("[auger-timing] in-place unreal diff: {:?}", t0.elapsed());
+                return Ok("remote".to_string());
+            }
+            Ok(None) => {} // no running editor — launch one
             Err(e) => {
                 // An editor answered but the in-place diff failed — fall back to
                 // a fresh instance so the user still gets a diff.
                 eprintln!("in-place Unreal diff failed, launching an instance: {e}");
             }
         }
+        eprintln!("[auger-timing] in-place attempt (pre-fallback): {:?}", t0.elapsed());
+        let recs = p4::run(&conn, &["info"])?;
+        let root = recs
+            .first()
+            .and_then(|r| r.get("clientRoot"))
+            .and_then(|v| v.as_str())
+            .ok_or("no workspace root (p4 info clientRoot)")?
+            .to_string();
+        let root = std::path::PathBuf::from(root);
+        let project = find_uproject(&root)
+            .ok_or("No .uproject found under the workspace root")?;
         let editor = find_unreal_editor(&root)
             .ok_or("UnrealEditor.exe not found at or above the workspace root")?;
         let mut c = std::process::Command::new(editor);

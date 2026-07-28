@@ -245,6 +245,7 @@ export const history = {
       // UE assets → Unreal's asset-diff tool; text → the in-app diff window or
       // the external P4DIFF tool, per Options → Editor.
       if (isUnrealAsset(depotFile)) {
+        h!.setNotice("Opening Unreal diff…", 15000); // instant feedback; replaced on completion
         const pair = await p4.diffPairRev(h!.conn(), depotFile, rev);
         const mode = await p4.openUnrealDiff(
           h!.conn(), pair.left, pair.right, unrealAssetName(depotFile), pair.leftLabel, pair.rightLabel,

@@ -504,6 +504,7 @@ export const pending = {
   async openLocalDiff(file: string) {
     try {
       if (isUnrealAsset(file)) {
+        h!.setNotice("Opening Unreal diff…", 15000); // instant feedback; replaced on completion
         const pair = await p4.diffPairLocal(h!.conn(), file);
         const mode = await p4.openUnrealDiff(
           h!.conn(), pair.left, pair.right, unrealAssetName(file), pair.leftLabel, pair.rightLabel,
@@ -526,6 +527,7 @@ export const pending = {
   async openShelvedDiff(file: string, rev: number, change: string) {
     try {
       if (isUnrealAsset(file)) {
+        h!.setNotice("Opening Unreal diff…", 15000); // instant feedback; replaced on completion
         const pair = await p4.diffPairShelved(h!.conn(), file, rev, change);
         const mode = await p4.openUnrealDiff(
           h!.conn(), pair.left, pair.right, unrealAssetName(file), pair.leftLabel, pair.rightLabel,
