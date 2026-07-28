@@ -36,9 +36,10 @@
     onOpenOfflineDiff: (depotFile: string) => void; // open the offline diff externally
     contextChange: string; // the changelist whose context menu is open (highlight it)
     onLocalFiles: (change: string) => Promise<P4Record[]>; // opened (workspace) files
-    onLocalFilesCached: (change: string) => P4Record[]; // cached opened files (instant)
+    // cached opened/shelved files (instant); undefined = never fetched (loading)
+    onLocalFilesCached: (change: string) => P4Record[] | undefined;
     onShelvedFiles: (change: string) => Promise<P4Record[]>; // shelved files
-    onShelvedFilesCached: (change: string) => P4Record[]; // cached shelved files (instant)
+    onShelvedFilesCached: (change: string) => P4Record[] | undefined;
     onLocalDiff: (depotFile: string) => Promise<string>; // local vs server
     onShelvedDiff: (depotFile: string, rev: number, change: string) => Promise<string>;
     onOpenLocalDiff: (depotFile: string) => void;
@@ -150,14 +151,17 @@
     const prev = cls[change];
     // Paint the cached opened + shelved files instantly (so an expanded CL isn't
     // empty — or flashing the empty state — while p4 runs); the fetch reconciles.
-    const cachedLocal = prev?.local?.length ? prev.local : onLocalFilesCached(change);
-    const cachedShelved = prev?.shelved?.length ? prev.shelved : onShelvedFilesCached(change);
+    // `undefined` from the cache means NEVER fetched (show loading); `[]` means
+    // fetched-and-empty (a genuine empty CL — render it empty, no loading flash).
+    const cachedLocal = prev?.local ?? onLocalFilesCached(change);
+    const cachedShelved = prev?.shelved ?? onShelvedFilesCached(change);
+    const known = cachedLocal !== undefined || cachedShelved !== undefined;
     cls[change] = {
       open: prev?.open ?? true,
-      // Spinner only on the very first load with nothing cached to show.
-      loading: !prev && cachedLocal.length === 0 && cachedShelved.length === 0,
-      local: cachedLocal,
-      shelved: cachedShelved,
+      // Spinner only when nothing is known yet — not for a cached empty CL.
+      loading: !prev && !known,
+      local: cachedLocal ?? [],
+      shelved: cachedShelved ?? [],
       shelvedOpen: prev?.shelvedOpen ?? false,
     };
     const [local, shelved] = await Promise.all([onLocalFiles(change), onShelvedFiles(change)]);
@@ -492,7 +496,10 @@
   }
   .cl {
     display: flex;
-    align-items: baseline;
+    /* center + fixed line box so the async review pill (see .review) fits inside
+       the line and its arrival doesn't change the row height. */
+    align-items: center;
+    line-height: 18px;
     gap: 6px;
     width: 100%;
     text-align: left;
@@ -540,7 +547,11 @@
     flex: none;
     font-size: 10px;
     font-weight: 600;
-    padding: 1px 6px;
+    /* total height = 16 (line) + 2 (border) = 18px = the row's line box, so the
+       badge sits within the line and never grows the row when it lands. */
+    line-height: 16px;
+    padding: 0 6px;
+    box-sizing: border-box;
     border-radius: 10px;
     border: 1px solid currentColor;
     white-space: nowrap;

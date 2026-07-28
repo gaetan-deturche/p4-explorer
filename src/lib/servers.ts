@@ -2,7 +2,7 @@
 //! by the store (SQLite source of truth), so the list survives a localStorage
 //! reset — it's critical state, not a disposable cache.
 
-import { cacheGetSync, cacheGet, cacheSet } from "$lib/store";
+import { cacheGetSync, cacheGet, cacheSet } from "$lib/store.svelte";
 
 const SERVERS_KEY = "servers"; // store scope `nav`
 

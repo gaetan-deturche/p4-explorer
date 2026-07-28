@@ -16,7 +16,7 @@ import {
 } from "$lib/cache";
 import { history } from "$lib/history.svelte";
 import { pending } from "$lib/pending.svelte";
-import { cacheGetSync, cacheSet, cacheClearScope } from "$lib/store";
+import { cacheGetSync, cacheSet, cacheClearScope } from "$lib/store.svelte";
 import { loadBrowseSource, saveBrowseSource, type ViewState } from "$lib/nav";
 
 type Tab = "history" | "pending" | "streams" | "log" | "notes";

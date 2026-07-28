@@ -3,7 +3,7 @@
 //! reopen where the user left off. Backed by the generic `store` (SQLite source
 //! of truth + localStorage/memory fast layers), scope `nav`.
 
-import { cacheGetSync, cacheSet } from "$lib/store";
+import { cacheGetSync, cacheSet } from "$lib/store.svelte";
 
 export interface ViewState {
   tab: "history" | "pending" | "streams" | "log" | "notes";

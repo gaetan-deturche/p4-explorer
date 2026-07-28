@@ -4,7 +4,7 @@
 
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { p4, type P4Conn, type P4Record, type ReviewInfo } from "$lib/p4";
-import { cacheGetSync, cacheSet } from "$lib/store";
+import { cacheGetSync, cacheSet, storeGet, hydrate, storeSet } from "$lib/store.svelte";
 
 type Hooks = {
   conn: () => P4Conn;
@@ -19,10 +19,28 @@ type Hooks = {
 
 let h: Hooks | null = null;
 let swarmBase = "";
-let rows = $state<P4Record[]>([]);
-let loading = $state(false);
 let version = $state(0); // bumps on every (re)load so views refetch file lists
 let reviews = $state<Record<string, ReviewInfo | null>>({}); // change → Swarm review status
+
+// The pending list is DERIVED from the store — the single source the UI reads
+// (see the `rows`/`loading` getters). `load()` only writes the p4 result to the
+// store; the getters re-read it, so components tracking them re-render.
+function currentPendingRows(): P4Record[] {
+  void version; // subscribe to reloads: forces a re-run after load() even if `h` was
+  // still null on the first evaluation (before init()), so the getter reaches the
+  // storeGet() read below and thereafter tracks the store key directly.
+  if (!h || !h.connected()) return [];
+  const conn = h.conn();
+  if (!conn.client) return [];
+  const def = { change: "default", desc: "", user: conn.user, time: "" } as P4Record;
+  const json = storeGet("p4:pending", conn.client); // reactive read
+  if (json === undefined) return [def];
+  try {
+    return [def, ...(JSON.parse(json) as P4Record[])];
+  } catch {
+    return [def];
+  }
+}
 
 // Offline changes (files modified/added/deleted on disk but not open in any
 // changelist). Scanned on its own low-rate timer — a workspace-wide p4 scan is
@@ -51,38 +69,31 @@ function saveOfflineCache(client: string, recs: P4Record[]): void {
   if (client) cacheSet("p4:offline", client, JSON.stringify(recs));
 }
 
-// Cached pending changelists per workspace (store scope `p4:pending`) — the
-// numbered CLs only; the synthetic "default" row is re-prepended on load.
-function loadPendingCache(client: string): P4Record[] {
-  if (!client) return [];
+// Cached opened/shelved files per changelist (store scopes p4:clfiles:<client> /
+// p4:clshelved:<client>, key = change). `undefined` means NEVER fetched (show a
+// loading state); `[]` means fetched and genuinely empty (show nothing, no flash)
+// — the distinction the UI needs so an empty CL doesn't flicker "loading".
+function loadClFilesCache(client: string, change: string): P4Record[] | undefined {
+  if (!client) return undefined;
+  const json = cacheGetSync(`p4:clfiles:${client}`, change);
+  if (json === null) return undefined;
   try {
-    return JSON.parse(cacheGetSync("p4:pending", client) ?? "[]") as P4Record[];
+    return JSON.parse(json) as P4Record[];
   } catch {
-    return [];
-  }
-}
-function savePendingCache(client: string, recs: P4Record[]): void {
-  if (client) cacheSet("p4:pending", client, JSON.stringify(recs));
-}
-
-// Cached opened files per changelist (store scope p4:clfiles:<client>, key change).
-function loadClFilesCache(client: string, change: string): P4Record[] {
-  if (!client) return [];
-  try {
-    return JSON.parse(cacheGetSync(`p4:clfiles:${client}`, change) ?? "[]") as P4Record[];
-  } catch {
-    return [];
+    return undefined;
   }
 }
 function saveClFilesCache(client: string, change: string, recs: P4Record[]): void {
   if (client) cacheSet(`p4:clfiles:${client}`, change, JSON.stringify(recs));
 }
-function loadShelvedCache(client: string, change: string): P4Record[] {
-  if (!client) return [];
+function loadShelvedCache(client: string, change: string): P4Record[] | undefined {
+  if (!client) return undefined;
+  const json = cacheGetSync(`p4:clshelved:${client}`, change);
+  if (json === null) return undefined;
   try {
-    return JSON.parse(cacheGetSync(`p4:clshelved:${client}`, change) ?? "[]") as P4Record[];
+    return JSON.parse(json) as P4Record[];
   } catch {
-    return [];
+    return undefined;
   }
 }
 function saveShelvedCache(client: string, change: string, recs: P4Record[]): void {
@@ -106,10 +117,14 @@ export const pending = {
     h = hooks;
   },
   get rows() {
-    return rows;
+    return currentPendingRows(); // reads the store — reactive to components
   },
   get loading() {
-    return loading;
+    void version; // same bootstrap as currentPendingRows (re-run after load())
+    // Connected to a workspace whose pending list isn't in the store yet.
+    if (!h || !h.connected()) return false;
+    const client = h.conn().client;
+    return !!client && storeGet("p4:pending", client) === undefined;
   },
   get version() {
     return version;
@@ -124,10 +139,9 @@ export const pending = {
     return offlineScanning;
   },
 
-  /** Drop the current list (on disconnect / workspace switch). */
+  /** Drop transient state (on disconnect / workspace switch). rows/loading are
+   *  derived from the store, so they follow the client automatically. */
   clear() {
-    rows = [];
-    loading = false;
     reviews = {};
     offline = [];
     pending.stopOfflineScan();
@@ -193,34 +207,24 @@ export const pending = {
     }
   },
 
-  /** (Re)load the client's pending changelists (Default prepended). Shows the
-   *  cached list instantly, then refreshes from the server. */
+  /** Refresh the pending changelists: hydrate the store from persistence (so the
+   *  cached list shows at once), then write the fresh p4 result to the store —
+   *  the derived `rows` re-renders. One path: the UI only reads the store. */
   async load() {
     if (!h) return;
     const conn = h.conn();
     if (!h.connected() || !conn.client) {
-      rows = [];
-      loading = false;
       reviews = {};
+      version++; // re-run the derived getters (clears the list on disconnect)
       return;
     }
     const client = conn.client;
-    const def = { change: "default", desc: "", user: conn.user, time: "" } as P4Record;
-    if (rows.length === 0) {
-      const cached = loadPendingCache(client);
-      if (cached.length) {
-        rows = [def, ...cached];
-        version++;
-      } else {
-        loading = true; // nothing to show yet
-      }
-    }
+    hydrate("p4:pending", client); // fill the store from localStorage/SQLite (reactive)
+    version++; // paint the cached list now, before the server round-trip
     const r = await p4.pending(conn, 100).catch(() => [] as P4Record[]);
-    loading = false;
     if (h.conn().client !== client) return; // switched workspace during the fetch
-    rows = [def, ...r];
-    savePendingCache(client, r);
-    version++; // signal open changelists to refetch their (now-stale) file lists
+    storeSet("p4:pending", client, JSON.stringify(r)); // ONE write → rows re-derive
+    version++; // fresh list in; also signals open CLs to refetch their file lists
     pending.loadReviews(); // fire-and-forget: populate Swarm review badges
   },
 
@@ -230,7 +234,7 @@ export const pending = {
   async loadReviews() {
     if (!h || !h.connected() || !h.conn().client) return;
     const conn = h.conn();
-    const targets = rows.filter((r) => r.change !== "default");
+    const targets = currentPendingRows().filter((r) => r.change !== "default");
     const next: Record<string, ReviewInfo | null> = {};
     await Promise.all(
       targets.map(async (r) => {
@@ -428,9 +432,10 @@ export const pending = {
   },
 
   // --- file-content providers for PendingList (no `this`; safe as callbacks) --
-  /** The cached opened files of a changelist (sync) — for instant paint. */
-  localFilesCached(change: string): P4Record[] {
-    return h ? loadClFilesCache(h.conn().client, change) : [];
+  /** The cached opened files of a changelist (sync) — for instant paint.
+   *  `undefined` = never fetched (loading); `[]` = fetched, empty (no flash). */
+  localFilesCached(change: string): P4Record[] | undefined {
+    return h ? loadClFilesCache(h.conn().client, change) : undefined;
   },
   async localFiles(change: string): Promise<P4Record[]> {
     const conn = h!.conn();
@@ -439,9 +444,13 @@ export const pending = {
     saveClFilesCache(conn.client, change, files); // cache the FILTERED list
     return files;
   },
-  /** The cached shelved files of a changelist (sync) — for instant paint. */
-  shelvedFilesCached(change: string): P4Record[] {
-    return h && change !== "default" ? loadShelvedCache(h.conn().client, change) : [];
+  /** The cached shelved files of a changelist (sync) — for instant paint.
+   *  `undefined` = never fetched (loading); `[]` = fetched, empty (no flash).
+   *  The default changelist can never have a shelf, so it's known-empty. */
+  shelvedFilesCached(change: string): P4Record[] | undefined {
+    if (!h) return undefined;
+    if (change === "default") return [];
+    return loadShelvedCache(h.conn().client, change);
   },
   async shelvedFiles(change: string): Promise<P4Record[]> {
     if (change === "default") return [];

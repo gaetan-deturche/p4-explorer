@@ -6,7 +6,7 @@
 
 import { listLocalDir, type P4Record } from "$lib/p4";
 import { makeNode, type TreeNode } from "$lib/tree";
-import { cacheGetSync, cacheGet, cacheSet, cacheClearScope } from "$lib/store";
+import { cacheGetSync, cacheGet, cacheSet, cacheClearScope } from "$lib/store.svelte";
 
 export type FolderContents = { dirs: P4Record[]; files: P4Record[] };
 export type HistEntry = { mode: "folder" | "file"; subject: string; rows: P4Record[]; have: string };
