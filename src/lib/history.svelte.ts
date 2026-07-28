@@ -1,9 +1,14 @@
-//! History feature store: the center History pane (file/folder revisions with
-//! stale-while-revalidate caching + background paging) and the right-hand
-//! changelist-details pane. Shared bits (conn, tab switch, notices) via init().
+//! History feature store: the center History pane (file/folder revisions) and
+//! the right-hand changelist-details pane. The revision list is DERIVED from the
+//! store (scope p4hist:<client>, key = subject id) — the single source the UI
+//! reads; loadFolder/selectFile only WRITE that store (progressively, for the
+//! background paging of older changelists). The details pane fetches once per
+//! selection (no competing cache), so it stays plain $state. Shared bits (conn,
+//! path translation, notices) come via init().
 
 import { p4, type P4Conn, type P4Record } from "$lib/p4";
-import { loadHist, loadHistAsync, saveHist, type HistEntry } from "$lib/cache";
+import type { HistEntry } from "$lib/cache";
+import { storeGet, storeSet, storeSetMem, hydrate, storeClearScope } from "$lib/store.svelte";
 
 type Hooks = {
   conn: () => P4Conn;
@@ -14,22 +19,21 @@ type Hooks = {
 
 const CHUNK = 50;
 const CAP = 400;
+const PERSIST = 100; // rows written to disk; the live (in-memory) list may hold up to CAP
 
 let h: Hooks | null = null;
 // Monotonic token so stale center-pane loads are dropped when selection changes.
 let loadSeq = 0;
-let loadTimer: number | null = null;
-// In-memory (session) history cache; persistent copy lives in $lib/cache.
-const memCache = new Map<string, HistEntry>();
 
-let mode = $state<"folder" | "file">("folder");
-let subject = $state("");
-let rows = $state<P4Record[]>([]);
-let loading = $state(false);
-let haveChange = $state("");
-let haveRev = $state("");
+// The revision list lives under `p4hist:<client>` — this MUST match cache.ts's
+// histScope so Refresh's clearClientCache drops it. Keyed by subject id:
+// "F:<path>" (folder history) or "R:<file>" (file history).
+const histScope = (client: string) => `p4hist:${client}`;
+
+let currentId = $state(""); // selected subject id — the key the view reads
+let histVer = $state(0); // bumps on every (re)load so the derived getters re-run
 let more = $state(false); // background paging of older changelists in flight
-let selectedChange = $state("");
+let selectedChange = $state(""); // details-pane selection
 let descRows = $state<P4Record[]>([]);
 let descLoading = $state(false);
 
@@ -41,42 +45,39 @@ async function safe<T>(fn: () => Promise<T[]>): Promise<T[]> {
   }
 }
 
-// Delayed loading indicator: keep the previous list visible and only show
-// "Loading…" if fresh data hasn't arrived within 2s (nothing to keep → now).
-function beginLoad(seq: number) {
-  if (loadTimer !== null) clearTimeout(loadTimer);
-  if (rows.length === 0) {
-    loading = true;
-    return;
-  }
-  loadTimer = window.setTimeout(() => {
-    if (seq === loadSeq) loading = true;
-  }, 2000);
-}
-function endLoad() {
-  if (loadTimer !== null) {
-    clearTimeout(loadTimer);
-    loadTimer = null;
-  }
-  loading = false;
-}
+const curMode = (): "folder" | "file" => (currentId.startsWith("R:") ? "file" : "folder");
 
-function apply(e: HistEntry) {
-  mode = e.mode;
-  subject = e.subject;
-  if (e.mode === "folder") {
-    haveChange = e.have;
-    haveRev = "";
-  } else {
-    haveRev = e.have;
-    haveChange = "";
+// The stored entry for the current subject, read from the reactive map; null
+// until loaded. Memoized so the (up-to-CAP-row) parse runs once per change, not
+// per getter read. `void histVer` is read first so it ALWAYS subscribes — the
+// derived can never memoize-stick on an early `return null` (the bootstrap the
+// pending/streams views use, safe here because it precedes every early return).
+const entry: HistEntry | null = $derived.by(() => {
+  void histVer;
+  if (!h || !currentId) return null;
+  const client = h.conn().client;
+  if (!client) return null;
+  const json = storeGet(histScope(client), currentId);
+  if (json === undefined) return null;
+  try {
+    return JSON.parse(json) as HistEntry;
+  } catch {
+    return null;
   }
-  rows = e.rows;
-  more = false;
-}
-function cache(id: string, e: HistEntry) {
-  memCache.set(id, e);
-  saveHist(h!.conn().client, id, e);
+});
+
+// Write a subject's revisions: full list to the reactive map, a bounded slice to
+// disk. `memOnly` skips persistence for progressive paging chunks (persisted
+// once at the end). Always bumps histVer so the getters re-derive.
+function writeHist(client: string, id: string, e: HistEntry, memOnly = false): void {
+  const scope = histScope(client);
+  const full = JSON.stringify(e);
+  if (memOnly) {
+    storeSetMem(scope, id, full);
+  } else {
+    storeSet(scope, id, full, JSON.stringify({ ...e, rows: e.rows.slice(0, PERSIST) }));
+  }
+  histVer++;
 }
 
 export const history = {
@@ -84,22 +85,29 @@ export const history = {
     h = hooks;
   },
   get mode() {
-    return mode;
+    void histVer;
+    return curMode();
   },
   get subject() {
-    return subject;
+    void histVer;
+    return currentId ? currentId.slice(2) : "";
   },
   get rows() {
-    return rows;
+    return entry?.rows ?? [];
   },
   get loading() {
-    return loading;
+    // No data in the store for the current subject yet → the allowed placeholder.
+    void histVer;
+    if (!h || !currentId) return false;
+    const client = h.conn().client;
+    if (!client) return false;
+    return storeGet(histScope(client), currentId) === undefined;
   },
   get haveChange() {
-    return haveChange;
+    return curMode() === "folder" ? (entry?.have ?? "") : "";
   },
   get haveRev() {
-    return haveRev;
+    return curMode() === "file" ? (entry?.have ?? "") : "";
   },
   get more() {
     return more;
@@ -114,42 +122,31 @@ export const history = {
     return descLoading;
   },
 
-  /** Drop the in-memory history cache (on refresh). */
+  /** Drop the persisted + in-memory history cache for the client (on Refresh). */
   clearMemCache() {
-    memCache.clear();
+    if (h) storeClearScope(histScope(h.conn().client));
   },
-  /** Clear cache + all pane state (on disconnect / workspace switch). */
+  /** Clear pane state (on disconnect / workspace switch). The old client's store
+   *  entries stay cached (keyed by client) — harmless, and instant on return. */
   reset() {
-    memCache.clear();
-    rows = [];
-    subject = "";
-    haveChange = "";
-    haveRev = "";
-    more = false;
+    currentId = "";
     selectedChange = "";
     descRows = [];
+    descLoading = false;
+    more = false;
+    histVer++;
   },
 
-  async loadFolder(path: string, seq: number = ++loadSeq) {
+  async loadFolder(path: string) {
     if (!h) return;
+    const seq = ++loadSeq;
+    const client = h.conn().client;
     const id = "F:" + path;
-
-    let cached = memCache.get(id) ?? loadHist(h.conn().client, id);
-    if (cached) {
-      endLoad();
-      apply(cached);
-      this.autoSelectHave();
-    } else {
-      cached = await loadHistAsync(h.conn().client, id); // SQLite fallback (cold cache)
-      if (seq !== loadSeq) return; // superseded during the async read
-      if (cached) {
-        endLoad();
-        apply(cached);
-        this.autoSelectHave();
-      } else {
-        beginLoad(seq);
-      }
-    }
+    currentId = id; // select immediately: the header + any cached rows paint at once
+    hydrate(histScope(client), id); // instant cached paint (localStorage / SQLite)
+    histVer++;
+    const hadCache = storeGet(histScope(client), id) !== undefined;
+    if (hadCache) history.autoSelectHave();
 
     // Fetch the first chunk AND the synced-CL together so the list appears with
     // its greying/bold already correct — no ungreyed-then-greyed flash.
@@ -158,57 +155,47 @@ export const history = {
       safe(() => p4.changes(h!.conn(), q, CHUNK)),
       safe(() => p4.haveChange(h!.conn(), q)),
     ]);
-    if (seq !== loadSeq) return; // selection changed; keep whatever's shown
-    endLoad();
+    if (seq !== loadSeq) return; // selection changed — keep whatever's shown
     const haveCl = have[0]?.change ?? "";
 
-    // If we showed cached data, refresh fully into an accumulator and swap once
-    // (no shrink-then-grow flicker). Otherwise paint progressively.
+    // Nothing cached → paint progressively as pages arrive; cache shown → keep it
+    // and accumulate silently, swapping once at the end (no shrink-then-grow).
     let all = firstBatch;
-    if (!cached) apply({ mode: "folder", subject: path, rows: all, have: haveCl });
+    if (!hadCache) {
+      writeHist(client, id, { mode: "folder", subject: path, rows: all, have: haveCl }, true);
+    }
 
     if (firstBatch.length === CHUNK) {
       let before = Math.min(...firstBatch.map((b) => Number(b.change))) - 1;
       while (all.length < CAP && Number.isFinite(before) && before > 0) {
-        if (!cached) more = true;
+        if (!hadCache) more = true;
         const batch = await safe(() => p4.changes(h!.conn(), q, CHUNK, before));
         if (seq !== loadSeq) return;
         if (batch.length === 0) break;
         all = [...all, ...batch];
-        if (!cached) rows = all; // progressive when nothing was shown
+        if (!hadCache) {
+          writeHist(client, id, { mode: "folder", subject: path, rows: all, have: haveCl }, true);
+        }
         const min = Math.min(...batch.map((b) => Number(b.change)));
         if (batch.length < CHUNK || !Number.isFinite(min) || min <= 1) break;
         before = min - 1;
       }
     }
     more = false;
-    const fresh: HistEntry = { mode: "folder", subject: path, rows: all, have: haveCl };
-    apply(fresh); // single atomic swap (covers the cached-refresh case)
-    this.autoSelectHave();
-    cache(id, fresh);
+    // Persist + atomic swap (also covers the cached-refresh case).
+    writeHist(client, id, { mode: "folder", subject: path, rows: all, have: haveCl });
+    history.autoSelectHave();
   },
 
   async selectFile(depotFile: string) {
     if (!h) return;
     const seq = ++loadSeq;
+    const client = h.conn().client;
     const id = "R:" + depotFile;
-
-    let cached = memCache.get(id) ?? loadHist(h.conn().client, id);
-    if (cached) {
-      endLoad();
-      apply(cached);
-      this.autoSelectHave();
-    } else {
-      cached = await loadHistAsync(h.conn().client, id); // SQLite fallback (cold cache)
-      if (seq !== loadSeq) return; // superseded during the async read
-      if (cached) {
-        endLoad();
-        apply(cached);
-        this.autoSelectHave();
-      } else {
-        beginLoad(seq);
-      }
-    }
+    currentId = id;
+    hydrate(histScope(client), id);
+    histVer++;
+    if (storeGet(histScope(client), id) !== undefined) history.autoSelectHave();
 
     const q = h.toQuery(depotFile);
     const [rev, fs] = await Promise.all([
@@ -216,16 +203,8 @@ export const history = {
       safe(() => p4.fstat(h!.conn(), q)),
     ]);
     if (seq !== loadSeq) return;
-    endLoad();
-    const fresh: HistEntry = {
-      mode: "file",
-      subject: depotFile,
-      rows: rev,
-      have: fs[0]?.haveRev ?? "",
-    };
-    apply(fresh);
-    this.autoSelectHave();
-    cache(id, fresh);
+    writeHist(client, id, { mode: "file", subject: depotFile, rows: rev, have: fs[0]?.haveRev ?? "" });
+    history.autoSelectHave();
   },
 
   async selectChange(change: string) {
@@ -238,15 +217,17 @@ export const history = {
 
   // Auto-select the changelist the workspace is currently synced to.
   autoSelectHave() {
-    if (mode === "folder") {
-      if (haveChange) this.selectChange(haveChange);
+    const e = entry;
+    if (!e) return;
+    if (curMode() === "folder") {
+      if (e.have) history.selectChange(e.have);
       else {
         selectedChange = "";
         descRows = [];
       }
     } else {
-      const row = rows.find((r) => r.rev === haveRev);
-      if (row?.change) this.selectChange(row.change);
+      const row = e.rows.find((r) => r.rev === e.have);
+      if (row?.change) history.selectChange(row.change);
       else {
         selectedChange = "";
         descRows = [];

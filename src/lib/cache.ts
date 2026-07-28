@@ -39,16 +39,9 @@ export function saveFolder(client: string, path: string, c: FolderContents) {
   cacheSet(treeScope(client), path, JSON.stringify(c));
 }
 
-export function loadHist(client: string, id: string): HistEntry | null {
-  return parse<HistEntry>(cacheGetSync(histScope(client), id));
-}
-export async function loadHistAsync(client: string, id: string): Promise<HistEntry | null> {
-  return parse<HistEntry>(await cacheGet(histScope(client), id));
-}
-export function saveHist(client: string, id: string, e: HistEntry) {
-  // Bound persisted size: keep the newest 100 rows.
-  cacheSet(histScope(client), id, JSON.stringify({ ...e, rows: e.rows.slice(0, 100) }));
-}
+// History entries (scope p4hist:<client>) are written/read by history.svelte.ts
+// straight through the store; only the shared HistEntry type + histScope (for the
+// Refresh clear below) live here now.
 
 /** Drop all persisted folder + history entries for a client (on Refresh). */
 export function clearClientCache(client: string) {
