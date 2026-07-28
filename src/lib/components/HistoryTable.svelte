@@ -78,6 +78,30 @@
       return terms.every((t) => fields.some((f) => termMatches(t, f)));
     });
   });
+
+  // Infinite scroll: nearing the bottom loads older history automatically.
+  // `exhausted` latches when a deepen adds no rows (true end of history) so we
+  // stop asking; it resets when the subject changes.
+  let exhausted = $state(false);
+  let lenBeforeDeepen = 0;
+  let wasDeepening = false;
+  $effect(() => {
+    void subject;
+    void mode;
+    exhausted = false;
+  });
+  $effect(() => {
+    if (wasDeepening && !deepening && rows.length === lenBeforeDeepen) exhausted = true;
+    wasDeepening = deepening;
+  });
+  function onScroll(e: Event) {
+    const el = e.currentTarget as HTMLElement;
+    if (!onDeepen || deepening || exhausted || loading || rows.length === 0) return;
+    if (el.scrollTop + el.clientHeight >= el.scrollHeight - 300) {
+      lenBeforeDeepen = rows.length;
+      onDeepen();
+    }
+  }
 </script>
 
 <div class="panel">
@@ -98,7 +122,7 @@
     {/if}
   </div>
 
-  <div class="scroll body">
+  <div class="scroll body" onscroll={onScroll}>
     {#if loading}
       <div class="msg dim">Loading…</div>
     {:else if rows.length === 0}
@@ -165,6 +189,9 @@
     {/if}
     {#if more}
       <div class="more dim">loading more…</div>
+    {/if}
+    {#if deepening && !query.trim()}
+      <div class="more dim">loading older history…</div>
     {/if}
     <!-- While a search is active the coverage matters: say how far back the
          loaded rows go and offer to page deeper. -->
