@@ -249,7 +249,12 @@ export const history = {
         const mode = await p4.openUnrealDiff(
           h!.conn(), pair.left, pair.right, unrealAssetName(depotFile), pair.leftLabel, pair.rightLabel,
         );
-        if (mode === "remote") h!.setNotice("Diff opened in the running Unreal Editor.");
+        h!.setNotice(
+          mode === "remote"
+            ? "Diff opened in the running Unreal Editor."
+            : "Launching Unreal Editor for the diff — this takes a moment…",
+          8000,
+        );
       } else if (editor.diffTool === "inapp") {
         await openDiffWindow(await p4.diffPairRev(h!.conn(), depotFile, rev));
       } else {

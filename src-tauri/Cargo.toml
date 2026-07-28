@@ -4,6 +4,9 @@ version = "0.1.0"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
+# Two [[bin]] targets exist (Auger + the uediscover dev tool) — `tauri dev`'s
+# plain `cargo run` needs to know which one is the app.
+default-run = "Auger"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

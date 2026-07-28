@@ -223,6 +223,60 @@ unreal.AssetToolsHelpers.get_asset_tools().diff_assets(_la, _ra, _li, _ri)
     )
 }
 
+/// What to pass to `unreal.load_package` for a diff side. A file under the
+/// running project's mounted Content loads by its raw path (converts to its
+/// /Game package — the LIVE asset). Anything else (our temp files; Python's
+/// load_package returns None for unmounted paths) is COPIED into the running
+/// editor's `Saved/Diff` under a clean unique name and loaded as
+/// `/Temp/Diff/<stem>` — the built-in `/Temp` package root maps to the
+/// project's Saved dir (verified live).
+fn loadable_spec(editor_project_dir: &std::path::Path, src: &str) -> Result<String, String> {
+    let content = editor_project_dir.join("Content");
+    if std::path::Path::new(src).starts_with(&content) {
+        return Ok(src.to_string());
+    }
+    let uniq = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    // The package-name stem must avoid '.'; keep the file extension on disk.
+    let fname = src.rsplit(['\\', '/']).next().unwrap_or("file");
+    let (stem, ext) = match fname.rfind('.') {
+        Some(i) => (&fname[..i], &fname[i..]),
+        None => (fname, ""),
+    };
+    let stem: String = stem
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+        .collect();
+    let dir = editor_project_dir.join("Saved").join("Diff");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    // Best effort: prune day-old copies from previous diffs.
+    if let Ok(rd) = std::fs::read_dir(&dir) {
+        let cutoff = std::time::SystemTime::now() - std::time::Duration::from_secs(24 * 3600);
+        for e in rd.flatten() {
+            let name = e.file_name();
+            let is_ours = name.to_str().is_some_and(|n| n.starts_with("auger_"));
+            let old = e.metadata().and_then(|m| m.modified()).map(|t| t < cutoff).unwrap_or(false);
+            if is_ours && old {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+    }
+    let base = format!("auger_{uniq}_{stem}");
+    let dst = dir.join(format!("{base}{ext}"));
+    std::fs::copy(src, &dst).map_err(|e| format!("copy for in-place diff failed: {e}"))?;
+    // Freshly copied — make sure it isn't read-only (source may be a p4 print).
+    if let Ok(md) = std::fs::metadata(&dst) {
+        let mut p = md.permissions();
+        if p.readonly() {
+            p.set_readonly(false);
+            let _ = std::fs::set_permissions(&dst, p);
+        }
+    }
+    Ok(format!("/Temp/Diff/{base}"))
+}
+
 /// Diff two UE asset files in Unreal's asset-diff tool. Prefers an ALREADY
 /// RUNNING editor (Python remote execution → in-place DiffAssets); falls back
 /// to launching `UnrealEditor.exe <project> -diff <left> <right>`. Returns
@@ -237,17 +291,6 @@ pub async fn open_unreal_diff(
     right_rev: String,
 ) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        // In-place first: a running editor with remote execution enabled.
-        let script = diff_script(&left, &right, &name, &left_rev, &right_rev);
-        match super::unreal_remote::run_python_in_editor(&script) {
-            Ok(Some(())) => return Ok("remote".to_string()),
-            Ok(None) => {} // no editor running — launch one
-            Err(e) => {
-                // An editor answered but the in-place diff failed (e.g. remote
-                // exec misconfigured mid-run) — fall back to a fresh instance.
-                eprintln!("in-place Unreal diff failed, launching an instance: {e}");
-            }
-        }
         let recs = p4::run(&conn, &["info"])?;
         let root = recs
             .first()
@@ -256,10 +299,47 @@ pub async fn open_unreal_diff(
             .ok_or("no workspace root (p4 info clientRoot)")?
             .to_string();
         let root = std::path::PathBuf::from(root);
-        let editor = find_unreal_editor(&root)
-            .ok_or("UnrealEditor.exe not found at or above the workspace root")?;
         let project = find_uproject(&root)
             .ok_or("No .uproject found under the workspace root")?;
+        let project_dir = project.parent().unwrap_or(&root).to_path_buf();
+
+        // In-place first: a running editor with remote execution enabled. The
+        // pong tells us WHICH project it runs (its Saved dir backs the /Temp
+        // package root the copies load through); fall back to the workspace's
+        // project dir when the pong omits it.
+        let in_place = || -> Result<Option<()>, String> {
+            let wp = project_dir.clone();
+            let (left, right) = (left.clone(), right.clone());
+            let (name, left_rev, right_rev) = (name.clone(), left_rev.clone(), right_rev.clone());
+            super::unreal_remote::run_python_in_editor_with(move |node| {
+                let editor_dir = node
+                    .get("project_root")
+                    .and_then(|v| v.as_str())
+                    .map(|p| {
+                        let pb = std::path::PathBuf::from(p);
+                        if pb.extension().is_some_and(|x| x.eq_ignore_ascii_case("uproject")) {
+                            pb.parent().map(|d| d.to_path_buf()).unwrap_or(pb)
+                        } else {
+                            pb
+                        }
+                    })
+                    .unwrap_or(wp);
+                let l = loadable_spec(&editor_dir, &left)?;
+                let r = loadable_spec(&editor_dir, &right)?;
+                Ok(diff_script(&l, &r, &name, &left_rev, &right_rev))
+            })
+        };
+        match in_place() {
+            Ok(Some(())) => return Ok("remote".to_string()),
+            Ok(None) => {} // no editor running — launch one
+            Err(e) => {
+                // An editor answered but the in-place diff failed — fall back to
+                // a fresh instance so the user still gets a diff.
+                eprintln!("in-place Unreal diff failed, launching an instance: {e}");
+            }
+        }
+        let editor = find_unreal_editor(&root)
+            .ok_or("UnrealEditor.exe not found at or above the workspace root")?;
         let mut c = std::process::Command::new(editor);
         c.arg(project).arg("-diff").arg(&left).arg(&right);
         c.spawn().map_err(|e| format!("failed to launch Unreal diff: {e}"))?;

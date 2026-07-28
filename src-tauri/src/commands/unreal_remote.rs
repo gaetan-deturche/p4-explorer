@@ -46,10 +46,20 @@ fn discovery_socket() -> std::io::Result<UdpSocket> {
     Ok(sock)
 }
 
-/// Run `script` (a multi-statement Python source, ExecuteFile mode) in a
-/// running editor. Ok(None) = no editor found (caller should fall back);
-/// Ok(Some(())) = executed successfully; Err = editor found but the run failed.
+/// Run a fixed Python script in a running editor (see `run_python_in_editor_with`).
 pub fn run_python_in_editor(script: &str) -> Result<Option<()>, String> {
+    let script = script.to_string();
+    run_python_in_editor_with(move |_node| Ok(script))
+}
+
+/// Discover a running editor and run the Python script `build` produces —
+/// `build` receives the editor's pong data (project_root, project_name, …) so
+/// the script can be tailored to the ACTUAL running project. Ok(None) = no
+/// editor found (caller should fall back); Ok(Some(())) = executed
+/// successfully; Err = editor found but the build/run failed.
+pub fn run_python_in_editor_with(
+    build: impl FnOnce(&Value) -> Result<String, String>,
+) -> Result<Option<()>, String> {
     let node = format!("auger-{}", std::process::id());
     let group = SocketAddr::from((MULTICAST_GROUP, MULTICAST_PORT));
 
@@ -58,7 +68,7 @@ pub fn run_python_in_editor(script: &str) -> Result<Option<()>, String> {
         .map_err(|e| e.to_string())?;
 
     // Discover: ping every 250ms for up to ~1.5s, take the first pong.
-    let mut remote: Option<String> = None;
+    let mut remote: Option<(String, Value)> = None;
     let deadline = Instant::now() + Duration::from_millis(1500);
     let mut buf = [0u8; RECV_CHUNK];
     while Instant::now() < deadline && remote.is_none() {
@@ -67,15 +77,16 @@ pub fn run_python_in_editor(script: &str) -> Result<Option<()>, String> {
             if let Ok(v) = serde_json::from_slice::<Value>(&buf[..n]) {
                 let from = v["source"].as_str().unwrap_or_default();
                 if v["magic"] == MAGIC && v["type"] == "pong" && from != node && !from.is_empty() {
-                    remote = Some(from.to_string());
+                    remote = Some((from.to_string(), v["data"].clone()));
                     break;
                 }
             }
         }
     }
-    let Some(remote) = remote else {
+    let Some((remote, node_data)) = remote else {
         return Ok(None); // no running editor with remote execution
     };
+    let script = build(&node_data)?;
 
     // Host the TCP command socket on an ephemeral port; ask the editor to connect.
     let listener = TcpListener::bind((BIND_ADDR, 0)).map_err(|e| format!("tcp listen: {e}"))?;
@@ -114,7 +125,7 @@ pub fn run_python_in_editor(script: &str) -> Result<Option<()>, String> {
         &node,
         "command",
         Some(&remote),
-        Some(json!({ "command": script, "unattended": true, "exec_mode": "ExecuteFile" })),
+        Some(json!({ "command": &script, "unattended": true, "exec_mode": "ExecuteFile" })),
     );
     stream.write_all(&cmd).map_err(|e| format!("send command: {e}"))?;
 

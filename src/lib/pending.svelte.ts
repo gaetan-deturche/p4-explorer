@@ -508,7 +508,12 @@ export const pending = {
         const mode = await p4.openUnrealDiff(
           h!.conn(), pair.left, pair.right, unrealAssetName(file), pair.leftLabel, pair.rightLabel,
         );
-        if (mode === "remote") h!.setNotice("Diff opened in the running Unreal Editor.");
+        h!.setNotice(
+          mode === "remote"
+            ? "Diff opened in the running Unreal Editor."
+            : "Launching Unreal Editor for the diff — this takes a moment…",
+          8000,
+        );
       } else if (editor.diffTool === "inapp") {
         await openDiffWindow(await p4.diffPairLocal(h!.conn(), file));
       } else {
@@ -525,7 +530,12 @@ export const pending = {
         const mode = await p4.openUnrealDiff(
           h!.conn(), pair.left, pair.right, unrealAssetName(file), pair.leftLabel, pair.rightLabel,
         );
-        if (mode === "remote") h!.setNotice("Diff opened in the running Unreal Editor.");
+        h!.setNotice(
+          mode === "remote"
+            ? "Diff opened in the running Unreal Editor."
+            : "Launching Unreal Editor for the diff — this takes a moment…",
+          8000,
+        );
       } else if (editor.diffTool === "inapp") {
         await openDiffWindow(await p4.diffPairShelved(h!.conn(), file, rev, change));
       } else {
