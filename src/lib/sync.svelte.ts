@@ -31,7 +31,10 @@ type Progress = {
   message: string;
 };
 type ErrItem = { line: string; file: string | null };
-type ErrReport = { title: string; items: ErrItem[]; path: string | undefined };
+// `specs` = what the failed run targeted; the retry falls back to these when
+// no per-file paths could be parsed out of the error lines. NEVER widen it to
+// the whole workspace — a retry must not sync more than the run it retries.
+type ErrReport = { title: string; items: ErrItem[]; specs: string[] };
 
 /** A sync/unsync/reconcile target: a depot path and whether it's a folder. */
 export type SyncTarget = { path: string; isDir: boolean };
@@ -104,11 +107,7 @@ export const sync = {
     try {
       const n = await p4.syncStream(h.conn(), specs);
       progress = null;
-      if (errorItems.length > 0) {
-        // `path` seeds the retry-all target when no per-file paths were parsed;
-        // only meaningful for a single spec.
-        errors = { title, items: [...errorItems], path: specs.length === 1 ? specs[0] : undefined };
-      }
+      if (errorItems.length > 0) errors = { title, items: [...errorItems], specs };
       else h.setNotice(n > 0 ? `Synced ${n} file${n === 1 ? "" : "s"}.` : "Already up to date.");
       return n;
     } catch (e) {
@@ -289,7 +288,11 @@ export const sync = {
   targets(): string[] {
     if (!errors) return [];
     const files = Array.from(new Set(errors.items.map((i) => i.file).filter((f): f is string => !!f)));
-    return files.length ? files : [errors.path ?? (h && h.rootPath() ? `${h!.rootPath()}/...` : "...")];
+    if (files.length) return files;
+    // No parseable per-file paths: retry exactly what this run targeted. An
+    // empty spec list means it WAS a whole-workspace sync.
+    if (errors.specs.length) return errors.specs;
+    return [h && h.rootPath() ? `${h.rootPath()}/...` : "..."];
   },
   /** Dismiss one entry without touching the file (e.g. keep offline changes and
    *  skip this update). Closes the dialog when it was the last entry. */

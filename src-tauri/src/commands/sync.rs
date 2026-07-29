@@ -67,8 +67,8 @@ fn sync_run(
         if let Some(se) = stderr {
             for line in BufReader::new(se).lines() {
                 let Ok(line) = line else { break };
-                if line.trim().is_empty() {
-                    continue;
+                if line.trim().is_empty() || is_benign_sync_message(&line) {
+                    continue; // informational, not an issue (see is_benign_sync_message)
                 }
                 n += 1;
                 all.push_str(&line);
@@ -121,6 +121,19 @@ fn sync_run(
         return Err(err.trim().to_string());
     }
     Ok(count)
+}
+
+/// p4 writes informational results to stderr too — "up-to-date", "no such
+/// file(s)", "not on client" (an unsync with nothing to remove). Those are NOT
+/// problems: reporting them as sync issues turns a successful no-op into an
+/// error dialog, so they're dropped from the issue stream.
+fn is_benign_sync_message(line: &str) -> bool {
+    let l = line.to_lowercase();
+    l.contains("up-to-date")
+        || l.contains("no such file")
+        || l.contains("file(s) not on client")
+        || l.contains("no file(s) to")
+        || l.contains("not in client view")
 }
 
 /// Best-effort extract of the file path from a p4 sync error line, for the
