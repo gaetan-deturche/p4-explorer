@@ -78,6 +78,20 @@ export function saveBrowseSource(s: "local" | "workspace" | "depot"): void {
   set(BROWSE_SRC, s);
 }
 
+const HIST_COLS = "histCols";
+/** Manually-resized History columns (auto-fitted when absent), by column key. */
+export function loadHistCols(): Record<string, number> {
+  try {
+    const v = JSON.parse(get(HIST_COLS) ?? "{}");
+    return v && typeof v === "object" ? v : {};
+  } catch {
+    return {};
+  }
+}
+export function saveHistCols(w: Record<string, number | undefined>): void {
+  set(HIST_COLS, JSON.stringify(w));
+}
+
 const SHOW_DELETED = "showDeleted";
 /** Whether the Files pane lists files deleted at head (off by default). */
 export function loadShowDeleted(): boolean {

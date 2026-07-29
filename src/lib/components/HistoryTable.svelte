@@ -1,5 +1,6 @@
 <script lang="ts">
   import { fmtTime, firstLine, type P4Record } from "$lib/p4";
+  import { loadHistCols, saveHistCols } from "$lib/nav";
 
   let {
     mode,
@@ -44,6 +45,75 @@
   // A changelist newer than the synced one — i.e. not yet pulled into the workspace.
   function isAhead(r: P4Record): boolean {
     return Number.isFinite(anchorNum) && Number(r.change) > anchorNum;
+  }
+
+  // --- column widths -------------------------------------------------------
+  // The fixed-content columns (rev/change/date/action/user) are auto-fitted to
+  // their widest actual value — measured, not guessed, because the date is
+  // toLocaleString() and its width depends on the locale — and each is
+  // resizable, with manual widths persisted. Description takes the rest.
+  type ColKey = "rev" | "change" | "date" | "action" | "user";
+  let manualW = $state<Partial<Record<ColKey, number>>>(loadHistCols());
+  let probe: HTMLSpanElement | undefined = $state(); // supplies the real fonts
+  let monoProbe: HTMLSpanElement | undefined = $state();
+  let measureCtx: CanvasRenderingContext2D | null = null;
+
+  /** Width of `text` in the table's font (mono variant for the code-ish cells). */
+  function measure(text: string, mono: boolean): number {
+    const el = mono ? monoProbe : probe;
+    if (!el) return text.length * 7; // pre-mount fallback
+    measureCtx ??= document.createElement("canvas").getContext("2d");
+    if (!measureCtx) return text.length * 7;
+    measureCtx.font = getComputedStyle(el).font;
+    return measureCtx.measureText(text).width;
+  }
+
+  /** Fit a column to its widest value across the rows (clamped). */
+  function fitTo(pick: (r: P4Record) => string, mono: boolean, min: number, max = 260): number {
+    let widest = "";
+    for (const r of rows) {
+      const v = pick(r);
+      if (v.length > widest.length) widest = v;
+    }
+    return Math.min(max, Math.max(min, Math.ceil(measure(widest, mono)) + 20)); // + cell padding
+  }
+  // Auto-fit widths. The probes are read through measure(), so this recomputes
+  // once they mount; the minimums keep the header labels readable.
+  const autoW = $derived.by<Record<ColKey, number>>(() => {
+    void probe;
+    void monoProbe;
+    return {
+      rev: fitTo((r) => "#" + (r.rev ?? ""), true, 54, 110),
+      change: fitTo((r) => "▸@" + (r.change ?? ""), true, 66, 150),
+      date: fitTo((r) => fmtTime(r.time), false, 60, 200),
+      action: fitTo((r) => r.action ?? "", false, 56, 140),
+      user: fitTo((r) => r.user ?? "", false, 60, 240),
+    };
+  });
+  const w = $derived({ ...autoW, ...manualW });
+
+  function startResize(e: PointerEvent, key: ColKey) {
+    e.preventDefault();
+    e.stopPropagation();
+    const startX = e.clientX;
+    const startW = w[key];
+    const move = (ev: PointerEvent) => {
+      manualW = { ...manualW, [key]: Math.max(40, startW + (ev.clientX - startX)) };
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      saveHistCols(manualW); // remember the user's sizing
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  }
+  /** Double-click a divider: drop the manual width and auto-fit that column again. */
+  function autoFit(key: ColKey) {
+    const rest = { ...manualW };
+    delete rest[key];
+    manualW = rest;
+    saveHistCols(manualW);
   }
 
   // Search over changelist id, user, and description. Every whitespace-
@@ -159,8 +229,19 @@
       {/if}
     {:else if mode === "folder"}
       <table class="grid">
+        <colgroup>
+          <col style="width:{w.change}px" />
+          <col style="width:{w.date}px" />
+          <col style="width:{w.user}px" />
+          <col />
+        </colgroup>
         <thead>
-          <tr><th>Change</th><th>Date</th><th>User</th><th>Description</th></tr>
+          <tr>
+            <th>Change{@render grip("change")}</th>
+            <th>Date{@render grip("date")}</th>
+            <th>User{@render grip("user")}</th>
+            <th>Description</th>
+          </tr>
         </thead>
         <tbody>
           {#each shown as r (r.change)}
@@ -183,8 +264,23 @@
       </table>
     {:else}
       <table class="grid">
+        <colgroup>
+          <col style="width:{w.rev}px" />
+          <col style="width:{w.change}px" />
+          <col style="width:{w.date}px" />
+          <col style="width:{w.action}px" />
+          <col style="width:{w.user}px" />
+          <col />
+        </colgroup>
         <thead>
-          <tr><th>Rev</th><th>Change</th><th>Date</th><th>Action</th><th>User</th><th>Description</th></tr>
+          <tr>
+            <th>Rev{@render grip("rev")}</th>
+            <th>Change{@render grip("change")}</th>
+            <th>Date{@render grip("date")}</th>
+            <th>Action{@render grip("action")}</th>
+            <th>User{@render grip("user")}</th>
+            <th>Description</th>
+          </tr>
         </thead>
         <tbody>
           {#each shown as r (r.rev)}
@@ -225,7 +321,23 @@
       </div>
     {/if}
   </div>
+  <!-- Off-screen probes: supply the exact fonts the cells use, so column widths
+       are measured rather than guessed (see measure()). -->
+  <span class="probe" bind:this={probe}>0</span>
+  <span class="probe mono" bind:this={monoProbe}>0</span>
 </div>
+
+<!-- Column divider: drag to resize, double-click to auto-fit again. -->
+{#snippet grip(key: ColKey)}
+  <span
+    class="rz"
+    role="separator"
+    aria-orientation="vertical"
+    title="Drag to resize · double-click to fit contents"
+    onpointerdown={(e) => startResize(e, key)}
+    ondblclick={() => autoFit(key)}
+  ></span>
+{/snippet}
 
 <style>
   .panel {
@@ -282,11 +394,37 @@
   tr {
     cursor: pointer;
   }
-  td[title] {
-    max-width: 1px;
-  }
   .msg {
     padding: 12px;
+    font-size: 12px;
+  }
+  /* Fixed-width columns must not be stretched by long descriptions. */
+  table.grid {
+    table-layout: fixed;
+    width: 100%;
+  }
+  th {
+    position: relative; /* anchors the resize grip */
+  }
+  .rz {
+    position: absolute;
+    top: 0;
+    right: -3px;
+    width: 7px;
+    height: 100%;
+    cursor: col-resize;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  .rz:hover {
+    background: var(--accent);
+    opacity: 0.5;
+  }
+  /* Font probes for measuring — present in layout but invisible. */
+  .probe {
+    position: absolute;
+    visibility: hidden;
+    pointer-events: none;
     font-size: 12px;
   }
   .more {
