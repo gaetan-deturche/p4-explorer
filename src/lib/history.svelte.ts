@@ -9,7 +9,15 @@
 import { p4, openDiffWindow, type P4Conn, type P4Record } from "$lib/p4";
 import { editor, isUnrealAsset, unrealAssetName } from "$lib/editor.svelte";
 import type { HistEntry } from "$lib/cache";
-import { storeGet, storeSet, storeSetMem, hydrate, storeClearScope } from "$lib/store.svelte";
+import {
+  storeGet,
+  storeSet,
+  storeSetMem,
+  hydrate,
+  storeClearScope,
+  cacheGetSync,
+  cacheSet,
+} from "$lib/store.svelte";
 
 type Hooks = {
   conn: () => P4Conn;
@@ -48,6 +56,17 @@ async function safe<T>(fn: () => Promise<T[]>): Promise<T[]> {
 }
 
 const curMode = (): "folder" | "file" => (currentId.startsWith("R:") ? "file" : "folder");
+
+// Servers whose `filelog` can't be used (see selectFile). Remembered per server
+// so the failure is paid once, not on every file click; persisted so it survives
+// a restart. Cleared only by forgetting the server.
+const filelogKey = () => `filelog-unusable:${h?.conn().port ?? ""}`;
+function filelogUnusable(): boolean {
+  return !!h && cacheGetSync("nav", filelogKey()) === "1";
+}
+function markFilelogUnusable(): void {
+  if (h) cacheSet("nav", filelogKey(), "1");
+}
 
 // The stored entry for the current subject, read from the reactive map; null
 // until loaded. Memoized so the (up-to-CAP-row) parse runs once per change, not
@@ -241,12 +260,29 @@ export const history = {
     histVer++;
     if (storeGet(histScope(client), id) !== undefined) history.autoSelectHave();
 
+    // Some servers can't answer `filelog` for a file at all: it walks integration
+    // history, which on a heavily-branched depot either blows the server's
+    // maxscanrows (~35s, then an error) or is refused outright when the
+    // integrations reach depots the account can't read (Epic's licensee server
+    // does both, depending on path syntax). `p4 changes <file>` needs none of
+    // that, so fall back to the changelists that touched the file — and remember
+    // per server, so later clicks don't pay the timeout again.
     const q = h.toQuery(depotFile);
+    if (filelogUnusable()) {
+      await history.loadFolder(depotFile); // changelists for this file
+      return;
+    }
     const [rev, fs] = await Promise.all([
       safe(() => p4.filelog(h!.conn(), q, 200)),
       safe(() => p4.fstat(h!.conn(), q)),
     ]);
     if (seq !== loadSeq) return;
+    if (rev.length === 0 && fs.length > 0) {
+      // fstat sees the file but filelog returned nothing → filelog is the problem.
+      markFilelogUnusable();
+      await history.loadFolder(depotFile);
+      return;
+    }
     writeHist(client, id, { mode: "file", subject: depotFile, rows: rev, have: fs[0]?.haveRev ?? "" });
     history.autoSelectHave();
   },
