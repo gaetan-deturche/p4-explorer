@@ -263,11 +263,7 @@
       class="main mono"
       class:untracked={node.untracked}
       class:deleted={node.deleted}
-      title={node.deleted
-        ? "Deleted at head — it no longer exists in the depot and can't be synced (its history is still browsable)"
-        : node.untracked
-          ? "Not in the depot (ignored / uncommitted)"
-          : node.path}
+      title={node.untracked ? "Not in the depot (ignored / uncommitted)" : node.path}
       onclick={(e) => clickNode(node, e)}
       ondblclick={() => node.isDir && onExpand(node)}
       oncontextmenu={(e) => {
@@ -281,8 +277,14 @@
       <span class="name">{node.name}</span>
       {#if node.loading}<span class="dim sp">…</span>{/if}
       {#if node.deleted}
-        <!-- Not a sync state: it's gone from the depot, so no dot. -->
-        <span class="delmark" title="deleted at head">deleted</span>
+        <!-- Not a sync state: it's gone from the depot, so no dot. The row's own
+             tooltip stays the path (like any file); the explanation lives here. -->
+        <span
+          class="delmark"
+          title="Deleted at head — no longer in the depot, so it can't be synced; its history is still browsable"
+        >
+          deleted
+        </span>
       {:else if !node.isDir}
         {@const s = sync(node)}
         <span class="sync {s.cls}" title={s.title}>{s.label}</span>
