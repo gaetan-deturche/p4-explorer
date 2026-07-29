@@ -59,13 +59,60 @@
     const el = body?.querySelector(`[data-row="${blocks[current]}"]`);
     el?.scrollIntoView({ block: "center" });
   }
+  /** The row index at the top of the viewport — the anchor for "next/previous
+   *  change", so navigation follows where the user SCROLLED to rather than the
+   *  last button press (jumping from the middle of a file used to fly back to
+   *  change 2 because `current` was still 1). */
+  function topRow(): number {
+    if (!body) return 0;
+    const top = body.getBoundingClientRect().top;
+    for (const el of body.querySelectorAll<HTMLElement>("[data-row]")) {
+      const b = el.getBoundingClientRect();
+      if (b.bottom > top + 1) return Number(el.dataset.row);
+    }
+    return rows.length;
+  }
+  /** Step to the next/previous change block relative to the visible position. */
+  function step(dir: 1 | -1) {
+    if (!blocks.length) return;
+    const anchor = topRow();
+    // Which block are we inside/at? Use it so repeated presses advance one block
+    // at a time even when a block spans many rows.
+    let i: number;
+    if (dir === 1) {
+      i = blocks.findIndex((r) => r > anchor);
+      // Inside a block already → that block's successor is what "next" means.
+      if (i === -1) i = blocks.length - 1;
+    } else {
+      // Last block strictly above the anchor (skip the one we're sitting on).
+      i = -1;
+      for (let k = 0; k < blocks.length; k++) {
+        if (blocks[k] < anchor - 1) i = k;
+        else break;
+      }
+      if (i === -1) i = 0;
+    }
+    goTo(i);
+  }
+  /** Keep the "N / M changes" counter in step with scrolling: it should say
+   *  where you ARE, not where you last jumped from. */
+  function syncCounter() {
+    if (!blocks.length) return;
+    const anchor = topRow();
+    let i = 0;
+    for (let k = 0; k < blocks.length; k++) {
+      if (blocks[k] <= anchor + 2) i = k; // +2: a block just under the top edge counts
+      else break;
+    }
+    current = i;
+  }
   function onKey(e: KeyboardEvent) {
     if (e.key === "F7" && e.shiftKey) {
       e.preventDefault();
-      goTo(current - 1);
+      step(-1);
     } else if (e.key === "F7") {
       e.preventDefault();
-      goTo(current + 1);
+      step(1);
     } else if (e.key === "Escape") {
       window.close();
     }
@@ -111,24 +158,20 @@
   <div class="head">
     <span class="label mono" title={leftPath}>{leftLabel}</span>
     <div class="nav">
-      <button onclick={() => goTo(current - 1)} disabled={current <= 0} title="Previous change (Shift+F7)">
+      <!-- Enabled whenever there are changes: the step direction is resolved
+           against the visible position, not a remembered index. -->
+      <button onclick={() => step(-1)} disabled={!blocks.length} title="Previous change (Shift+F7)">
         ▲
       </button>
       <span class="count dim">
         {#if loading}…{:else if blocks.length}{current + 1} / {blocks.length} changes{:else}no changes{/if}
       </span>
-      <button
-        onclick={() => goTo(current + 1)}
-        disabled={current >= blocks.length - 1}
-        title="Next change (F7)"
-      >
-        ▼
-      </button>
+      <button onclick={() => step(1)} disabled={!blocks.length} title="Next change (F7)">▼</button>
     </div>
     <span class="label right mono" title={rightPath}>{rightLabel}</span>
   </div>
 
-  <div class="scroll body" bind:this={body}>
+  <div class="scroll body" bind:this={body} onscroll={syncCounter}>
     {#if loading}
       <div class="msg dim">Loading…</div>
     {:else if error}
