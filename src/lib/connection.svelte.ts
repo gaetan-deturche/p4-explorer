@@ -265,7 +265,18 @@ export const connection = {
       // log in on demand (per-server tickets can be missing or expired). Skip the
       // check when the caller (relogin) has just logged in — some servers don't
       // report the fresh ticket via `login -s` immediately, which re-prompted.
-      const authed = opts?.skipAuth || (await p4.loginStatus(conn).catch(() => true));
+      // Authenticated? A failing `login -s` can mean a missing/expired ticket
+      // (→ prompt) OR a charset mismatch (→ fix the charset and re-check; the
+      // ticket may be perfectly valid — prompting for a password would be wrong
+      // AND recur every boot).
+      let authed = opts?.skipAuth === true;
+      if (!authed) {
+        let st = await p4.loginStatus(conn).catch(() => ({ ok: true, error: "" }));
+        if (!st.ok && adjustCharset(conn, st.error)) {
+          st = await p4.loginStatus(conn).catch(() => ({ ok: true, error: "" }));
+        }
+        authed = st.ok;
+      }
       if (!authed && !(await loginLoop(conn))) {
         connected = false;
         return; // user cancelled — stay disconnected, no success toast

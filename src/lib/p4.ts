@@ -159,7 +159,8 @@ export const p4 = {
   swarmUrl: (conn: P4Conn) => g<string>("swarm_url", { conn }),
   swarmReview: (conn: P4Conn, change: string) =>
     g<ReviewInfo | null>("swarm_review", { conn, change }),
-  loginStatus: (conn: P4Conn) => g<boolean>("p4_login_status", { conn }),
+  /** Authenticated? `error` carries the p4 text when not (charset vs ticket). */
+  loginStatus: (conn: P4Conn) => g<{ ok: boolean; error: string }>("p4_login_status", { conn }),
   ticketUser: (conn: P4Conn) => g<string>("p4_ticket_user", { conn }),
   login: (conn: P4Conn, password: string) => g<void>("p4_login", { conn, password }),
   trust: (conn: P4Conn) => g<void>("p4_trust", { conn }),

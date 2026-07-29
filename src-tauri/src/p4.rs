@@ -106,14 +106,19 @@ impl P4Conn {
 const E_WARN: i64 = 2;
 const E_FAILED: i64 = 3;
 
-/// Apply the connection's charset choice to a p4 command via `-C <charset>`.
-/// "" means leave the ambient P4CHARSET alone; any explicit value ("none" for a
-/// non-unicode client, "utf8" for a unicode one, …) overrides it — including a
-/// P4CHARSET set via `p4 set` (registry), which clearing the env would NOT. Must
-/// be called after the global args, before the subcommand.
+/// Apply the connection's charset choice to a p4 command via `-C <charset>`
+/// AND the P4CHARSET environment variable. "" means leave the ambient P4CHARSET
+/// alone; any explicit value ("none" for a non-unicode client, "utf8" for a
+/// unicode one, …) overrides it — including a P4CHARSET set via `p4 set`
+/// (registry), which clearing the env would NOT. The env var matters for
+/// `sync --parallel`: the parallel transfer threads open their own connections
+/// and re-read P4CHARSET from env/registry, IGNORING `-C` — with a registry
+/// utf8 against a non-unicode server every thread fails "Unicode clients
+/// require a unicode enabled server" and the sync transfers nothing.
 fn apply_charset(cmd: &mut Command, conn: &P4Conn) {
     if !conn.charset.is_empty() {
         cmd.arg("-C").arg(&conn.charset);
+        cmd.env("P4CHARSET", &conn.charset);
     }
 }
 

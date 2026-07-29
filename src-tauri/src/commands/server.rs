@@ -108,8 +108,17 @@ pub async fn swarm_review(conn: P4Conn, change: String) -> Result<Option<ReviewI
 
 /// Whether the connection is currently authenticated (`p4 login -s` exits 0).
 /// True also when the server needs no login (security level 0).
+/// Whether the session is authenticated, plus the p4 error text when it isn't —
+/// the caller must tell "no/expired ticket" (→ prompt for a password) apart
+/// from e.g. a charset mismatch (→ fix the charset and re-check, no prompt).
+#[derive(serde::Serialize)]
+pub struct LoginStatus {
+    pub ok: bool,
+    pub error: String,
+}
+
 #[tauri::command]
-pub async fn p4_login_status(conn: P4Conn) -> Result<bool, String> {
+pub async fn p4_login_status(conn: P4Conn) -> Result<LoginStatus, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let mut cmd = p4::base_command(&conn);
         cmd.arg("login").arg("-s");
@@ -117,8 +126,10 @@ pub async fn p4_login_status(conn: P4Conn) -> Result<bool, String> {
         let out = cmd
             .output()
             .map_err(|e| format!("failed to launch p4: {e} (is p4 on PATH?)"))?;
-        p4::log_command_err(&["login", "-s"], start.elapsed().as_millis(), out.status.success(), &if out.status.success() { String::new() } else { p4::extract_error(&out.stdout, &out.stderr) });
-        Ok(out.status.success())
+        let ok = out.status.success();
+        let error = if ok { String::new() } else { p4::extract_error(&out.stdout, &out.stderr) };
+        p4::log_command_err(&["login", "-s"], start.elapsed().as_millis(), ok, &error);
+        Ok(LoginStatus { ok, error })
     })
     .await
     .map_err(|e| format!("login-status task failed: {e}"))?
