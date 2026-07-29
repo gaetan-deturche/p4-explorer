@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tick } from "svelte";
   import { fmtTime, firstLine, type P4Record } from "$lib/p4";
   import { loadHistCols, saveHistCols } from "$lib/nav";
 
@@ -153,6 +154,35 @@
     });
   });
 
+  /** Scroll the synced changelist / revision into view (the header badge). It
+   *  clears an active search first if that row is filtered out, and loads older
+   *  history when the synced point is beyond what's fetched — the have CL can be
+   *  well behind head on a stale workspace. */
+  async function jumpToHave() {
+    const key = mode === "folder" ? haveChange : haveRev;
+    if (!key) return;
+    const sel = mode === "folder" ? `[data-change="${key}"]` : `[data-rev="${key}"]`;
+    const present = () =>
+      mode === "folder" ? rows.some((r) => r.change === key) : rows.some((r) => r.rev === key);
+    // A filter would hide it: clear the query rather than silently doing nothing.
+    if (query.trim() && present()) query = "";
+    if (!present() && onDeepen && !exhausted && !deepening) {
+      lenBeforeDeepen = rows.length;
+      onDeepen(); // fetch older history, then land on it below
+    }
+    // Wait for the row (a deepen streams in progressively), then centre it.
+    for (let i = 0; i < 40; i++) {
+      await tick();
+      const el = body?.querySelector(sel);
+      if (el) {
+        el.scrollIntoView({ block: "center" });
+        return;
+      }
+      if (!deepening && i > 2) break; // nothing loading and still absent
+      await new Promise((r) => setTimeout(r, 150));
+    }
+  }
+
   // Infinite scroll: nearing the bottom loads older history automatically.
   // `exhausted` latches when a deepen adds no rows (true end of history) so we
   // stop asking; it resets when the subject changes.
@@ -203,11 +233,21 @@
       spellcheck="false"
     />
     {#if mode === "folder" && haveChange}
-      <span class="synced-badge" title="Workspace is synced up to this changelist">
+      <button
+        class="synced-badge"
+        title="Workspace is synced up to this changelist — click to scroll to it"
+        onclick={jumpToHave}
+      >
         synced @ {haveChange}
-      </span>
+      </button>
     {:else if mode === "file" && haveRev}
-      <span class="synced-badge" title="You have this revision synced">have #{haveRev}</span>
+      <button
+        class="synced-badge"
+        title="You have this revision synced — click to scroll to it"
+        onclick={jumpToHave}
+      >
+        have #{haveRev}
+      </button>
     {/if}
   </div>
 
@@ -246,6 +286,7 @@
         <tbody>
           {#each shown as r (r.change)}
             <tr
+              data-change={r.change}
               class:have={r.change === haveChange}
               class:ahead={isAhead(r)}
               class:selected={r.change === selectedChange}
@@ -285,6 +326,7 @@
         <tbody>
           {#each shown as r (r.rev)}
             <tr
+              data-rev={r.rev}
               class:have={r.rev === haveRev}
               class:ahead={isAhead(r)}
               class:selected={r.change === selectedChange}
@@ -368,6 +410,8 @@
     padding: 2px 8px;
   }
   .synced-badge {
+    cursor: pointer;
+    font: inherit;
     font-size: 11px;
     color: var(--have);
     background: var(--have-bg);
@@ -375,6 +419,10 @@
     border-radius: 10px;
     padding: 1px 8px;
     white-space: nowrap;
+  }
+  .synced-badge:hover {
+    background: var(--have);
+    color: var(--bg-panel);
   }
   .body {
     flex: 1;
