@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, tick } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { diffLines, changeBlocks, type DiffRow } from "$lib/linediff";
   import { langForFile, tokenizeLines, type TokenRun } from "$lib/syntax";
@@ -32,7 +32,14 @@
       rows = diffLines(l, r);
       blocks = changeBlocks(rows);
       loading = false;
-      if (blocks.length) goTo(0); // land on the first change, like P4Merge
+      // Land on the first change, like P4Merge. `await tick()` matters: the rows
+      // are only rendered after Svelte flushes, and goTo scrolls to a [data-row]
+      // element — without it the query finds nothing and the window stays at the
+      // top of the file.
+      if (blocks.length) {
+        await tick();
+        goTo(0);
+      }
       // Syntax coloration in the background — the diff is already readable, the
       // colors land when Shiki finishes. Language from the file paths (the temp
       // names keep the real extension last; labels carry #rev suffixes).
@@ -56,8 +63,17 @@
   function goTo(i: number) {
     if (!blocks.length) return;
     current = Math.max(0, Math.min(blocks.length - 1, i));
-    const el = body?.querySelector(`[data-row="${blocks[current]}"]`);
-    el?.scrollIntoView({ block: "center" });
+    const row = blocks[current];
+    const el = body?.querySelector(`[data-row="${row}"]`);
+    if (el) {
+      el.scrollIntoView({ block: "center" });
+      return;
+    }
+    // Not mounted yet (first paint) — try again next frame rather than silently
+    // leaving the view where it was.
+    requestAnimationFrame(() => {
+      body?.querySelector(`[data-row="${row}"]`)?.scrollIntoView({ block: "center" });
+    });
   }
   /** The row at the VERTICAL CENTRE of the viewport — the anchor for "where am I".
    *  Navigation follows where you scrolled rather than the last button press, and
