@@ -137,8 +137,9 @@ export const p4 = {
   cancelOfflineScan: () => g<void>("cancel_offline_scan"),
   resync: (conn: P4Conn, files: string[], force: boolean) =>
     call("p4_resync", { conn, files, force }),
-  syncStream: (conn: P4Conn, path?: string) =>
-    g<number>("p4_sync_stream", { conn, path: path ?? null }),
+  /** Streaming sync of one or more specs (empty list = whole workspace). */
+  syncStream: (conn: P4Conn, paths: string[] = []) =>
+    g<number>("p4_sync_stream", { conn, paths }),
   syncCancel: () => g<void>("sync_cancel"),
   search: (conn: P4Conn, root: string, term: string, max = 300) =>
     call("p4_search", { conn, root, term, max }),

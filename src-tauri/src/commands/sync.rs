@@ -10,7 +10,7 @@ use crate::p4::{self, P4Conn};
 fn sync_run(
     conn: &P4Conn,
     pids: &std::sync::Mutex<Vec<u32>>,
-    path: Option<&str>,
+    paths: &[String],
     preview: bool,
     parallel: bool,
     window: Option<&tauri::Window>,
@@ -45,11 +45,9 @@ fn sync_run(
         cmd.arg(PARALLEL);
         log_args.push(PARALLEL.into());
     }
-    if let Some(p) = path {
-        if !p.is_empty() {
-            cmd.arg(p);
-            log_args.push(p.to_string());
-        }
+    for p in paths.iter().filter(|p| !p.is_empty()) {
+        cmd.arg(p);
+        log_args.push(p.clone());
     }
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     let started = std::time::Instant::now();
@@ -162,7 +160,7 @@ pub async fn p4_sync_stream(
     window: tauri::Window,
     state: tauri::State<'_, crate::index::AppState>,
     conn: P4Conn,
-    path: Option<String>,
+    paths: Vec<String>,
 ) -> Result<usize, String> {
     use std::sync::atomic::Ordering;
 
@@ -171,11 +169,10 @@ pub async fn p4_sync_stream(
     abort.store(false, Ordering::SeqCst);
 
     let count = tauri::async_runtime::spawn_blocking(move || {
-        let p = path.as_deref();
         // Try a parallel sync; if the server rejects parallel, retry sequentially.
-        match sync_run(&conn, &pids, p, false, true, Some(&window)) {
+        match sync_run(&conn, &pids, &paths, false, true, Some(&window)) {
             Err(e) if e.to_lowercase().contains("parallel") => {
-                sync_run(&conn, &pids, p, false, false, Some(&window))
+                sync_run(&conn, &pids, &paths, false, false, Some(&window))
             }
             other => other,
         }

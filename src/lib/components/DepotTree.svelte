@@ -19,8 +19,58 @@
     onExpand: (node: TreeNode) => void; // triangle / double-click: toggle + load
     onSearch?: (term: string) => Promise<P4Record[]>; // fuzzy index search (optional)
     onOpenResult?: (depotFile: string) => void; // click a search result
-    onContext?: (node: TreeNode, e: MouseEvent) => void; // right-click a node (optional)
+    // right-click a node → (node, event, selected nodes incl. this one)
+    onContext?: (node: TreeNode, e: MouseEvent, selection: TreeNode[]) => void;
   } = $props();
+
+  // Multi-selection (Ctrl/Shift click), keyed by depot path. A plain click still
+  // navigates (onSelect) and resets the selection to that node, so the common
+  // case is unchanged; Ctrl/Shift only build a set for the context actions.
+  let selected = $state<Set<string>>(new Set());
+  let anchor: string | null = null;
+  /** Visible rows in render order — the range Shift+click spans. */
+  const visibleNodes = $derived.by(() => {
+    const out: TreeNode[] = [];
+    const walk = (n: TreeNode) => {
+      out.push(n);
+      if (n.isDir && n.expanded) for (const c of n.children) walk(c);
+    };
+    if (root) walk(root);
+    return out;
+  });
+  function clickNode(node: TreeNode, e: MouseEvent) {
+    if (e.shiftKey && anchor) {
+      const paths = visibleNodes.map((n) => n.path);
+      const a = paths.indexOf(anchor);
+      const b = paths.indexOf(node.path);
+      if (a >= 0 && b >= 0) {
+        const [lo, hi] = a < b ? [a, b] : [b, a];
+        selected = new Set(paths.slice(lo, hi + 1));
+        return; // range select only — don't navigate
+      }
+    }
+    if (e.ctrlKey || e.metaKey) {
+      const n = new Set(selected);
+      if (n.has(node.path)) n.delete(node.path);
+      else n.add(node.path);
+      selected = n;
+      anchor = node.path;
+      return; // toggle only — don't navigate
+    }
+    selected = new Set([node.path]);
+    anchor = node.path;
+    onSelect(node);
+  }
+  /** The nodes the context menu acts on: the selection when the clicked node is
+   *  part of it, else just that node (which becomes the new selection). */
+  function contextSelection(node: TreeNode): TreeNode[] {
+    if (!selected.has(node.path)) {
+      selected = new Set([node.path]);
+      anchor = node.path;
+      return [node];
+    }
+    return visibleNodes.filter((n) => selected.has(n.path));
+  }
 
   let query = $state("");
   let results = $state<P4Record[] | null>(null); // null = show tree
@@ -196,7 +246,12 @@
 {/snippet}
 
 {#snippet nodeRow(node: TreeNode, depth: number)}
-  <div class="row" class:selected={node.path === selectedPath} style="padding-left:{depth * 14 + 4}px">
+  <div
+    class="row"
+    class:selected={node.path === selectedPath}
+    class:multisel={selected.size > 1 && selected.has(node.path)}
+    style="padding-left:{depth * 14 + 4}px"
+  >
     {#if node.isDir}
       <button class="tw" title="Expand / collapse" onclick={() => onExpand(node)}>
         {node.expanded ? "▾" : "▸"}
@@ -208,12 +263,12 @@
       class="main mono"
       class:untracked={node.untracked}
       title={node.untracked ? "Not in the depot (ignored / uncommitted)" : node.path}
-      onclick={() => onSelect(node)}
+      onclick={(e) => clickNode(node, e)}
       ondblclick={() => node.isDir && onExpand(node)}
       oncontextmenu={(e) => {
         if (onContext) {
           e.preventDefault();
-          onContext(node, e);
+          onContext(node, e, contextSelection(node));
         }
       }}
     >
@@ -285,6 +340,12 @@
   }
   .row.selected {
     background: var(--bg-sel);
+  }
+  /* Multi-selected rows (Ctrl/Shift click) — distinct from the navigated row. */
+  .row.multisel {
+    background: var(--bg-hover);
+    outline: 1px solid var(--accent);
+    outline-offset: -1px;
   }
   .row:hover:not(.selected) {
     background: var(--bg-hover);

@@ -330,13 +330,25 @@ pub fn run_full(conn: &P4Conn, args: &[&str]) -> Result<(Vec<Record>, Vec<String
     // partially-successful batch is never re-run (it would redo its writes).
     // The failure surfaces either as Err (no data records) or as error strings
     // alongside an empty record set.
-    match run_full_once(conn, args) {
-        Err(e) if is_auth_error(&e) => run_full_once(conn, args),
-        Ok((recs, errs)) if recs.is_empty() && errs.iter().any(|e| is_auth_error(e)) => {
-            run_full_once(conn, args)
-        }
-        other => other,
+    let auth_failed = |r: &Result<(Vec<Record>, Vec<String>), String>| match r {
+        Err(e) => is_auth_error(e),
+        Ok((recs, errs)) => recs.is_empty() && errs.iter().any(|e| is_auth_error(e)),
+    };
+    let first = run_full_once(conn, args);
+    if !auth_failed(&first) {
+        return first;
     }
+    // Self-healing retry: resolve the cached ticket and pass it explicitly, so a
+    // command whose connection failed to look the ticket up succeeds even when
+    // the caller never pinned one (any conn built before the session pinned its
+    // ticket, or a store holding an older copy).
+    let mut c = conn.clone();
+    if c.ticket.is_empty() {
+        if let Some(t) = ticket(conn) {
+            c.ticket = t;
+        }
+    }
+    run_full_once(&c, args)
 }
 
 fn run_full_once(conn: &P4Conn, args: &[&str]) -> Result<(Vec<Record>, Vec<String>), String> {
@@ -383,6 +395,9 @@ pub fn run_killable(
         cmd.arg(g);
     }
     apply_charset(&mut cmd, conn);
+    if !conn.ticket.is_empty() {
+        cmd.env("P4PASSWD", &conn.ticket); // see base_command
+    }
     for a in args {
         cmd.arg(a);
     }

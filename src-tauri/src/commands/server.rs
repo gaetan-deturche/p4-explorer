@@ -120,7 +120,32 @@ pub struct LoginStatus {
 #[tauri::command]
 pub async fn p4_login_status(conn: P4Conn) -> Result<LoginStatus, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let mut cmd = p4::base_command(&conn);
+        let once = || -> Result<LoginStatus, String> {
+            let mut cmd = p4::base_command(&conn);
+            cmd.arg("login").arg("-s");
+            let start = std::time::Instant::now();
+            let out = cmd
+                .output()
+                .map_err(|e| format!("failed to launch p4: {e} (is p4 on PATH?)"))?;
+            let ok = out.status.success();
+            let error = if ok { String::new() } else { p4::extract_error(&out.stdout, &out.stderr) };
+            p4::log_command_err(&["login", "-s"], start.elapsed().as_millis(), ok, &error);
+            Ok(LoginStatus { ok, error })
+        };
+        // Retry on an auth error, like p4::run_full: this check gates the password
+        // prompt, so a lookup miss must not prompt for a password that isn't
+        // needed. The retry passes the cached ticket explicitly when we have one.
+        let st = once()?;
+        if st.ok || !p4::is_auth_error(&st.error) {
+            return Ok(st);
+        }
+        let mut c = conn.clone();
+        if c.ticket.is_empty() {
+            if let Some(t) = p4::ticket(&conn) {
+                c.ticket = t;
+            }
+        }
+        let mut cmd = p4::base_command(&c);
         cmd.arg("login").arg("-s");
         let start = std::time::Instant::now();
         let out = cmd

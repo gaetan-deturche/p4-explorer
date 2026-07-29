@@ -4,7 +4,7 @@
   import { isReleaseBuild, emptyConn, firstLine, setClipboard, p4, type P4Conn, type P4Record } from "$lib/p4";
   import { localPathFor } from "$lib/cache";
   import { updates } from "$lib/updates.svelte";
-  import { sync } from "$lib/sync.svelte";
+  import { sync, type SyncTarget } from "$lib/sync.svelte";
   import { pending } from "$lib/pending.svelte";
   import { history } from "$lib/history.svelte";
   import { browse } from "$lib/browse.svelte";
@@ -51,7 +51,13 @@
   let ctxMenu = $state<{ x: number; y: number; change: string } | null>(null);
   let streamCtx = $state<{ x: number; y: number; stream: string } | null>(null);
   let pendingCtx = $state<{ x: number; y: number; cl: P4Record } | null>(null);
-  let treeCtx = $state<{ x: number; y: number; path: string; isDir: boolean } | null>(null);
+  let treeCtx = $state<{
+    x: number;
+    y: number;
+    path: string;
+    isDir: boolean;
+    targets: SyncTarget[]; // the tree selection the actions apply to
+  } | null>(null);
 
   // In-app confirm dialog (replaces window.confirm).
   let confirmState = $state<{
@@ -364,9 +370,9 @@
   }
 
   // --- depot tree: right-click to sync / reconcile just this path ------------
-  function onTreeContext(path: string, isDir: boolean, e: MouseEvent) {
+  function onTreeContext(path: string, isDir: boolean, e: MouseEvent, targets: SyncTarget[]) {
     if (!connection.connected || !conn.client) return;
-    treeCtx = { x: e.clientX, y: e.clientY, path, isDir };
+    treeCtx = { x: e.clientX, y: e.clientY, path, isDir, targets };
   }
 
   // --- Streams tab: switching reconfigures the current workspace --------------
@@ -550,7 +556,13 @@
           onExpand={(n) => browse.expandNode(n)}
           onSearch={(t) => browse.searchDepot(t)}
           onOpenResult={(f) => browse.openResult(f)}
-          onContext={(n, e) => onTreeContext(n.path, n.isDir, e)}
+          onContext={(n, e, sel) =>
+            onTreeContext(
+              n.path,
+              n.isDir,
+              e,
+              sel.map((x) => ({ path: x.path, isDir: x.isDir })),
+            )}
         />
       </section>
 
@@ -763,6 +775,10 @@
   {@const dir = treeCtx.isDir}
   {@const kind = dir ? "folder" : "file"}
   {@const name = p.replace(/\/+$/, "").split("/").pop() || p}
+  <!-- Sync/unsync/reconcile act on the whole tree selection (Ctrl/Shift click);
+       a single right-clicked node is just a selection of one. -->
+  {@const tgts = treeCtx.targets}
+  {@const what = tgts.length > 1 ? `${tgts.length} items` : `${kind} “${name}”`}
   <ContextMenu
     x={treeCtx.x}
     y={treeCtx.y}
@@ -781,10 +797,10 @@
             },
           ]),
       copyMenu(p),
-      { label: `Sync ${kind} “${name}”`, action: () => sync.syncPath(p, dir) },
+      { label: `Sync ${what}`, action: () => sync.syncPath(tgts) },
       // The inverse of sync: drop the local copy, keep the depot untouched.
-      { label: `Unsync ${kind} “${name}”…`, action: () => sync.unsyncPath(p, dir) },
-      { label: `Reconcile ${kind} “${name}”`, action: () => sync.reconcilePath(p, dir) },
+      { label: `Unsync ${what}…`, action: () => sync.unsyncPath(tgts) },
+      { label: `Reconcile ${what}`, action: () => sync.reconcilePath(tgts) },
     ]}
     onClose={() => (treeCtx = null)}
   />

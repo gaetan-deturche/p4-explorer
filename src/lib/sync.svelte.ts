@@ -33,6 +33,22 @@ type Progress = {
 type ErrItem = { line: string; file: string | null };
 type ErrReport = { title: string; items: ErrItem[]; path: string | undefined };
 
+/** A sync/unsync/reconcile target: a depot path and whether it's a folder. */
+export type SyncTarget = { path: string; isDir: boolean };
+
+/** Depot specs for the targets (folders get the `/...` wildcard). */
+function toSpecs(targets: SyncTarget[]): string[] {
+  return targets.map((t) => (t.isDir ? t.path.replace(/\/+$/, "") + "/..." : t.path));
+}
+/** Short label for a target set: the single item's name, else "N items". */
+function targetLabel(targets: SyncTarget[]): string {
+  if (targets.length === 1) {
+    const p = targets[0].path.replace(/\/+$/, "");
+    return p.split("/").pop() || p;
+  }
+  return `${targets.length} items`;
+}
+
 let h: Hooks | null = null;
 let cancelled = false;
 let errorItems: ErrItem[] = [];
@@ -67,7 +83,7 @@ export const sync = {
 
   /** Run a streaming sync with the live progress dialog; open the error report
    *  afterwards if any files failed. Returns files synced (null on cancel/error). */
-  async run(title: string, path: string | undefined): Promise<number | null> {
+  async run(title: string, specs: string[] = []): Promise<number | null> {
     if (!h) return null;
     cancelled = false;
     errorItems = [];
@@ -86,9 +102,13 @@ export const sync = {
       }
     });
     try {
-      const n = await p4.syncStream(h.conn(), path);
+      const n = await p4.syncStream(h.conn(), specs);
       progress = null;
-      if (errorItems.length > 0) errors = { title, items: [...errorItems], path };
+      if (errorItems.length > 0) {
+        // `path` seeds the retry-all target when no per-file paths were parsed;
+        // only meaningful for a single spec.
+        errors = { title, items: [...errorItems], path: specs.length === 1 ? specs[0] : undefined };
+      }
       else h.setNotice(n > 0 ? `Synced ${n} file${n === 1 ? "" : "s"}.` : "Already up to date.");
       return n;
     } catch (e) {
@@ -121,7 +141,7 @@ export const sync = {
     }
     h.setSyncing(true);
     try {
-      const n = await this.run("Sync workspace", undefined);
+      const n = await this.run("Sync workspace");
       if (n !== null) {
         await h.refresh();
         h.loadPending(); // offline state changed — refresh list + rescan
@@ -149,7 +169,7 @@ export const sync = {
     }
     h.setSyncing(true);
     try {
-      const n = await this.run(`Update to @${change}`, spec);
+      const n = await this.run(`Update to @${change}`, [spec]);
       if (n !== null) {
         await h.refresh();
         h.loadPending();
@@ -159,14 +179,12 @@ export const sync = {
     }
   },
 
-  /** Sync a single depot path (file or folder) to the latest revision. */
-  async syncPath(path: string, isDir: boolean) {
-    if (!h || !h.connected() || h.busy()) return;
-    const spec = isDir ? `${path}/...` : path;
-    const name = path.replace(/\/+$/, "").split("/").pop() || path;
+  /** Sync depot paths (files and/or folders) to the latest revision. */
+  async syncPath(targets: SyncTarget[]) {
+    if (!h || !h.connected() || h.busy() || !targets.length) return;
     h.setSyncing(true);
     try {
-      const n = await this.run(`Sync ${name}`, spec);
+      const n = await this.run(`Sync ${targetLabel(targets)}`, toSpecs(targets));
       if (n !== null) {
         await h.refresh();
         h.loadPending();
@@ -180,15 +198,14 @@ export const sync = {
    *  the have records, so it's the true inverse of a sync — nothing is opened or
    *  marked for delete in the depot, and a later sync brings it back. p4 keeps
    *  files that are open or writable (noclobber), so local work isn't lost. */
-  async unsyncPath(path: string, isDir: boolean) {
-    if (!h || !h.connected() || h.busy()) return;
-    const spec = isDir ? `${path}/...#none` : `${path}#none`;
-    const name = path.replace(/\/+$/, "").split("/").pop() || path;
-    const kind = isDir ? "folder" : "file";
+  async unsyncPath(targets: SyncTarget[]) {
+    if (!h || !h.connected() || h.busy() || !targets.length) return;
+    const specs = toSpecs(targets).map((sp) => `${sp}#none`);
+    const what = targets.length > 1 ? `these ${targets.length} paths` : "this path";
     if (
       !(await h.askConfirm(
-        `${spec}\n\nRemove the local copy of this ${kind}? The files are deleted from disk and the workspace records them as not synced — nothing is marked for delete in the depot, and syncing again restores them. Open or modified files are kept.`,
-        `Unsync ${kind}`,
+        `${specs.join("\n")}\n\nRemove the local copy of ${what}? The files are deleted from disk and the workspace records them as not synced — nothing is marked for delete in the depot, and syncing again restores them. Open or modified files are kept.`,
+        `Unsync ${targetLabel(targets)}`,
         "Unsync",
       ))
     ) {
@@ -196,7 +213,7 @@ export const sync = {
     }
     h.setSyncing(true);
     try {
-      const n = await this.run(`Unsync ${name}`, spec);
+      const n = await this.run(`Unsync ${targetLabel(targets)}`, specs);
       if (n !== null) {
         await h.refresh();
         h.loadPending();
@@ -206,13 +223,14 @@ export const sync = {
     }
   },
 
-  /** Reconcile offline work under a single depot path (file or folder). */
-  async reconcilePath(path: string, isDir: boolean) {
-    if (!h || !h.connected() || h.busy()) return;
-    const spec = isDir ? `${path}/...` : path;
+  /** Reconcile offline work under depot paths (files and/or folders). */
+  async reconcilePath(targets: SyncTarget[]) {
+    if (!h || !h.connected() || h.busy() || !targets.length) return;
+    const specs = toSpecs(targets);
+    const what = targets.length > 1 ? `these ${targets.length} paths` : "this path";
     if (
       !(await h.askConfirm(
-        `${spec}\n\nReconcile offline work under this path? This opens files changed, added, or deleted outside Perforce into the default changelist.`,
+        `${specs.join("\n")}\n\nReconcile offline work under ${what}? This opens files changed, added, or deleted outside Perforce into the default changelist.`,
         "Reconcile offline work",
         "Reconcile",
       ))
@@ -221,7 +239,8 @@ export const sync = {
     }
     h.setReconciling(true);
     try {
-      const rows = await p4.reconcile(h.conn(), spec);
+      // Exact specs (not a single path) — reconcileFiles takes a list.
+      const rows = await p4.reconcileFiles(h.conn(), specs);
       const n = rows.length;
       h.setNotice(
         n > 0 ? `Reconciled ${n} file${n === 1 ? "" : "s"} into the default changelist.` : "Nothing to reconcile.",
