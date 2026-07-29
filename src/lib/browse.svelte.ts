@@ -23,7 +23,13 @@ import {
   storeSetMem,
   hydrate,
 } from "$lib/store.svelte";
-import { loadBrowseSource, saveBrowseSource, type ViewState } from "$lib/nav";
+import {
+  loadBrowseSource,
+  saveBrowseSource,
+  loadShowDeleted,
+  saveShowDeleted,
+  type ViewState,
+} from "$lib/nav";
 
 type Tab = "history" | "pending" | "streams" | "log" | "notes";
 /** The file browser's data source: on-disk files, the workspace stream (server),
@@ -81,6 +87,10 @@ let rootPath = $state(""); // stream root, e.g. //Curiosity/main
 let clientRoot = $state(""); // local workspace root, e.g. H:\Dev\...\Curiosity
 let selectedTreePath = $state("");
 let source = $state<BrowseSource>(loadBrowseSource()); // Files pane data source (persisted)
+// Show files that are deleted at head (`p4 files` reports them). Off by default:
+// they can't be synced and would look like sync failures; on, they're rendered
+// struck-through so they're unmistakable. Persisted globally.
+let showDeleted = $state(loadShowDeleted());
 let refreshing = $state(false);
 let indexing = $state(false);
 let indexCount = $state(0);
@@ -104,6 +114,15 @@ async function safe<T>(fn: () => Promise<T[]>): Promise<T[]> {
 let queryRoot = "";
 function base(p: string): string {
   return p.slice(p.lastIndexOf("/") + 1);
+}
+
+/** Is this listing record a file that no longer exists at head? `p4 files`
+ *  reports deleted revisions too, so without this the tree shows files that
+ *  aren't in the depot anymore — they can never sync ("up-to-date", no have
+ *  revision, nothing on disk), which reads exactly like a broken sync. */
+function isDeletedAtHead(rec: P4Record): boolean {
+  const a = (rec.headAction ?? rec.action ?? "").toLowerCase();
+  return a.includes("delete") || a === "purge" || a === "archive";
 }
 
 // The stream list for the current server, read from the store (scope `p4:streams`,
@@ -303,7 +322,10 @@ function buildDirNode(path: string, name: string): TreeNode {
   }
   for (const f of c.files) {
     if (!f.depotFile) continue;
+    const gone = isDeletedAtHead(f);
+    if (gone && !showDeleted) continue; // hidden unless the user opts in
     const k = makeNode(f.depotFile, false, f);
+    k.deleted = gone; // rendered struck-through; never counted as unsynced
     if (sFiles) {
       const rec = sFiles.get(base(f.depotFile).toLowerCase());
       k.untracked = !rec;
@@ -375,7 +397,9 @@ async function ensureFolder(path: string): Promise<void> {
       safe(() => p4.files(h!.conn(), q)),
     ]);
     const dirs = d.map((r) => base(r.dir ?? "")).filter(Boolean);
-    const files = f.filter((r) => r.depotFile);
+    // Deleted-at-head files aren't in the depot: a leftover local copy is
+    // untracked, not "synced" (see isDeletedAtHead).
+    const files = f.filter((r) => r.depotFile && !isDeletedAtHead(r));
     storeSet(markScope(client), path, JSON.stringify({ dirs, files }));
     if (source === src) kickMarkers(path);
     return;
@@ -476,6 +500,17 @@ export const browse = {
   },
   get streamsLoading() {
     return streamsAreLoading();
+  },
+  get showDeleted() {
+    return showDeleted;
+  },
+  /** Toggle listing deleted-at-head files; re-projects the open tree so the
+   *  change is immediate (the store already holds the deleted records). */
+  setShowDeleted(v: boolean) {
+    if (v === showDeleted) return;
+    showDeleted = v;
+    saveShowDeleted(v);
+    treeVer++; // the tree is derived — re-run the projection
   },
   get source() {
     return source;

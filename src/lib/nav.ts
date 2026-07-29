@@ -78,6 +78,15 @@ export function saveBrowseSource(s: "local" | "workspace" | "depot"): void {
   set(BROWSE_SRC, s);
 }
 
+const SHOW_DELETED = "showDeleted";
+/** Whether the Files pane lists files deleted at head (off by default). */
+export function loadShowDeleted(): boolean {
+  return get(SHOW_DELETED) === "1";
+}
+export function saveShowDeleted(v: boolean): void {
+  set(SHOW_DELETED, v ? "1" : "0");
+}
+
 /** The last workspace (client) used on `server`, or "" if none. */
 export function loadClientFor(server: string): string {
   return server ? (get(clientKey(server)) ?? "") : "";

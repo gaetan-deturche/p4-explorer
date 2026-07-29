@@ -262,7 +262,12 @@
     <button
       class="main mono"
       class:untracked={node.untracked}
-      title={node.untracked ? "Not in the depot (ignored / uncommitted)" : node.path}
+      class:deleted={node.deleted}
+      title={node.deleted
+        ? "Deleted at head — it no longer exists in the depot and can't be synced (its history is still browsable)"
+        : node.untracked
+          ? "Not in the depot (ignored / uncommitted)"
+          : node.path}
       onclick={(e) => clickNode(node, e)}
       ondblclick={() => node.isDir && onExpand(node)}
       oncontextmenu={(e) => {
@@ -275,7 +280,10 @@
       <span class="ic">{node.isDir ? "📁" : "📄"}</span>
       <span class="name">{node.name}</span>
       {#if node.loading}<span class="dim sp">…</span>{/if}
-      {#if !node.isDir}
+      {#if node.deleted}
+        <!-- Not a sync state: it's gone from the depot, so no dot. -->
+        <span class="delmark" title="deleted at head">deleted</span>
+      {:else if !node.isDir}
         {@const s = sync(node)}
         <span class="sync {s.cls}" title={s.title}>{s.label}</span>
       {:else if node.folderSync}
@@ -387,6 +395,21 @@
   .main.untracked {
     color: var(--text-dim);
     opacity: 0.65;
+  }
+  /* Deleted at head: struck through so it can't be mistaken for a live file. */
+  .main.deleted .name {
+    text-decoration: line-through;
+  }
+  .main.deleted {
+    color: var(--text-dim);
+    opacity: 0.7;
+  }
+  .delmark {
+    flex: none;
+    font-size: 10px;
+    font-style: italic;
+    color: var(--warn);
+    opacity: 0.8;
   }
   .main.untracked .ic {
     opacity: 0.5;
