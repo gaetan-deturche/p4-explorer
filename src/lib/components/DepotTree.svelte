@@ -404,12 +404,12 @@
     color: var(--text-dim);
     opacity: 0.7;
   }
+  /* A state, not an error — dim like the struck-through name, not alarm-red. */
   .delmark {
     flex: none;
     font-size: 10px;
     font-style: italic;
-    color: var(--warn);
-    opacity: 0.8;
+    color: var(--text-dim);
   }
   .main.untracked .ic {
     opacity: 0.5;

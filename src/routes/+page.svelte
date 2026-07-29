@@ -530,18 +530,18 @@
       <section class="col left" style="width:{leftW}px">
         <div class="panehdr">
           <span>Files</span>
-          <!-- Deleted-at-head files are hidden by default (they can't be synced);
-               with this on they're listed struck-through. -->
-          <button
-            class="hdrtoggle"
-            class:on={browse.showDeleted}
-            title={browse.showDeleted
-              ? "Hide files deleted at head"
-              : "Show files deleted at head (struck through, can't be synced)"}
-            onclick={() => browse.setShowDeleted(!browse.showDeleted)}
-          >
-            deleted
-          </button>
+          <!-- Only the server-backed sources can contain deleted-at-head files
+               (Local lists what's on disk), so the option only appears there. -->
+          {#if browse.source !== "local"}
+            <label class="hdrchk" title="List files deleted at head — struck through; they can't be synced, but their history is browsable">
+              <input
+                type="checkbox"
+                checked={browse.showDeleted}
+                onchange={(e) => browse.setShowDeleted(e.currentTarget.checked)}
+              />
+              show deleted
+            </label>
+          {/if}
           <button class="paneclose" title="Close view" onclick={() => (views.files = false)}>✕</button>
         </div>
         <div class="srcsel">
@@ -1118,23 +1118,26 @@
     color: var(--text);
     background: var(--bg-hover);
   }
-  /* A small opt-in toggle in a pane header (e.g. "deleted"), pushed to the right
-     next to the close button. */
-  .hdrtoggle {
+  /* A small labelled checkbox option in a pane header, pushed to the right next
+     to the close button. A real checkbox so both states read unambiguously. */
+  .hdrchk {
     margin-left: auto;
-    margin-right: 4px;
-    border: 1px solid var(--border);
-    background: none;
-    border-radius: 9px;
-    padding: 0 7px;
+    margin-right: 6px;
+    display: flex;
+    align-items: center;
+    gap: 4px;
     font-size: 10px;
+    font-weight: 400;
     text-transform: none;
     letter-spacing: 0;
     color: var(--text-dim);
+    cursor: pointer;
   }
-  .hdrtoggle.on {
-    border-color: var(--warn);
-    color: var(--warn);
+  .hdrchk input {
+    width: 11px;
+    height: 11px;
+    margin: 0;
+    cursor: pointer;
   }
   .panehdr {
     display: flex;
