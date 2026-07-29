@@ -162,6 +162,16 @@ pub async fn paths_exist(paths: Vec<String>) -> Vec<bool> {
     .unwrap_or_default()
 }
 
+/// The cached ticket VALUE for this connection (address-preferred, else the
+/// first ticket of conn.user). Used to pass `-P` explicitly when p4's own
+/// lookup fails despite a valid ticket (multi-edge auth.id keying mismatch).
+#[tauri::command]
+pub async fn p4_ticket_value(conn: P4Conn) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || Ok(p4::ticket(&conn).unwrap_or_default()))
+        .await
+        .map_err(|e| format!("ticket task failed: {e}"))?
+}
+
 /// The user of a cached ticket whose address matches conn.port (`p4 tickets`),
 /// or "". Lets adding a server adopt the account you already logged in as (e.g.
 /// via P4V) instead of the ambient P4USER, which may not exist on that server.

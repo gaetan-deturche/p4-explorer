@@ -77,6 +77,12 @@ pub struct P4Conn {
     /// (unicode). Lets one server be unicode and another not.
     #[serde(default)]
     pub charset: String,
+    /// Explicit auth ticket passed as `-P`. Normally empty (p4 looks tickets up
+    /// itself); set when the automatic lookup fails even though a valid ticket
+    /// exists — e.g. multi-edge servers whose auth.id keying doesn't match the
+    /// edge a connection lands on (seen on Epic's licensee cluster).
+    #[serde(default)]
+    pub ticket: String,
 }
 
 impl P4Conn {
@@ -97,6 +103,10 @@ impl P4Conn {
         if !self.cwd.is_empty() {
             a.push("-d".into());
             a.push(self.cwd.clone());
+        }
+        if !self.ticket.is_empty() {
+            a.push("-P".into());
+            a.push(self.ticket.clone());
         }
         a
     }

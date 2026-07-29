@@ -268,12 +268,21 @@ export const connection = {
       // Authenticated? A failing `login -s` can mean a missing/expired ticket
       // (→ prompt) OR a charset mismatch (→ fix the charset and re-check; the
       // ticket may be perfectly valid — prompting for a password would be wrong
-      // AND recur every boot).
+      // AND recur every boot) OR p4 failing to LOOK UP a valid ticket (multi-
+      // edge servers whose auth.id keying doesn't match the edge this connection
+      // landed on — seen on Epic; → pass the ticket explicitly via -P).
       let authed = opts?.skipAuth === true;
       if (!authed) {
-        let st = await p4.loginStatus(conn).catch(() => ({ ok: true, error: "" }));
-        if (!st.ok && adjustCharset(conn, st.error)) {
-          st = await p4.loginStatus(conn).catch(() => ({ ok: true, error: "" }));
+        const check = () => p4.loginStatus(conn).catch(() => ({ ok: true, error: "" }));
+        let st = await check();
+        if (!st.ok && adjustCharset(conn, st.error)) st = await check();
+        if (!st.ok) {
+          const t = await p4.ticketValue(conn).catch(() => "");
+          if (t) {
+            conn.ticket = t;
+            st = await check();
+            if (!st.ok) conn.ticket = ""; // the ticket wasn't it — drop it
+          }
         }
         authed = st.ok;
       }
@@ -281,6 +290,9 @@ export const connection = {
         connected = false;
         return; // user cancelled — stay disconnected, no success toast
       }
+      // Pin the session to its ticket: later commands can land on a different
+      // edge where the automatic lookup fails mid-session ("P4PASSWD invalid").
+      if (!conn.ticket) conn.ticket = await p4.ticketValue(conn).catch(() => "");
       connected = true;
       h.setOptionsOpen(false);
       startKeepAlive();
@@ -380,6 +392,7 @@ export const connection = {
     if (port === conn.port) return;
     conn.port = port;
     conn.user = loadUserFor(port); // this server's remembered user ("" → ambient)
+    conn.ticket = ""; // never carry a ticket across servers
     conn.charset = loadCharsetFor(port);
     conn.client = "";
     browse.reset();
@@ -458,6 +471,7 @@ export const connection = {
       conn.user = loadUserFor(conn.port);
       conn.charset = loadCharsetFor(conn.port);
       conn.client = "";
+      conn.ticket = ""; // never carry a ticket across servers
       browse.reset();
     }
     // Prefill the user from an existing ticket for this server if we have none.

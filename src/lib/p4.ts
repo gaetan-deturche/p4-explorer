@@ -11,10 +11,13 @@ export interface P4Conn {
   client: string;
   cwd: string;
   charset: string; // "" ambient, "none" (force non-unicode), or e.g. "utf8"
+  // Explicit ticket (-P), set only when p4's own lookup fails despite a valid
+  // ticket (multi-edge auth.id keying — see connection.svelte.ts).
+  ticket: string;
 }
 
 export function emptyConn(): P4Conn {
-  return { port: "", user: "", client: "", cwd: "", charset: "" };
+  return { port: "", user: "", client: "", cwd: "", charset: "", ticket: "" };
 }
 
 /** Local SQLite file index for fuzzy search. */
@@ -161,6 +164,8 @@ export const p4 = {
     g<ReviewInfo | null>("swarm_review", { conn, change }),
   /** Authenticated? `error` carries the p4 text when not (charset vs ticket). */
   loginStatus: (conn: P4Conn) => g<{ ok: boolean; error: string }>("p4_login_status", { conn }),
+  /** The cached ticket value for this connection (address, else user match). */
+  ticketValue: (conn: P4Conn) => g<string>("p4_ticket_value", { conn }),
   ticketUser: (conn: P4Conn) => g<string>("p4_ticket_user", { conn }),
   login: (conn: P4Conn, password: string) => g<void>("p4_login", { conn, password }),
   trust: (conn: P4Conn) => g<void>("p4_trust", { conn }),

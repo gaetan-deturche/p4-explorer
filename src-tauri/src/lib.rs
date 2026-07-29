@@ -81,6 +81,7 @@ pub fn run() {
             commands::p4_login_status,
             commands::p4_login,
             commands::p4_ticket_user,
+            commands::p4_ticket_value,
             commands::p4_trust,
             commands::paths_exist,
             commands::p4_streams,
