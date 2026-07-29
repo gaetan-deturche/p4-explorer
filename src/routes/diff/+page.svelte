@@ -59,18 +59,23 @@
     const el = body?.querySelector(`[data-row="${blocks[current]}"]`);
     el?.scrollIntoView({ block: "center" });
   }
-  /** The row index at the top of the viewport — the anchor for "next/previous
-   *  change", so navigation follows where the user SCROLLED to rather than the
-   *  last button press (jumping from the middle of a file used to fly back to
-   *  change 2 because `current` was still 1). */
-  function topRow(): number {
+  /** The row at the VERTICAL CENTRE of the viewport — the anchor for "where am I".
+   *  Navigation follows where you scrolled rather than the last button press, and
+   *  the centre (not the top) is the right reference because goTo centres its
+   *  target: anchoring on the top row would leave a just-centred block still
+   *  "below" the anchor, so Next would keep re-finding and re-centring it instead
+   *  of reporting that there's nothing further. */
+  function anchorRow(): number {
     if (!body) return 0;
-    const top = body.getBoundingClientRect().top;
+    const box = body.getBoundingClientRect();
+    const mid = box.top + box.height / 2;
+    let last = 0;
     for (const el of body.querySelectorAll<HTMLElement>("[data-row]")) {
       const b = el.getBoundingClientRect();
-      if (b.bottom > top + 1) return Number(el.dataset.row);
+      last = Number(el.dataset.row);
+      if (b.bottom > mid) return last; // first row reaching the centre line
     }
-    return rows.length;
+    return last;
   }
   // End-of-list feedback: the first press at the last (or first) change says so
   // instead of moving — a big block would otherwise scroll back to its own start,
@@ -97,9 +102,10 @@
   /** Step to the next/previous change block relative to the visible position. */
   function step(dir: 1 | -1) {
     if (!blocks.length) return;
-    const anchor = topRow();
-    // The next block strictly after the viewport top, or the last one strictly
-    // above it (which, inside a long block, is that block's own start).
+    const anchor = anchorRow();
+    // The next block starting after the centre, or the last one starting before
+    // it (inside a long block, that's the block's own start — so Previous takes
+    // you to the top of the change you're reading, then to the one before).
     let i = -1;
     if (dir === 1) {
       i = blocks.findIndex((r) => r > anchor);
@@ -133,10 +139,10 @@
   function syncCounter() {
     if (hint) clearHint(); // moved on — the wrap offer no longer applies
     if (!blocks.length) return;
-    const anchor = topRow();
+    const anchor = anchorRow();
     let i = 0;
     for (let k = 0; k < blocks.length; k++) {
-      if (blocks[k] <= anchor + 2) i = k; // +2: a block just under the top edge counts
+      if (blocks[k] <= anchor) i = k; // last block start at/above the centre
       else break;
     }
     current = i;
@@ -198,12 +204,14 @@
       <button onclick={() => step(-1)} disabled={!blocks.length} title="Previous change (Shift+F7)">
         ▲
       </button>
-      <span class="count" class:dim={!hint} class:hint={!!hint}>
-        {#if hint}{hint}
-        {:else if loading}…
-        {:else if blocks.length}{current + 1} / {blocks.length} changes
-        {:else}no changes{/if}
+      <span class="count dim">
+        {#if loading}…{:else if blocks.length}{current + 1} / {blocks.length} changes{:else}no changes{/if}
       </span>
+      <!-- Floating bubble (like the main window's toasts) so showing it never
+           reflows the nav buttons. -->
+      {#if hint}
+        <div class="navhint">{hint}</div>
+      {/if}
       <button onclick={() => step(1)} disabled={!blocks.length} title="Next change (F7)">▼</button>
     </div>
     <span class="label right mono" title={rightPath}>{rightLabel}</span>
@@ -272,10 +280,29 @@
     text-align: right;
   }
   .nav {
+    position: relative; /* anchors .navhint */
     flex: none;
     display: flex;
     align-items: center;
     gap: 6px;
+  }
+  /* End-of-list feedback: floats under the change counter, so it never moves the
+     buttons (same reasoning as the main window's toasts). */
+  .navhint {
+    position: absolute;
+    top: calc(100% + 6px);
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 10;
+    white-space: nowrap;
+    font-size: 11px;
+    color: var(--text);
+    background: var(--bg-panel);
+    border: 1px solid var(--accent);
+    border-radius: 6px;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+    padding: 4px 10px;
+    pointer-events: none;
   }
   .nav button {
     font-size: 10px;
@@ -284,10 +311,6 @@
   .count {
     font-size: 11px;
     white-space: nowrap;
-  }
-  /* End-of-list feedback, in place of the counter while it shows. */
-  .count.hint {
-    color: var(--accent);
   }
   .body {
     flex: 1;
