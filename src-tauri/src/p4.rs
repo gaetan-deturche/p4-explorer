@@ -156,19 +156,117 @@ pub fn base_command(conn: &P4Conn) -> Command {
     cmd
 }
 
+/// How many times to attempt a command that fails authentication. Auth failures
+/// here are TRANSIENT and random, not command-specific: every p4 invocation is a
+/// fresh connection, and on a clustered server (e.g. Epic's licensee cluster,
+/// whose ticket is keyed by auth.id) an individual connection can fail to
+/// validate the session while the next one succeeds — the identical command
+/// alternates between working and "P4PASSWD invalid or unset" minutes apart.
+const AUTH_ATTEMPTS: usize = 3;
+const AUTH_RETRY_PAUSE_MS: u64 = 200;
+
+/// Run a p4 command (built by `build`, so each attempt gets a fresh Command) and
+/// retry it on an authentication failure, up to `AUTH_ATTEMPTS`. Retries pass the
+/// cached ticket explicitly, and each attempt is logged with a `(auth retry N)`
+/// marker so the Commands view shows what happened rather than mystery
+/// duplicates. Every p4 entry point funnels through here.
+fn run_output(
+    conn: &P4Conn,
+    args: &[&str],
+    build: impl Fn(&P4Conn) -> std::io::Result<std::process::Output>,
+) -> Result<std::process::Output, String> {
+    let mut c = conn.clone();
+    let mut attempt = 0usize;
+    loop {
+        let start = Instant::now();
+        let out = build(&c).map_err(|e| format!("failed to launch p4: {e} (is p4 on PATH?)"))?;
+        let ok = out.status.success();
+        let err = if ok { String::new() } else { extract_error(&out.stdout, &out.stderr) };
+        let mut logged: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        if attempt > 0 {
+            logged.push(format!("(auth retry {attempt})"));
+        }
+        let refs: Vec<&str> = logged.iter().map(String::as_str).collect();
+        log_command_err(&refs, start.elapsed().as_millis(), ok, &err);
+
+        attempt += 1;
+        // Only retry when the command produced NOTHING: an auth failure after
+        // partial output means it did some work, and re-running could apply a
+        // mutation twice.
+        let produced_output = !out.stdout.is_empty() && has_data_line(&out.stdout);
+        if ok || !is_auth_error(&err) || produced_output || attempt >= AUTH_ATTEMPTS {
+            return Ok(out);
+        }
+        // Pass the cached ticket explicitly from here on (the automatic lookup is
+        // what's flaky), and give the cluster a moment before trying again.
+        if c.ticket.is_empty() {
+            if let Some(t) = ticket_no_retry(conn) {
+                c.ticket = t;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(AUTH_RETRY_PAUSE_MS));
+    }
+}
+
 /// Run `p4 <global> <args>` WITHOUT `-ztag -Mj` and return raw stdout. For
 /// commands whose output is plain text (diff2, print, set), not tagged records.
 pub fn run_raw(conn: &P4Conn, args: &[&str]) -> Result<String, String> {
-    let mut cmd = base_command(conn);
-    for a in args {
-        cmd.arg(a);
-    }
-    let start = Instant::now();
-    let out = cmd
-        .output()
-        .map_err(|e| format!("failed to launch p4: {e} (is p4 on PATH?)"))?;
-    log_command_err(args, start.elapsed().as_millis(), out.status.success(), &if out.status.success() { String::new() } else { extract_error(&out.stdout, &out.stderr) });
+    let out = run_output(conn, args, |c| {
+        let mut cmd = base_command(c);
+        for a in args {
+            cmd.arg(a);
+        }
+        cmd.output()
+    })?;
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// Did the command emit any NON-error output? For tagged output that means a
+/// record without an error severity; for plain output, any non-empty line. Used
+/// to keep the auth retry from re-running something that already did work.
+fn has_data_line(stdout: &[u8]) -> bool {
+    for line in String::from_utf8_lossy(stdout).lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<Value>(line) {
+            Ok(Value::Object(obj)) => {
+                let sev = obj.get("severity").and_then(value_as_i64).unwrap_or(0);
+                if sev < E_FAILED {
+                    return true; // a data (or warning) record
+                }
+            }
+            _ => return true, // plain text output
+        }
+    }
+    false
+}
+
+/// Run a plain (untagged) command for its EXIT STATUS, with the shared auth
+/// retry: returns (succeeded, error text). For checks like `login -s` / `trust`
+/// where the output doesn't matter but a transient auth failure must not be
+/// mistaken for a real answer.
+pub fn run_status(conn: &P4Conn, args: &[&str]) -> Result<(bool, String), String> {
+    let out = run_output(conn, args, |c| {
+        let mut cmd = base_command(c);
+        for a in args {
+            cmd.arg(a);
+        }
+        cmd.output()
+    })?;
+    let ok = out.status.success();
+    let err = if ok { String::new() } else { extract_error(&out.stdout, &out.stderr) };
+    Ok((ok, err))
+}
+
+/// `p4 tickets` without the retry wrapper — the retry path calls this to resolve
+/// a ticket, so it must not recurse (it's a local file read; it can't auth-fail).
+fn ticket_no_retry(conn: &P4Conn) -> Option<String> {
+    let mut cmd = base_command(conn);
+    cmd.arg("tickets");
+    let out = cmd.output().ok()?;
+    parse_ticket(&String::from_utf8_lossy(&out.stdout), conn)
 }
 
 /// Run `p4 <global> <args>` feeding `input` on stdin (for `... -i` spec forms).
@@ -201,7 +299,12 @@ pub fn run_raw_stdin(conn: &P4Conn, args: &[&str], input: &str) -> Result<String
 /// Used as the password for Swarm REST Basic auth (`user:ticket`). Returns None
 /// when not logged in. Output lines look like: `<address> (<user>) <ticket>`.
 pub fn ticket(conn: &P4Conn) -> Option<String> {
-    let out = run_raw(conn, &["tickets"]).ok()?;
+    parse_ticket(&run_raw(conn, &["tickets"]).ok()?, conn)
+}
+
+/// Pick this connection's ticket out of `p4 tickets` output: prefer the entry
+/// whose address matches the port, else the first one for `conn.user`.
+fn parse_ticket(out: &str, conn: &P4Conn) -> Option<String> {
     let want_user = conn.user.trim();
     let port_tail = conn.port.trim().trim_start_matches("ssl:");
     let mut fallback: Option<String> = None;
@@ -326,58 +429,31 @@ pub fn is_auth_error(msg: &str) -> bool {
 /// connection, and on multi-edge servers the ticket lookup fails at random —
 /// one retry turns a red line + stale pane into an invisible hiccup.
 pub fn run_full(conn: &P4Conn, args: &[&str]) -> Result<(Vec<Record>, Vec<String>), String> {
-    // Retry only when NOTHING came back and the failure was auth-related, so a
-    // partially-successful batch is never re-run (it would redo its writes).
-    // The failure surfaces either as Err (no data records) or as error strings
-    // alongside an empty record set.
-    let auth_failed = |r: &Result<(Vec<Record>, Vec<String>), String>| match r {
-        Err(e) => is_auth_error(e),
-        Ok((recs, errs)) => recs.is_empty() && errs.iter().any(|e| is_auth_error(e)),
-    };
-    let first = run_full_once(conn, args);
-    if !auth_failed(&first) {
-        return first;
-    }
-    // Self-healing retry: resolve the cached ticket and pass it explicitly, so a
-    // command whose connection failed to look the ticket up succeeds even when
-    // the caller never pinned one (any conn built before the session pinned its
-    // ticket, or a store holding an older copy).
-    let mut c = conn.clone();
-    if c.ticket.is_empty() {
-        if let Some(t) = ticket(conn) {
-            c.ticket = t;
+    // The auth retry lives in run_output (shared by every entry point); tagged
+    // commands are idempotent reads or single-shot mutations that fail closed on
+    // an auth error, so re-running them is safe.
+    let out = run_output(conn, args, |c| {
+        let mut cmd = Command::new("p4");
+        cmd.arg("-ztag").arg("-Mj");
+        for g in c.global_args() {
+            cmd.arg(g);
         }
-    }
-    run_full_once(&c, args)
-}
-
-fn run_full_once(conn: &P4Conn, args: &[&str]) -> Result<(Vec<Record>, Vec<String>), String> {
-    let mut cmd = Command::new("p4");
-    cmd.arg("-ztag").arg("-Mj");
-    for g in conn.global_args() {
-        cmd.arg(g);
-    }
-    apply_charset(&mut cmd, conn);
-    if !conn.ticket.is_empty() {
-        cmd.env("P4PASSWD", &conn.ticket); // see base_command
-    }
-    for a in args {
-        cmd.arg(a);
-    }
-
-    // Don't flash a console window when spawning p4 from the GUI process.
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
-
-    let start = Instant::now();
-    let out = cmd
-        .output()
-        .map_err(|e| format!("failed to launch p4: {e} (is p4 on PATH?)"))?;
-    log_command_err(args, start.elapsed().as_millis(), out.status.success(), &if out.status.success() { String::new() } else { extract_error(&out.stdout, &out.stderr) });
+        apply_charset(&mut cmd, c);
+        if !c.ticket.is_empty() {
+            cmd.env("P4PASSWD", &c.ticket); // see base_command
+        }
+        for a in args {
+            cmd.arg(a);
+        }
+        // Don't flash a console window when spawning p4 from the GUI process.
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        cmd.output()
+    })?;
     parse_records_full(&out.stdout, out.status.success(), &out.stderr)
 }
 
@@ -389,41 +465,38 @@ pub fn run_killable(
     args: &[&str],
     pid_slot: &std::sync::Arc<std::sync::Mutex<Option<u32>>>,
 ) -> Result<Vec<Record>, String> {
-    let mut cmd = Command::new("p4");
-    cmd.arg("-ztag").arg("-Mj");
-    for g in conn.global_args() {
-        cmd.arg(g);
-    }
-    apply_charset(&mut cmd, conn);
-    if !conn.ticket.is_empty() {
-        cmd.env("P4PASSWD", &conn.ticket); // see base_command
-    }
-    for a in args {
-        cmd.arg(a);
-    }
-    cmd.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
-
-    let start = Instant::now();
-    let child = cmd
-        .spawn()
-        .map_err(|e| format!("failed to launch p4: {e} (is p4 on PATH?)"))?;
-    let id = child.id();
-    *pid_slot.lock().unwrap() = Some(id);
-    let out = child.wait_with_output();
-    {
+    // Shares the auth retry (run_output) while still publishing the child PID so
+    // the scan can be killed mid-flight.
+    let out = run_output(conn, args, |c| {
+        let mut cmd = Command::new("p4");
+        cmd.arg("-ztag").arg("-Mj");
+        for g in c.global_args() {
+            cmd.arg(g);
+        }
+        apply_charset(&mut cmd, c);
+        if !c.ticket.is_empty() {
+            cmd.env("P4PASSWD", &c.ticket); // see base_command
+        }
+        for a in args {
+            cmd.arg(a);
+        }
+        cmd.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        let child = cmd.spawn()?;
+        let id = child.id();
+        *pid_slot.lock().unwrap() = Some(id);
+        let out = child.wait_with_output();
         let mut s = pid_slot.lock().unwrap();
         if *s == Some(id) {
             *s = None;
         }
-    }
-    let out = out.map_err(|e| e.to_string())?;
-    log_command_err(args, start.elapsed().as_millis(), out.status.success(), &if out.status.success() { String::new() } else { extract_error(&out.stdout, &out.stderr) });
+        out
+    })?;
     parse_records(&out.stdout, out.status.success(), &out.stderr)
 }
 
@@ -433,27 +506,29 @@ pub fn run_killable(
 /// real failures — e.g. "change has shelved files" arrives after progress
 /// records, so the submit silently looks successful.
 pub fn run_strict(conn: &P4Conn, args: &[&str]) -> Result<Vec<Record>, String> {
-    let mut cmd = Command::new("p4");
-    cmd.arg("-ztag").arg("-Mj");
-    for g in conn.global_args() {
-        cmd.arg(g);
-    }
-    apply_charset(&mut cmd, conn);
-    for a in args {
-        cmd.arg(a);
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
-
-    let start = Instant::now();
-    let out = cmd
-        .output()
-        .map_err(|e| format!("failed to launch p4: {e} (is p4 on PATH?)"))?;
-    log_command_err(args, start.elapsed().as_millis(), out.status.success(), &if out.status.success() { String::new() } else { extract_error(&out.stdout, &out.stderr) });
+    // Auth retry via run_output: it only re-runs when the command produced NO
+    // output and failed authentication, so a mutation is never applied twice.
+    let out = run_output(conn, args, |c| {
+        let mut cmd = Command::new("p4");
+        cmd.arg("-ztag").arg("-Mj");
+        for g in c.global_args() {
+            cmd.arg(g);
+        }
+        apply_charset(&mut cmd, c);
+        if !c.ticket.is_empty() {
+            cmd.env("P4PASSWD", &c.ticket); // see base_command
+        }
+        for a in args {
+            cmd.arg(a);
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        cmd.output()
+    })?;
     let stdout = String::from_utf8_lossy(&out.stdout);
     let mut records: Vec<Record> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
