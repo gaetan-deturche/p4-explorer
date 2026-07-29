@@ -21,11 +21,37 @@ pub fn set_app_handle(app: AppHandle) {
 /// Commands log view. `args` is the subcommand + args (connection globals and
 /// `-ztag -Mj` are omitted for readability; stdin, e.g. a password, is never
 /// included).
-pub fn log_command(args: &[&str], ms: u128, ok: bool) {
+/// `err` carries the failure text so the Commands view can SHOW why a command
+/// failed instead of just flagging it red (capped for the UI; "" when ok).
+pub fn log_command_err(args: &[&str], ms: u128, ok: bool, err: &str) {
     if let Some(app) = APP.get() {
         let line = format!("p4 {}", args.join(" "));
-        let _ = app.emit("p4-command", serde_json::json!({ "line": line, "ms": ms, "ok": ok }));
+        let err: String = err.trim().chars().take(500).collect();
+        let _ = app
+            .emit("p4-command", serde_json::json!({ "line": line, "ms": ms, "ok": ok, "err": err }));
     }
+}
+
+/// The human-readable error of a failed p4 run: stderr if present, else the
+/// `data` of error-severity records on stdout (`-ztag -Mj` reports errors there).
+pub fn extract_error(stdout: &[u8], stderr: &[u8]) -> String {
+    let se = String::from_utf8_lossy(stderr);
+    let se = se.trim();
+    if !se.is_empty() {
+        return se.to_string();
+    }
+    let mut msgs: Vec<String> = Vec::new();
+    for line in String::from_utf8_lossy(stdout).lines() {
+        if let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(line.trim()) {
+            let sev = obj.get("severity").and_then(value_as_i64).unwrap_or(0);
+            if sev >= E_FAILED {
+                if let Some(d) = obj.get("data").and_then(|d| d.as_str()) {
+                    msgs.push(d.trim().to_string());
+                }
+            }
+        }
+    }
+    msgs.join("\n")
 }
 
 /// A single tagged output record: a JSON object of field -> value.
@@ -118,7 +144,7 @@ pub fn run_raw(conn: &P4Conn, args: &[&str]) -> Result<String, String> {
     let out = cmd
         .output()
         .map_err(|e| format!("failed to launch p4: {e} (is p4 on PATH?)"))?;
-    log_command(args, start.elapsed().as_millis(), out.status.success());
+    log_command_err(args, start.elapsed().as_millis(), out.status.success(), &if out.status.success() { String::new() } else { extract_error(&out.stdout, &out.stderr) });
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
@@ -138,7 +164,7 @@ pub fn run_raw_stdin(conn: &P4Conn, args: &[&str], input: &str) -> Result<String
     }
     let start = Instant::now();
     let out = child.wait_with_output().map_err(|e| e.to_string())?;
-    log_command(args, start.elapsed().as_millis(), out.status.success());
+    log_command_err(args, start.elapsed().as_millis(), out.status.success(), &if out.status.success() { String::new() } else { extract_error(&out.stdout, &out.stderr) });
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
         if !err.trim().is_empty() {
@@ -191,7 +217,7 @@ pub fn run_raw_stdout_diff(conn: &P4Conn, args: &[&str]) -> Result<String, Strin
     let out = cmd
         .output()
         .map_err(|e| format!("failed to launch p4: {e} (is p4 on PATH?)"))?;
-    log_command(args, start.elapsed().as_millis(), out.status.success());
+    log_command_err(args, start.elapsed().as_millis(), out.status.success(), &if out.status.success() { String::new() } else { extract_error(&out.stdout, &out.stderr) });
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
@@ -288,7 +314,7 @@ pub fn run_full(conn: &P4Conn, args: &[&str]) -> Result<(Vec<Record>, Vec<String
     let out = cmd
         .output()
         .map_err(|e| format!("failed to launch p4: {e} (is p4 on PATH?)"))?;
-    log_command(args, start.elapsed().as_millis(), out.status.success());
+    log_command_err(args, start.elapsed().as_millis(), out.status.success(), &if out.status.success() { String::new() } else { extract_error(&out.stdout, &out.stderr) });
     parse_records_full(&out.stdout, out.status.success(), &out.stderr)
 }
 
@@ -331,7 +357,7 @@ pub fn run_killable(
         }
     }
     let out = out.map_err(|e| e.to_string())?;
-    log_command(args, start.elapsed().as_millis(), out.status.success());
+    log_command_err(args, start.elapsed().as_millis(), out.status.success(), &if out.status.success() { String::new() } else { extract_error(&out.stdout, &out.stderr) });
     parse_records(&out.stdout, out.status.success(), &out.stderr)
 }
 
@@ -361,7 +387,7 @@ pub fn run_strict(conn: &P4Conn, args: &[&str]) -> Result<Vec<Record>, String> {
     let out = cmd
         .output()
         .map_err(|e| format!("failed to launch p4: {e} (is p4 on PATH?)"))?;
-    log_command(args, start.elapsed().as_millis(), out.status.success());
+    log_command_err(args, start.elapsed().as_millis(), out.status.success(), &if out.status.success() { String::new() } else { extract_error(&out.stdout, &out.stderr) });
     let stdout = String::from_utf8_lossy(&out.stdout);
     let mut records: Vec<Record> = Vec::new();
     let mut errors: Vec<String> = Vec::new();

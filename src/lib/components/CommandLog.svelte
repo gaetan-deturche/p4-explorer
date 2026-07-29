@@ -31,9 +31,12 @@
           <span class="dot" title={e.refused ? "refused (safe mode)" : e.ok ? "ok" : "failed"}>
             {e.refused ? "⊘" : e.ok ? "●" : "✕"}
           </span>
-          <span class="cmd">{e.line}</span>
+          <span class="cmd" title={e.err ?? e.line}>{e.line}</span>
           <span class="ms dim">{e.refused ? "refused" : e.ms + "ms"}</span>
         </div>
+        {#if e.err}
+          <div class="errline mono">{e.err}</div>
+        {/if}
       {/each}
     {/if}
   </div>
@@ -110,5 +113,14 @@
   .msg {
     padding: 12px;
     font-size: 12px;
+  }
+  /* Failure text under its command — the actual p4 error, not just a red mark. */
+  .errline {
+    padding: 0 10px 2px 46px;
+    font-size: 11px;
+    color: var(--warn);
+    opacity: 0.85;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
   }
 </style>

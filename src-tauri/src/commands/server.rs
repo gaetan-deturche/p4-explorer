@@ -117,7 +117,7 @@ pub async fn p4_login_status(conn: P4Conn) -> Result<bool, String> {
         let out = cmd
             .output()
             .map_err(|e| format!("failed to launch p4: {e} (is p4 on PATH?)"))?;
-        p4::log_command(&["login", "-s"], start.elapsed().as_millis(), out.status.success());
+        p4::log_command_err(&["login", "-s"], start.elapsed().as_millis(), out.status.success(), &if out.status.success() { String::new() } else { p4::extract_error(&out.stdout, &out.stderr) });
         Ok(out.status.success())
     })
     .await
@@ -190,7 +190,7 @@ pub async fn p4_trust(conn: P4Conn) -> Result<(), String> {
         let out = cmd
             .output()
             .map_err(|e| format!("failed to launch p4: {e} (is p4 on PATH?)"))?;
-        p4::log_command(&["trust", "-y", "-f"], start.elapsed().as_millis(), out.status.success());
+        p4::log_command_err(&["trust", "-y", "-f"], start.elapsed().as_millis(), out.status.success(), &if out.status.success() { String::new() } else { p4::extract_error(&out.stdout, &out.stderr) });
         if !out.status.success() {
             return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
         }

@@ -8,6 +8,7 @@ export type CmdEntry = {
   line: string;
   ms: number;
   ok: boolean;
+  err?: string; // failure text (why the command failed)
   refused?: boolean; // blocked by safe mode (never ran)
   time: string;
 };
@@ -25,12 +26,13 @@ export const cmdlog = {
   async start() {
     if (started) return;
     started = true;
-    await listen<{ line: string; ms: number; ok: boolean }>("p4-command", (e) => {
+    await listen<{ line: string; ms: number; ok: boolean; err?: string }>("p4-command", (e) => {
       entries.push({
         n: ++seq,
         line: e.payload.line,
         ms: e.payload.ms,
         ok: e.payload.ok,
+        err: e.payload.err || undefined,
         time: new Date().toLocaleTimeString(),
       });
       if (entries.length > CAP) entries.splice(0, entries.length - CAP);
