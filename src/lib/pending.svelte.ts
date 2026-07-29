@@ -507,18 +507,25 @@ export const pending = {
     );
     void pending.scanOffline(); // the entries move from Offline to Default
   },
-  /** Revert offline changes: restore the files to their depot state (p4 clean).
-   *  Destructive for the local edits — confirmed. */
-  async revertOffline(files: string[]) {
+  /** Revert a selection that may mix OPENED and OFFLINE files: opened files are
+   *  `p4 revert`ed, offline ones restored to depot state (`p4 clean`) — one
+   *  confirmation for the lot. Destructive for the local edits. */
+  async revertMixed(files: string[]) {
     if (!files.length) return;
+    const offline = new Set(currentOffline().map((o) => o.depotFile));
+    const off = files.filter((f) => offline.has(f));
+    const opened = files.filter((f) => !offline.has(f));
     const n = files.length;
-    const list = files.length <= 5 ? files.join("\n") : `${files.length} files`;
+    const list = n <= 5 ? files.join("\n") : `${n} files`;
     await pending.action(
-      () => p4.clean(h!.conn(), files),
-      `${list}\n\nRevert the offline changes? The files are restored to their depot state and your local edits are DISCARDED.`,
-      "Revert offline changes",
+      async () => {
+        for (const f of opened) await p4.revert(h!.conn(), f);
+        if (off.length) await p4.clean(h!.conn(), off);
+      },
+      `${list}\n\nRevert? Opened files are reverted, offline files restored to their depot state — your local changes are DISCARDED.`,
+      "Revert files",
       "Revert",
-      `Reverted ${n} offline file${n === 1 ? "" : "s"}.`,
+      `Reverted ${n} file${n === 1 ? "" : "s"}.`,
     );
     void pending.scanOffline();
   },

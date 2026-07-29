@@ -277,12 +277,16 @@
       });
     targets.push({ label: "New changelist…", action: () => (newClFile = file.depotFile) });
     const patchLabel = files.length > 1 ? `Generate patch (${files.length} files)…` : "Generate patch…";
+    const sel = files.length ? files : [file.depotFile];
     return [
       { label: "View diff", action: () => pending.openLocalDiff(file.depotFile) },
       { label: openInLabel, action: () => openLocalInEditor(file.depotFile) },
       copyMenu(file.depotFile, file.clientFile),
-      { label: patchLabel, action: () => generatePatch("", files.length ? files : [file.depotFile]) },
-      { label: "Revert file…", action: () => pending.revert(file.depotFile) },
+      { label: patchLabel, action: () => generatePatch("", sel) },
+      {
+        label: sel.length > 1 ? `Revert (${sel.length} files)…` : "Revert file…",
+        action: () => pending.revertMixed(sel),
+      },
       {
         label: "Remove from changelist (keep changes)…",
         action: () => pending.revertKeep(file.depotFile),
@@ -814,12 +818,12 @@
 
 {#if offlineCtx}
   {@const f = offlineCtx.file}
-  <!-- Group actions apply to the selected OFFLINE files (a mixed selection may
-       also hold opened files — those belong to the changelist menus). -->
-  {@const offSel = offlineCtx.files.filter((d) => pending.offline.some((o) => o.depotFile === d))}
-  {@const targets = offSel.length ? offSel : f.depotFile ? [f.depotFile] : []}
-  {@const n = targets.length}
-  {@const many = n > 1 ? ` (${n} files)` : ""}
+  <!-- Patch/revert act on the WHOLE selection (opened + offline mix); only
+       "Check out" is inherently offline-only, so it uses the offline subset. -->
+  {@const sel = offlineCtx.files.length ? offlineCtx.files : f.depotFile ? [f.depotFile] : []}
+  {@const offSel = sel.filter((d) => pending.offline.some((o) => o.depotFile === d))}
+  {@const co = offSel.length > 1 ? ` (${offSel.length} files)` : ""}
+  {@const many = sel.length > 1 ? ` (${sel.length} files)` : ""}
   <ContextMenu
     x={offlineCtx.x}
     y={offlineCtx.y}
@@ -833,9 +837,9 @@
             },
           ]
         : []),
-      { label: `Check out${many}`, action: () => pending.checkoutOffline(targets) },
-      { label: `Generate patch${many}…`, action: () => generatePatch("", targets) },
-      { label: `Revert offline changes${many}…`, action: () => pending.revertOffline(targets) },
+      { label: `Check out${co}`, action: () => pending.checkoutOffline(offSel) },
+      { label: `Generate patch${many}…`, action: () => generatePatch("", sel) },
+      { label: `Revert${many}…`, action: () => pending.revertMixed(sel) },
       {
         label: openInLabel,
         action: () => {
