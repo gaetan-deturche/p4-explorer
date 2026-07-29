@@ -402,13 +402,17 @@ export const pending = {
       "File reverted.",
     );
   },
+  /** `p4 revert -k`: un-open the file but leave the edited copy on disk — i.e.
+   *  turn it into an offline change, which is where it then shows up. Named for
+   *  that outcome ("Make offline") rather than the mechanism, since "remove from
+   *  changelist" reads like the edits go away. */
   revertKeep(file: string) {
     pending.action(
       () => p4.revertKeep(h!.conn(), file),
-      `${file}\n\nRemove from its changelist but keep your local edits on disk?`,
-      "Remove from changelist",
-      "Remove",
-      "File removed from changelist (changes kept).",
+      `${file}\n\nMake this an offline change? The file stops being checked out (it leaves the changelist, nothing is submitted) but your edited copy stays on disk — it will show up under Offline.`,
+      "Make offline",
+      "Make offline",
+      "File is now an offline change (your edits are still on disk).",
     );
   },
   reopen(file: string, change: string) {

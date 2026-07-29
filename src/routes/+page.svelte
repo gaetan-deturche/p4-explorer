@@ -296,7 +296,8 @@
         action: () => pending.revertMixed(sel),
       },
       {
-        label: "Remove from changelist (keep changes)…",
+        // Named for the outcome: it becomes an entry in the Offline section.
+        label: "Make offline (keep local edits)…",
         action: () => pending.revertKeep(file.depotFile),
       },
       { label: "Move to changelist", submenu: targets },
