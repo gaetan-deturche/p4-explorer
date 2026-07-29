@@ -30,9 +30,13 @@
   } = $props();
 
   // Changelist number the workspace is synced to (the "you are here" anchor).
+  // An empty have on a LOADED history means nothing under the subject is synced
+  // (fresh workspace) — anchor 0 so every row reads as not-yet-pulled, instead
+  // of the all-white "everything synced" look NaN produced.
   const anchorNum = $derived.by(() => {
-    if (mode === "folder") return haveChange ? Number(haveChange) : NaN;
-    if (!haveRev) return NaN;
+    if (rows.length === 0) return NaN;
+    if (mode === "folder") return haveChange ? Number(haveChange) : 0;
+    if (!haveRev) return 0;
     const r = rows.find((x) => x.rev === haveRev);
     return r ? Number(r.change) : NaN;
   });

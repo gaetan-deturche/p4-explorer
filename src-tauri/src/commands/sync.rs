@@ -25,20 +25,25 @@ fn sync_run(
     // instead of stalling the sync forever, like P4V's timeout.
     cmd.arg("-vnet.maxwait=120");
     cmd.arg("sync");
+    let mut log_args: Vec<String> = vec!["sync".into()];
     if preview {
         cmd.arg("-n");
+        log_args.push("-n".into());
     } else if parallel {
         // Parallel file transfer, like P4V. The server caps it at
         // net.parallel.max; where it's disabled p4 may error, and the caller
         // then retries without it.
         cmd.arg("--parallel=threads=4");
+        log_args.push("--parallel=threads=4".into());
     }
     if let Some(p) = path {
         if !p.is_empty() {
             cmd.arg(p);
+            log_args.push(p.to_string());
         }
     }
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let started = std::time::Instant::now();
     let mut child = cmd.spawn().map_err(|e| format!("failed to launch p4: {e}"))?;
     let id = child.id();
     pids.lock().unwrap().push(id);
@@ -95,6 +100,13 @@ fn sync_run(
         let _ = w.emit("sync-progress", serde_json::json!({ "count": count, "line": last }));
     }
     let (_issues, err) = err_handle.join().unwrap_or((0, String::new()));
+    // The streaming sync bypasses p4::run — log it to the Commands view too,
+    // with the stderr tail so a failed sync is diagnosable there.
+    {
+        let refs: Vec<&str> = log_args.iter().map(String::as_str).collect();
+        let log_err = if status.success() { String::new() } else { err.trim().to_string() };
+        p4::log_command_err(&refs, started.elapsed().as_millis(), status.success(), &log_err);
+    }
     // Fatal only when nothing synced (parallel-not-enabled, auth, connection).
     // Per-file issues (e.g. locked files) still synced the rest and are shown
     // live via `sync-issue` + summarised by the caller, so they aren't fatal.
