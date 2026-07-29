@@ -294,7 +294,9 @@ export const connection = {
 
       // Show the cached workspace list instantly, then refresh from the server in
       // the BACKGROUND — so selecting the workspace doesn't wait on a `p4 clients`
-      // round-trip (noticeable on a remote server like Epic).
+      // round-trip (noticeable on a remote server like Epic). A listing failure
+      // must SURFACE — swallowing it left a silently-empty dropdown that read as
+      // a dead app (e.g. a charset error on a freshly added server).
       const cachedClients = loadClientsFor(conn.port);
       if (cachedClients.length && !opts?.skipReselect) setClientList(cachedClients);
       const refreshClients = p4
@@ -303,7 +305,7 @@ export const connection = {
           setClientList(fresh);
           saveClientsFor(conn.port, fresh);
         })
-        .catch(() => {});
+        .catch((e) => h!.setConnError(`Couldn't list this server's workspaces: ${String(e)}`));
 
       if (opts?.skipReselect) {
         await refreshClients; // workspace already open — just refresh list + Host marks
@@ -313,8 +315,15 @@ export const connection = {
           await connection.selectClient(cachedTarget); // open now, from the cached list
         } else {
           await refreshClients; // no usable cache — need the fresh list to pick a target
-          const t = pick(clients);
-          if (t) await connection.selectClient(t);
+          let t = pick(clients);
+          // Fresh server, nothing saved: auto-open a workspace bound to THIS
+          // machine rather than sitting on an unexplained empty view.
+          if (!t) t = clients.find((c) => localClients.has(c.client))?.client ?? "";
+          if (t) {
+            await connection.selectClient(t);
+          } else if (clients.length) {
+            h.setNotice("Connected — pick a workspace from the dropdown.", 6000);
+          }
         }
       }
     } catch (e) {
