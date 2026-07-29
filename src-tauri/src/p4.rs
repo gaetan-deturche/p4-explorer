@@ -138,6 +138,14 @@ pub fn base_command(conn: &P4Conn) -> Command {
         cmd.arg(g);
     }
     apply_charset(&mut cmd, conn);
+    // Also hand the ticket to the child through the environment: `sync --parallel`
+    // transfer threads open their own connections and re-authenticate from
+    // env/tickets, IGNORING `-P` (same blind spot as `-C`). Servers whose ticket
+    // lookup is unreliable per-connection (multi-edge auth.id keying) otherwise
+    // fail those threads with "P4PASSWD invalid or unset".
+    if !conn.ticket.is_empty() {
+        cmd.env("P4PASSWD", &conn.ticket);
+    }
     // Don't flash a console window when spawning p4 from the GUI process.
     #[cfg(windows)]
     {
@@ -304,15 +312,43 @@ pub fn run(conn: &P4Conn, args: &[&str]) -> Result<Vec<Record>, String> {
     run_full(conn, args).map(|(records, _errors)| records)
 }
 
+/// True for the "not authenticated" family — the failure that appears at random
+/// on servers whose per-connection ticket lookup is unreliable (multi-edge
+/// auth.id keying), where an immediate retry usually lands on a good connection.
+pub fn is_auth_error(msg: &str) -> bool {
+    let m = msg.to_lowercase();
+    m.contains("p4passwd") || m.contains("your session has expired")
+}
+
 /// As `run`, but also surfaces the per-record errors a batch's data records
 /// would mask (for multi-file mutations — partial failures must be reported).
+/// Retries ONCE on an authentication error: each p4 invocation is a fresh
+/// connection, and on multi-edge servers the ticket lookup fails at random —
+/// one retry turns a red line + stale pane into an invisible hiccup.
 pub fn run_full(conn: &P4Conn, args: &[&str]) -> Result<(Vec<Record>, Vec<String>), String> {
+    // Retry only when NOTHING came back and the failure was auth-related, so a
+    // partially-successful batch is never re-run (it would redo its writes).
+    // The failure surfaces either as Err (no data records) or as error strings
+    // alongside an empty record set.
+    match run_full_once(conn, args) {
+        Err(e) if is_auth_error(&e) => run_full_once(conn, args),
+        Ok((recs, errs)) if recs.is_empty() && errs.iter().any(|e| is_auth_error(e)) => {
+            run_full_once(conn, args)
+        }
+        other => other,
+    }
+}
+
+fn run_full_once(conn: &P4Conn, args: &[&str]) -> Result<(Vec<Record>, Vec<String>), String> {
     let mut cmd = Command::new("p4");
     cmd.arg("-ztag").arg("-Mj");
     for g in conn.global_args() {
         cmd.arg(g);
     }
     apply_charset(&mut cmd, conn);
+    if !conn.ticket.is_empty() {
+        cmd.env("P4PASSWD", &conn.ticket); // see base_command
+    }
     for a in args {
         cmd.arg(a);
     }

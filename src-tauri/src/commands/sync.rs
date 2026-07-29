@@ -30,11 +30,20 @@ fn sync_run(
         cmd.arg("-n");
         log_args.push("-n".into());
     } else if parallel {
-        // Parallel file transfer, like P4V. The server caps it at
+        // Parallel file transfer, like P4V. The server caps threads at
         // net.parallel.max; where it's disabled p4 may error, and the caller
         // then retries without it.
-        cmd.arg("--parallel=threads=4");
-        log_args.push("--parallel=threads=4".into());
+        //
+        // batch/batchsize matter far more than threads for UE-sized trees: the
+        // defaults (8 files / 512 KB per batch) mean a round trip every few
+        // small files, and at ~100 ms RTT to a remote server (e.g. Epic in
+        // us-east) that latency dominates a million-file sync. Bigger batches
+        // cut the round trips; `min` keeps tiny syncs sequential (parallelism
+        // costs more than it saves below a handful of files).
+        // (batchsize is in BYTES — `2M` is rejected with a usage error.)
+        const PARALLEL: &str = "--parallel=threads=8,batch=64,batchsize=2097152,min=8";
+        cmd.arg(PARALLEL);
+        log_args.push(PARALLEL.into());
     }
     if let Some(p) = path {
         if !p.is_empty() {
