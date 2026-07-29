@@ -32,8 +32,13 @@ type Hooks = {
   getSyncing: () => boolean;
   setSyncing: (v: boolean) => void;
   askConfirm: (msg: string, title?: string, ok?: string) => Promise<boolean>;
-  // Ask for login credentials (user + password). Resolves null if cancelled.
-  promptLogin: (port: string, user: string) => Promise<{ user: string; password: string } | null>;
+  // Ask for login credentials (user + password); `error` shows why the previous
+  // attempt failed (re-prompt loop). Resolves null if cancelled.
+  promptLogin: (
+    port: string,
+    user: string,
+    error?: string,
+  ) => Promise<{ user: string; password: string } | null>;
 };
 
 let h: Hooks | null = null;
@@ -67,6 +72,31 @@ function adjustCharset(conn: P4Conn, msg: string): boolean {
     return true;
   }
   return false;
+}
+
+/** Prompt for credentials and log in, RE-PROMPTING with the p4 error on failure
+ *  until it succeeds or the user cancels — a wrong user (e.g. an account that
+ *  doesn't exist on that server) or password must never dead-end the flow.
+ *  Charset mismatches are fixed inline. Returns false when cancelled. */
+async function loginLoop(conn: P4Conn): Promise<boolean> {
+  let error = "";
+  for (;;) {
+    const cred = await h!.promptLogin(conn.port, conn.user, error);
+    if (!cred) return false;
+    conn.user = cred.user;
+    await p4.trust(conn).catch(() => {}); // first-contact SSL fingerprint
+    let lastErr = "";
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        await p4.login(conn, cred.password);
+        return true;
+      } catch (e) {
+        lastErr = String(e);
+        if (!adjustCharset(conn, lastErr)) break; // not a charset issue — re-prompt
+      }
+    }
+    error = lastErr || "Login failed.";
+  }
 }
 
 let connected = $state(false);
@@ -236,33 +266,9 @@ export const connection = {
       // check when the caller (relogin) has just logged in — some servers don't
       // report the fresh ticket via `login -s` immediately, which re-prompted.
       const authed = opts?.skipAuth || (await p4.loginStatus(conn).catch(() => true));
-      if (!authed) {
-        const cred = await h.promptLogin(conn.port, conn.user);
-        if (!cred) {
-          connected = false;
-          return; // user cancelled — stay disconnected, no success toast
-        }
-        conn.user = cred.user;
-        let loggedIn = false;
-        for (let attempt = 0; attempt < 3 && !loggedIn; attempt++) {
-          try {
-            await p4.login(conn, cred.password);
-            loggedIn = true;
-          } catch (e) {
-            // A unicode charset mismatch surfaces here (info doesn't negotiate
-            // charset, login does); flip charset and retry, else fail.
-            if (!adjustCharset(conn, String(e))) {
-              connected = false;
-              h.setConnError(`Login failed: ${String(e)}`);
-              return;
-            }
-          }
-        }
-        if (!loggedIn) {
-          connected = false;
-          h.setConnError("Login failed.");
-          return;
-        }
+      if (!authed && !(await loginLoop(conn))) {
+        connected = false;
+        return; // user cancelled — stay disconnected, no success toast
       }
       connected = true;
       h.setOptionsOpen(false);
@@ -436,28 +442,10 @@ export const connection = {
     }
     // Prefill the user from an existing ticket for this server if we have none.
     if (!conn.user) conn.user = await p4.ticketUser(conn).catch(() => "");
-    const cred = await h.promptLogin(conn.port, conn.user);
-    if (!cred) return;
-    conn.user = cred.user;
-    await p4.trust(conn).catch(() => {}); // accept the SSL fingerprint on first use
-    let ok = false;
-    for (let i = 0; i < 3 && !ok; i++) {
-      try {
-        await p4.login(conn, cred.password);
-        ok = true;
-      } catch (e) {
-        if (!adjustCharset(conn, String(e))) {
-          h.setConnError(`Login failed: ${String(e)}`);
-          return;
-        }
-      }
-    }
-    if (!ok) {
-      h.setConnError("Login failed.");
-      return;
-    }
+    if (!(await loginLoop(conn))) return; // cancelled — leave the state untouched
     h.setNotice("Logged in.");
-    saveCharsetFor(conn.port, conn.charset); // keep the charset login settled on
+    saveUserFor(conn.port, conn.user); // remember the account that worked NOW —
+    saveCharsetFor(conn.port, conn.charset); // even if the connect below hiccups
     await connection.connect({ skipAuth: true }); // fresh ticket → don't re-prompt
   },
 

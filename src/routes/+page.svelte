@@ -68,15 +68,17 @@
     confirmState = null;
   }
 
-  // Login prompt (user + password), promise-based like askConfirm.
+  // Login prompt (user + password), promise-based like askConfirm. `error`
+  // carries the previous attempt's failure into the re-prompt.
   type Cred = { user: string; password: string };
   let loginState = $state<{
     user: string;
     port: string;
+    error: string;
     resolve: (v: Cred | null) => void;
   } | null>(null);
-  function promptLogin(port: string, user: string): Promise<Cred | null> {
-    return new Promise((resolve) => (loginState = { user, port, resolve }));
+  function promptLogin(port: string, user: string, error = ""): Promise<Cred | null> {
+    return new Promise((resolve) => (loginState = { user, port, error, resolve }));
   }
   function resolveLogin(v: Cred | null) {
     loginState?.resolve(v);
@@ -691,6 +693,7 @@
   <LoginDialog
     port={loginState.port}
     user={loginState.user}
+    error={loginState.error}
     onSubmit={(c) => resolveLogin(c)}
     onCancel={() => resolveLogin(null)}
   />

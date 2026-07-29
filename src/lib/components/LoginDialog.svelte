@@ -4,11 +4,13 @@
   let {
     port,
     user = "",
+    error = "",
     onSubmit,
     onCancel,
   }: {
     port: string;
     user?: string;
+    error?: string; // why the previous attempt failed (re-prompt loop)
     onSubmit: (v: { user: string; password: string }) => void;
     onCancel: () => void;
   } = $props();
@@ -30,6 +32,9 @@
   <div class="backdrop"></div>
   <div class="dialog" role="dialog" aria-modal="true">
     <div class="dtitle">Log in to {port || "Perforce"}</div>
+    {#if error}
+      <div class="err mono">{error}</div>
+    {/if}
     <label class="lbl">
       <span>User</span>
       <input
@@ -92,6 +97,18 @@
   .dtitle {
     font-size: 13px;
     font-weight: 600;
+  }
+  .err {
+    font-size: 11px;
+    color: var(--warn);
+    background: rgba(192, 57, 43, 0.12);
+    border: 1px solid var(--warn);
+    border-radius: 5px;
+    padding: 6px 8px;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    max-height: 8em;
+    overflow-y: auto;
   }
   .lbl {
     display: flex;
