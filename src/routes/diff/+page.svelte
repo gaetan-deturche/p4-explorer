@@ -18,9 +18,6 @@
   let error = $state("");
   let loading = $state(true);
   let current = $state(-1); // index into blocks (prev/next navigation)
-  // [firstRow, lastRow] of the change we navigated to — marked in the gutter so
-  // the jump is visible even when the view couldn't scroll. Cleared on scroll.
-  let focus = $state<[number, number] | null>(null);
   let body = $state<HTMLDivElement>();
   // Per-line syntax tokens for each side (Shiki), or null → plain text.
   let ltoks = $state<TokenRun[][] | null>(null);
@@ -70,6 +67,16 @@
     return end;
   }
 
+  /** [firstRow, lastRow] of the CURRENT change — marked in the line-number
+   *  gutter. Derived from `current`, the same index the counter shows, so the
+   *  marker follows scrolling as well as jumps (it also makes a jump that can't
+   *  scroll visible). */
+  const focus: [number, number] | null = $derived.by(() => {
+    if (!blocks.length || current < 0 || current >= blocks.length) return null;
+    const start = blocks[current];
+    return [start, blockEnd(start)];
+  });
+
   // The change we last jumped to, plus the scrollTop that jump produced. A jump
   // often CAN'T scroll (the first changes of a file are already on screen at
   // scrollTop 0), and then position() alone would keep resolving to the same
@@ -106,11 +113,9 @@
         ? Math.max(0, (box.height - blockH) / 2) // small change: centre it
         : Math.min(4 * rowH, box.height * 0.2); // long change: a few lines of context
     body.scrollTop = Math.max(0, body.scrollTop + (top.top - box.top) - lead);
-    // Remember this jump (see atJump) and mark the change, so a jump that can't
-    // scroll still shows the user which change they're on.
+    // Remember this jump (see atJump). The gutter marker follows `current`.
     jumpedIdx = current;
     jumpedScrollTop = body.scrollTop;
-    focus = [row, blockEnd(row)];
   }
   /** The first row visible at the top of the viewport. */
   function topRow(): number {
@@ -208,7 +213,6 @@
   function onBodyScroll() {
     if (atJump()) return; // the scroll a jump just produced
     jumpedIdx = null;
-    focus = null;
     if (hint) clearHint();
     syncCounter();
   }
