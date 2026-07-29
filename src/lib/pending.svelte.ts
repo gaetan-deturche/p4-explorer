@@ -496,6 +496,32 @@ export const pending = {
     );
     void pending.scanOffline();
   },
+  /** Check out offline-modified files (exact reconcile → opened in Default). */
+  async checkoutOffline(files: string[]) {
+    if (!files.length) return;
+    const n = files.length;
+    await pending.mutate(
+      () => p4.reconcileFiles(h!.conn(), files),
+      `Checked out ${n} file${n === 1 ? "" : "s"} into the default changelist.`,
+      { refresh: false }, // no synced content changes — just opened
+    );
+    void pending.scanOffline(); // the entries move from Offline to Default
+  },
+  /** Revert offline changes: restore the files to their depot state (p4 clean).
+   *  Destructive for the local edits — confirmed. */
+  async revertOffline(files: string[]) {
+    if (!files.length) return;
+    const n = files.length;
+    const list = files.length <= 5 ? files.join("\n") : `${files.length} files`;
+    await pending.action(
+      () => p4.clean(h!.conn(), files),
+      `${list}\n\nRevert the offline changes? The files are restored to their depot state and your local edits are DISCARDED.`,
+      "Revert offline changes",
+      "Revert",
+      `Reverted ${n} offline file${n === 1 ? "" : "s"}.`,
+    );
+    void pending.scanOffline();
+  },
   shelvedDiff(file: string, rev: number, change: string): Promise<string> {
     return p4.diffShelved(h!.conn(), file, rev, change);
   },

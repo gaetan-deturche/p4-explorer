@@ -306,6 +306,31 @@ pub async fn p4_reconcile(conn: P4Conn, path: String) -> Res {
     run(conn, v(&["reconcile", &spec])).await
 }
 
+/// Check out specific offline-modified files: `p4 reconcile <files…>` (exact
+/// paths, no wildcard) opens each as edit/add/delete in the default changelist.
+#[tauri::command]
+pub async fn p4_reconcile_files(conn: P4Conn, files: Vec<String>) -> Res {
+    if files.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut args = vec!["reconcile".to_string()];
+    args.extend(files);
+    run(conn, args).await
+}
+
+/// Revert offline changes on specific files: `p4 clean <files…>` restores each
+/// to its depot state (re-syncs modified files, removes added ones, restores
+/// deleted ones). DESTRUCTIVE for the local edits — caller must confirm.
+#[tauri::command]
+pub async fn p4_clean(conn: P4Conn, files: Vec<String>) -> Res {
+    if files.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut args = vec!["clean".to_string()];
+    args.extend(files);
+    run(conn, args).await
+}
+
 /// Read-only preview of offline changes across the whole workspace: tracked
 /// files modified or missing on disk but not open in any changelist
 /// (`p4 reconcile -n -e -d -m //<client>/...`). `-m` compares modification times

@@ -316,7 +316,7 @@
 
   // Context state for the two file lists that had no menu before.
   let shelvedCtx = $state<{ x: number; y: number; file: P4Record; change: string } | null>(null);
-  let offlineCtx = $state<{ x: number; y: number; file: P4Record } | null>(null);
+  let offlineCtx = $state<{ x: number; y: number; file: P4Record; files: string[] } | null>(null);
   let detailsCtx = $state<{ x: number; y: number; file: P4Record } | null>(null);
 
   // --- Copy name / depot path / workspace path -------------------------------
@@ -615,7 +615,8 @@
           onFileContext={onPendingFileContext}
           onShelvedContext={(f, change, e) =>
             (shelvedCtx = { x: e.clientX, y: e.clientY, file: f, change })}
-          onOfflineContext={(f, e) => (offlineCtx = { x: e.clientX, y: e.clientY, file: f })}
+          onOfflineContext={(f, e, files) =>
+            (offlineCtx = { x: e.clientX, y: e.clientY, file: f, files })}
           onMoveFile={pending.reopen}
         />
       {:else}
@@ -813,6 +814,12 @@
 
 {#if offlineCtx}
   {@const f = offlineCtx.file}
+  <!-- Group actions apply to the selected OFFLINE files (a mixed selection may
+       also hold opened files — those belong to the changelist menus). -->
+  {@const offSel = offlineCtx.files.filter((d) => pending.offline.some((o) => o.depotFile === d))}
+  {@const targets = offSel.length ? offSel : f.depotFile ? [f.depotFile] : []}
+  {@const n = targets.length}
+  {@const many = n > 1 ? ` (${n} files)` : ""}
   <ContextMenu
     x={offlineCtx.x}
     y={offlineCtx.y}
@@ -826,6 +833,9 @@
             },
           ]
         : []),
+      { label: `Check out${many}`, action: () => pending.checkoutOffline(targets) },
+      { label: `Generate patch${many}…`, action: () => generatePatch("", targets) },
+      { label: `Revert offline changes${many}…`, action: () => pending.revertOffline(targets) },
       {
         label: openInLabel,
         action: () => {

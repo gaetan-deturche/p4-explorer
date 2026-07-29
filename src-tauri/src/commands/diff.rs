@@ -50,7 +50,9 @@ pub async fn export_patch(
         if targets.is_empty() {
             return Err("No modified files to include in the patch.".into());
         }
-        let mut args: Vec<&str> = vec!["diff", "-du"];
+        // -f: force the diff even for files that aren't opened, so a patch can
+        // be exported from OFFLINE-modified files too (no effect on opened ones).
+        let mut args: Vec<&str> = vec!["diff", "-f", "-du"];
         for t in &targets {
             args.push(t.as_str());
         }

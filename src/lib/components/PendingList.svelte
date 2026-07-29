@@ -52,20 +52,24 @@
     // right-click a file → (file, change, event, selected depot files)
     onFileContext: (file: P4Record, change: string, e: MouseEvent, files: string[]) => void;
     onShelvedContext?: (file: P4Record, change: string, e: MouseEvent) => void; // right-click a shelved file
-    onOfflineContext?: (file: P4Record, e: MouseEvent) => void; // right-click an offline file
+    // right-click an offline file → (file, event, selected depot files)
+    onOfflineContext?: (file: P4Record, e: MouseEvent, files: string[]) => void;
     onMoveFile: (file: string, toChange: string) => void; // drag a file onto another CL
   } = $props();
 
-  // Multi-select of local (opened) files via click / Ctrl+click / Shift+click.
+  // Multi-select of local (opened) AND offline files via click / Ctrl+click /
+  // Shift+click — one selection set, keyed by depot path.
   let selected = $state<Set<string>>(new Set());
   let anchor: string | null = null;
-  // Local files in render order (open changelists only), for Shift-range.
+  // Selectable files in render order (open changelists, then the open Offline
+  // section), for Shift-range.
   const orderedFiles = $derived.by(() => {
     const out: string[] = [];
     for (const r of rows) {
       const s = cls[r.change];
       if (s?.open) for (const f of s.local) if (f.depotFile) out.push(f.depotFile);
     }
+    if (offlineOpen) for (const f of offline) if (f.depotFile) out.push(f.depotFile);
     return out;
   });
   function clickFile(file: string, e: MouseEvent | KeyboardEvent) {
@@ -394,16 +398,30 @@
               <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
               <div
                 class="frow mono"
+                data-file={f.depotFile}
+                class:selected={!!f.depotFile && selected.has(f.depotFile)}
                 style="padding-left:20px"
                 title={f.desync
                   ? "Not a local edit: the file matches the latest revision but the sync record is behind (interrupted sync). Right-click → Repair sync record.\n" +
                     (f.clientFile ?? f.depotFile ?? "")
                   : "Double-click to open in external diff\n" + (f.clientFile ?? f.depotFile ?? "")}
+                onclick={(e) => f.depotFile && clickFile(f.depotFile, e)}
+                onkeydown={(e) => {
+                  if (f.depotFile && (e.key === "Enter" || e.key === " ")) {
+                    e.preventDefault();
+                    clickFile(f.depotFile, e);
+                  }
+                }}
                 ondblclick={() => onOpenOfflineDiff(f.depotFile ?? "")}
                 oncontextmenu={(e) => {
                   if (onOfflineContext) {
                     e.preventDefault();
-                    onOfflineContext(f, e);
+                    // Right-click selects the item (unless already in the selection).
+                    if (f.depotFile && !selected.has(f.depotFile)) {
+                      selected = new Set([f.depotFile]);
+                      anchor = f.depotFile;
+                    }
+                    onOfflineContext(f, e, [...selected]);
                   }
                 }}
               >
