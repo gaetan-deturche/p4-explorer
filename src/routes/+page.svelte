@@ -782,6 +782,8 @@
           ]),
       copyMenu(p),
       { label: `Sync ${kind} “${name}”`, action: () => sync.syncPath(p, dir) },
+      // The inverse of sync: drop the local copy, keep the depot untouched.
+      { label: `Unsync ${kind} “${name}”…`, action: () => sync.unsyncPath(p, dir) },
       { label: `Reconcile ${kind} “${name}”`, action: () => sync.reconcilePath(p, dir) },
     ]}
     onClose={() => (treeCtx = null)}

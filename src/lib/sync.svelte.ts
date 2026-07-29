@@ -176,6 +176,36 @@ export const sync = {
     }
   },
 
+  /** "Unsync" a path: `p4 sync <spec>#none` removes the local copy AND updates
+   *  the have records, so it's the true inverse of a sync — nothing is opened or
+   *  marked for delete in the depot, and a later sync brings it back. p4 keeps
+   *  files that are open or writable (noclobber), so local work isn't lost. */
+  async unsyncPath(path: string, isDir: boolean) {
+    if (!h || !h.connected() || h.busy()) return;
+    const spec = isDir ? `${path}/...#none` : `${path}#none`;
+    const name = path.replace(/\/+$/, "").split("/").pop() || path;
+    const kind = isDir ? "folder" : "file";
+    if (
+      !(await h.askConfirm(
+        `${spec}\n\nRemove the local copy of this ${kind}? The files are deleted from disk and the workspace records them as not synced — nothing is marked for delete in the depot, and syncing again restores them. Open or modified files are kept.`,
+        `Unsync ${kind}`,
+        "Unsync",
+      ))
+    ) {
+      return;
+    }
+    h.setSyncing(true);
+    try {
+      const n = await this.run(`Unsync ${name}`, spec);
+      if (n !== null) {
+        await h.refresh();
+        h.loadPending();
+      }
+    } finally {
+      h.setSyncing(false);
+    }
+  },
+
   /** Reconcile offline work under a single depot path (file or folder). */
   async reconcilePath(path: string, isDir: boolean) {
     if (!h || !h.connected() || h.busy()) return;
