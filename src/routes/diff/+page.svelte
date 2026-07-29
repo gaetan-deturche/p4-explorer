@@ -18,6 +18,9 @@
   let error = $state("");
   let loading = $state(true);
   let current = $state(-1); // index into blocks (prev/next navigation)
+  // [firstRow, lastRow] of the change we navigated to — marked in the gutter so
+  // the jump is visible even when the view couldn't scroll. Cleared on scroll.
+  let focus = $state<[number, number] | null>(null);
   let body = $state<HTMLDivElement>();
   // Per-line syntax tokens for each side (Shiki), or null → plain text.
   let ltoks = $state<TokenRun[][] | null>(null);
@@ -67,6 +70,17 @@
     return end;
   }
 
+  // The change we last jumped to, plus the scrollTop that jump produced. A jump
+  // often CAN'T scroll (the first changes of a file are already on screen at
+  // scrollTop 0), and then position() alone would keep resolving to the same
+  // change and Next would appear dead. While the view sits exactly where a jump
+  // left it, that jump defines "where we are"; any real scrolling invalidates it.
+  let jumpedIdx: number | null = null;
+  let jumpedScrollTop = -1;
+  function atJump(): boolean {
+    return jumpedIdx !== null && !!body && Math.abs(body.scrollTop - jumpedScrollTop) < 2;
+  }
+
   /** Scroll a change into view. Placement depends on its size: a block that fits
    *  comfortably is CENTRED, while a long one is put a few lines below the top —
    *  the changed content matters more than the context above it, and centring a
@@ -92,7 +106,11 @@
         ? Math.max(0, (box.height - blockH) / 2) // small change: centre it
         : Math.min(4 * rowH, box.height * 0.2); // long change: a few lines of context
     body.scrollTop = Math.max(0, body.scrollTop + (top.top - box.top) - lead);
-    syncCounter(); // the counter follows the resulting position, not the index
+    // Remember this jump (see atJump) and mark the change, so a jump that can't
+    // scroll still shows the user which change they're on.
+    jumpedIdx = current;
+    jumpedScrollTop = body.scrollTop;
+    focus = [row, blockEnd(row)];
   }
   /** The first row visible at the top of the viewport. */
   function topRow(): number {
@@ -145,7 +163,11 @@
   /** Step to the next/previous change relative to the visible position. */
   function step(dir: 1 | -1) {
     if (!blocks.length) return;
-    const { idx, inBlock, past, row } = position();
+    // Base the step on the last jump while the view hasn't moved since (see
+    // atJump), else on what's actually visible.
+    const { idx, inBlock, past, row } = atJump()
+      ? { idx: jumpedIdx!, inBlock: true, past: false, row: blocks[jumpedIdx!] }
+      : position();
     // Next: the change coming up (in a gap) or the one after the current change;
     // nothing at all once past the last change — never jump backwards.
     // Previous: from deep inside a long change, its own start first (that IS the
@@ -179,10 +201,14 @@
    *  stepping uses, so the counter and the buttons always agree. */
   function syncCounter() {
     if (!blocks.length) return;
-    current = position().idx;
+    current = atJump() ? jumpedIdx! : position().idx;
   }
-  /** Scrolling means the user moved on: drop any pending wrap offer. */
+  /** Real scrolling means the user moved on: the jump no longer defines where we
+   *  are, and any pending wrap offer / change marker is stale. */
   function onBodyScroll() {
+    if (atJump()) return; // the scroll a jump just produced
+    jumpedIdx = null;
+    focus = null;
     if (hint) clearHint();
     syncCounter();
   }
@@ -268,7 +294,12 @@
         {#each rows as row, i (i)}
           {@const lp = row.l ? pieces(row.l.text, ltoks?.[row.l.no - 1], row.lh) : []}
           {@const rp = row.r ? pieces(row.r.text, rtoks?.[row.r.no - 1], row.rh) : []}
-          <span class="num" class:hl={row.type === "del" || row.type === "mod"} data-row={i}>
+          <span
+            class="num"
+            class:hl={row.type === "del" || row.type === "mod"}
+            class:focus={!!focus && i >= focus[0] && i <= focus[1]}
+            data-row={i}
+          >
             {row.l?.no ?? ""}
           </span>
           <span
@@ -383,6 +414,11 @@
   }
   .num.hl {
     color: var(--text);
+  }
+  /* The change we navigated to: an accent bar in the gutter, so a jump that
+     couldn't scroll (changes already on screen) is still visible. */
+  .num.focus {
+    box-shadow: inset 2px 0 0 var(--accent);
   }
   .code {
     padding: 0 8px;
