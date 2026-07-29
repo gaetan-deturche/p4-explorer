@@ -60,38 +60,65 @@
     }
   });
 
+  /** The last row of the change block starting at `start` (blocks hold starts). */
+  function blockEnd(start: number): number {
+    let end = start;
+    while (end + 1 < rows.length && rows[end + 1].type !== "same") end++;
+    return end;
+  }
+
+  /** Scroll a change into view. Placement depends on its size: a block that fits
+   *  comfortably is CENTRED, while a long one is put a few lines below the top —
+   *  the changed content matters more than the context above it, and centring a
+   *  long block pushes its start (and most of its body) off screen. */
   function goTo(i: number) {
-    if (!blocks.length) return;
+    if (!blocks.length || !body) return;
     current = Math.max(0, Math.min(blocks.length - 1, i));
     const row = blocks[current];
-    const el = body?.querySelector(`[data-row="${row}"]`);
-    if (el) {
-      el.scrollIntoView({ block: "center" });
+    const el = body.querySelector<HTMLElement>(`[data-row="${row}"]`);
+    if (!el) {
+      // Not mounted yet (first paint) — retry next frame rather than silently
+      // leaving the view where it was.
+      requestAnimationFrame(() => goTo(i));
       return;
     }
-    // Not mounted yet (first paint) — try again next frame rather than silently
-    // leaving the view where it was.
-    requestAnimationFrame(() => {
-      body?.querySelector(`[data-row="${row}"]`)?.scrollIntoView({ block: "center" });
-    });
-  }
-  /** The row at the VERTICAL CENTRE of the viewport — the anchor for "where am I".
-   *  Navigation follows where you scrolled rather than the last button press, and
-   *  the centre (not the top) is the right reference because goTo centres its
-   *  target: anchoring on the top row would leave a just-centred block still
-   *  "below" the anchor, so Next would keep re-finding and re-centring it instead
-   *  of reporting that there's nothing further. */
-  function anchorRow(): number {
-    if (!body) return 0;
     const box = body.getBoundingClientRect();
-    const mid = box.top + box.height / 2;
+    const top = el.getBoundingClientRect();
+    const endEl = body.querySelector<HTMLElement>(`[data-row="${blockEnd(row)}"]`);
+    const blockH = (endEl?.getBoundingClientRect().bottom ?? top.bottom) - top.top;
+    const rowH = top.height || 18;
+    const lead =
+      blockH < box.height * 0.6
+        ? Math.max(0, (box.height - blockH) / 2) // small change: centre it
+        : Math.min(4 * rowH, box.height * 0.2); // long change: a few lines of context
+    body.scrollTop = Math.max(0, body.scrollTop + (top.top - box.top) - lead);
+    syncCounter(); // the counter follows the resulting position, not the index
+  }
+  /** The first row visible at the top of the viewport. */
+  function topRow(): number {
+    if (!body) return 0;
+    const top = body.getBoundingClientRect().top;
     let last = 0;
     for (const el of body.querySelectorAll<HTMLElement>("[data-row]")) {
-      const b = el.getBoundingClientRect();
       last = Number(el.dataset.row);
-      if (b.bottom > mid) return last; // first row reaching the centre line
+      if (el.getBoundingClientRect().bottom > top + 1) return last;
     }
     return last;
+  }
+
+  /** Where we are in the change list: the block containing the top of the view,
+   *  else the next one coming up (`inBlock` false). This one notion drives both
+   *  the counter and stepping, so they can never disagree — and it's independent
+   *  of where goTo happens to place a block on screen. */
+  function position(): { idx: number; inBlock: boolean; past: boolean; row: number } {
+    const row = topRow();
+    for (let k = 0; k < blocks.length; k++) {
+      const start = blocks[k];
+      if (row < start) return { idx: k, inBlock: false, past: false, row }; // gap: k is upcoming
+      if (row <= blockEnd(start)) return { idx: k, inBlock: true, past: false, row };
+    }
+    // Past the last change (trailing context): nothing ahead.
+    return { idx: Math.max(0, blocks.length - 1), inBlock: false, past: true, row };
   }
   // End-of-list feedback: the first press at the last (or first) change says so
   // instead of moving — a big block would otherwise scroll back to its own start,
@@ -115,22 +142,19 @@
     wrapArmed = null;
   }
 
-  /** Step to the next/previous change block relative to the visible position. */
+  /** Step to the next/previous change relative to the visible position. */
   function step(dir: 1 | -1) {
     if (!blocks.length) return;
-    const anchor = anchorRow();
-    // The next block starting after the centre, or the last one starting before
-    // it (inside a long block, that's the block's own start — so Previous takes
-    // you to the top of the change you're reading, then to the one before).
-    let i = -1;
-    if (dir === 1) {
-      i = blocks.findIndex((r) => r > anchor);
-    } else {
-      for (let k = 0; k < blocks.length; k++) {
-        if (blocks[k] < anchor) i = k;
-        else break;
-      }
-    }
+    const { idx, inBlock, past, row } = position();
+    // Next: the change coming up (in a gap) or the one after the current change;
+    // nothing at all once past the last change — never jump backwards.
+    // Previous: from deep inside a long change, its own start first (that IS the
+    // move back); otherwise the change before.
+    let target: number;
+    if (dir === 1) target = past ? -1 : inBlock ? idx + 1 : idx;
+    else if (past) target = idx; // back into the last change
+    else target = inBlock && row > blocks[idx] ? idx : idx - 1;
+    const i = target >= 0 && target < blocks.length ? target : -1;
     if (i !== -1) {
       clearHint();
       goTo(i);
@@ -151,17 +175,16 @@
     );
   }
   /** Keep the "N / M changes" counter in step with scrolling: it should say
-   *  where you ARE, not where you last jumped from. */
+   *  where you ARE, not where you last jumped from. Same `position()` the
+   *  stepping uses, so the counter and the buttons always agree. */
   function syncCounter() {
-    if (hint) clearHint(); // moved on — the wrap offer no longer applies
     if (!blocks.length) return;
-    const anchor = anchorRow();
-    let i = 0;
-    for (let k = 0; k < blocks.length; k++) {
-      if (blocks[k] <= anchor) i = k; // last block start at/above the centre
-      else break;
-    }
-    current = i;
+    current = position().idx;
+  }
+  /** Scrolling means the user moved on: drop any pending wrap offer. */
+  function onBodyScroll() {
+    if (hint) clearHint();
+    syncCounter();
   }
   function onKey(e: KeyboardEvent) {
     if (e.key === "F7" && e.shiftKey) {
@@ -233,7 +256,7 @@
     <span class="label right mono" title={rightPath}>{rightLabel}</span>
   </div>
 
-  <div class="scroll body" bind:this={body} onscroll={syncCounter}>
+  <div class="scroll body" bind:this={body} onscroll={onBodyScroll}>
     {#if loading}
       <div class="msg dim">Loading…</div>
     {:else if error}
