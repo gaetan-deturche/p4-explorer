@@ -72,31 +72,66 @@
     }
     return rows.length;
   }
+  // End-of-list feedback: the first press at the last (or first) change says so
+  // instead of moving — a big block would otherwise scroll back to its own start,
+  // looking like a broken button — and a second press wraps around.
+  let hint = $state("");
+  let hintTimer: number | null = null;
+  let wrapArmed: 1 | -1 | null = null;
+  function say(msg: string, arm: 1 | -1 | null) {
+    hint = msg;
+    wrapArmed = arm;
+    if (hintTimer !== null) clearTimeout(hintTimer);
+    hintTimer = window.setTimeout(() => {
+      hint = "";
+      wrapArmed = null; // the offer to wrap expires with the message
+    }, 3000);
+  }
+  function clearHint() {
+    if (hintTimer !== null) clearTimeout(hintTimer);
+    hintTimer = null;
+    hint = "";
+    wrapArmed = null;
+  }
+
   /** Step to the next/previous change block relative to the visible position. */
   function step(dir: 1 | -1) {
     if (!blocks.length) return;
     const anchor = topRow();
-    // Which block are we inside/at? Use it so repeated presses advance one block
-    // at a time even when a block spans many rows.
-    let i: number;
+    // The next block strictly after the viewport top, or the last one strictly
+    // above it (which, inside a long block, is that block's own start).
+    let i = -1;
     if (dir === 1) {
       i = blocks.findIndex((r) => r > anchor);
-      // Inside a block already → that block's successor is what "next" means.
-      if (i === -1) i = blocks.length - 1;
     } else {
-      // Last block strictly above the anchor (skip the one we're sitting on).
-      i = -1;
       for (let k = 0; k < blocks.length; k++) {
-        if (blocks[k] < anchor - 1) i = k;
+        if (blocks[k] < anchor) i = k;
         else break;
       }
-      if (i === -1) i = 0;
     }
-    goTo(i);
+    if (i !== -1) {
+      clearHint();
+      goTo(i);
+      return;
+    }
+    // Nowhere to go in that direction.
+    if (wrapArmed === dir) {
+      clearHint();
+      goTo(dir === 1 ? 0 : blocks.length - 1); // wrap
+      return;
+    }
+    const last = dir === 1;
+    say(
+      blocks.length === 1
+        ? "Only change in this file — press again to jump to it"
+        : `${last ? "Last" : "First"} change — press again to wrap to the ${last ? "first" : "last"}`,
+      dir,
+    );
   }
   /** Keep the "N / M changes" counter in step with scrolling: it should say
    *  where you ARE, not where you last jumped from. */
   function syncCounter() {
+    if (hint) clearHint(); // moved on — the wrap offer no longer applies
     if (!blocks.length) return;
     const anchor = topRow();
     let i = 0;
@@ -163,8 +198,11 @@
       <button onclick={() => step(-1)} disabled={!blocks.length} title="Previous change (Shift+F7)">
         ▲
       </button>
-      <span class="count dim">
-        {#if loading}…{:else if blocks.length}{current + 1} / {blocks.length} changes{:else}no changes{/if}
+      <span class="count" class:dim={!hint} class:hint={!!hint}>
+        {#if hint}{hint}
+        {:else if loading}…
+        {:else if blocks.length}{current + 1} / {blocks.length} changes
+        {:else}no changes{/if}
       </span>
       <button onclick={() => step(1)} disabled={!blocks.length} title="Next change (F7)">▼</button>
     </div>
@@ -246,6 +284,10 @@
   .count {
     font-size: 11px;
     white-space: nowrap;
+  }
+  /* End-of-list feedback, in place of the counter while it shows. */
+  .count.hint {
+    color: var(--accent);
   }
   .body {
     flex: 1;
