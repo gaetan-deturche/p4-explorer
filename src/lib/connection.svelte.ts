@@ -252,6 +252,14 @@ export const connection = {
       if (!info) info = await p4.info(conn); // last try; throws → outer catch
       const i = info[0] ?? {};
       serverVersion = i.serverVersion ?? "";
+      // Deterministic charset: `p4 info` says whether the server is unicode
+      // (works regardless of the client charset). Pin the explicit value on
+      // first contact and PERSIST it — every command then carries -C + env
+      // P4CHARSET; no mismatch-error guessing on a freshly added server.
+      if (!conn.charset) {
+        conn.charset = i.unicode === "enabled" ? "utf8" : "none";
+        saveCharsetFor(conn.port, conn.charset);
+      }
       // Pick the user for this server: a remembered one wins; else the account
       // an existing ticket was issued to (e.g. a prior P4V login) — that server
       // may not accept the ambient P4USER — and only then p4 info's default.
@@ -476,6 +484,16 @@ export const connection = {
     }
     // Prefill the user from an existing ticket for this server if we have none.
     if (!conn.user) conn.user = await p4.ticketUser(conn).catch(() => "");
+    // Resolve the server's charset BEFORE logging in (see connect) so the login
+    // itself runs with the right one. Best effort — some servers reject info
+    // for unknown users; the loginLoop's mismatch fallback still covers that.
+    if (!conn.charset) {
+      const inf = await p4.info(conn).catch(() => [] as P4Record[]);
+      if (inf.length) {
+        conn.charset = inf[0].unicode === "enabled" ? "utf8" : "none";
+        saveCharsetFor(conn.port, conn.charset);
+      }
+    }
     if (!(await loginLoop(conn))) return; // cancelled — leave the state untouched
     h.setNotice("Logged in.");
     saveUserFor(conn.port, conn.user); // remember the account that worked NOW —
