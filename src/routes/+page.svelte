@@ -631,6 +631,7 @@
           offline={pending.offline}
           offlineScanning={pending.offlineScanning}
           offlineScannedAt={pending.offlineScannedAt}
+          offlineCached={pending.offlineCached}
           onOfflineDiff={pending.offlineDiff}
           onOpenOfflineDiff={pending.openLocalDiff}
           contextChange={pendingCtx?.cl.change ?? ""}

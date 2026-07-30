@@ -151,6 +151,15 @@ export const pending = {
   get offlineScannedAt() {
     return offlineScannedAt;
   },
+  /** Has this workspace ever been scanned? `undefined` in the store means never
+   *  (→ show "scanning"), while an empty list is a real cached result: zero
+   *  offline files, which must NOT read as "still loading". */
+  get offlineCached() {
+    void offlineVer;
+    if (!h || !h.connected()) return false;
+    const client = h.conn().client;
+    return !!client && storeGet("p4:offline", client) !== undefined;
+  },
 
   /** Drop transient state (on disconnect / workspace switch). rows/loading are
    *  derived from the store, so they follow the client automatically. */

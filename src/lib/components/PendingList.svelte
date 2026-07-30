@@ -11,6 +11,7 @@
     offline,
     offlineScanning,
     offlineScannedAt,
+    offlineCached,
     onOfflineDiff,
     onOpenOfflineDiff,
     onLocalFiles,
@@ -36,6 +37,7 @@
     offline: P4Record[]; // files changed on disk but not open in any changelist
     offlineScanning: boolean; // an offline-change scan is in progress
     offlineScannedAt: number | null; // when the last scan completed (freshness)
+    offlineCached: boolean; // false = never scanned (vs a cached empty result)
     onOfflineDiff: (depotFile: string) => Promise<string>; // forced local-vs-server diff
     onOpenOfflineDiff: (depotFile: string) => void; // open the offline diff externally
     contextChange: string; // the changelist whose context menu is open (highlight it)
@@ -370,26 +372,32 @@
         </div>
       {/each}
 
-      {#if offline.length > 0 || offlineScanning}
-        <div class="clsec">
+      <!-- Always present, so a rescan (every refresh) can't make the section pop
+           in and out. "scanning" shows only when nothing is cached yet: an empty
+           result is a real answer (zero offline files), not a loading state. -->
+      <div class="clsec">
         <button class="cl offlinehdr" onclick={() => (offlineOpen = !offlineOpen)}>
           <span class="tw">{offlineOpen ? "▾" : "▸"}</span>
           <span class="cnum mono">Offline</span>
           <span class="desc">modified on disk, not checked out</span>
           <!-- Freshness: this list is a cached scan result — make its age visible. -->
           <span class="date dim">
-            {offlineScanning
-              ? "scanning…"
+            {!offlineCached
+              ? offlineScanning
+                ? "scanning…"
+                : "not scanned yet"
               : offlineScannedAt
                 ? "scanned " +
                   new Date(offlineScannedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
                 : "cached"}
           </span>
-          <span class="user dim">{offlineScanning ? "" : offline.length}</span>
+          <span class="user dim">{offlineCached ? offline.length : ""}</span>
         </button>
         {#if offlineOpen}
-          {#if offline.length === 0}
-            <div class="finfo dim">Scanning…</div>
+          {#if !offlineCached}
+            <div class="finfo dim">{offlineScanning ? "Scanning…" : "Not scanned yet."}</div>
+          {:else if offline.length === 0}
+            <div class="finfo dim">No offline changes.</div>
           {:else}
             {#each offline as f (f.clientFile ?? f.depotFile)}
               {@const key = f.depotFile ?? f.clientFile ?? ""}
@@ -447,8 +455,7 @@
             {/each}
           {/if}
         {/if}
-        </div>
-      {/if}
+      </div>
     {/if}
   </div>
   {#if marquee}
