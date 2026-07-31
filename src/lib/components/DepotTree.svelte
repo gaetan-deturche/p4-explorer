@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { P4Record } from "$lib/p4";
+  import type { SearchHits } from "$lib/p4";
   import type { TreeNode } from "$lib/tree";
 
   let {
@@ -17,7 +17,8 @@
     indexing?: boolean;
     onSelect: (node: TreeNode) => void; // single click: dir → history, file → details
     onExpand: (node: TreeNode) => void; // triangle / double-click: toggle + load
-    onSearch?: (term: string) => Promise<P4Record[]>; // fuzzy index search (optional)
+    // Index search: literal matches filter the view, fuzzy ones are suggestions.
+    onSearch?: (term: string) => Promise<SearchHits>;
     onOpenResult?: (depotFile: string) => void; // click a search result
     // right-click a node → (node, event, selected nodes incl. this one)
     onContext?: (node: TreeNode, e: MouseEvent, selection: TreeNode[]) => void;
@@ -73,7 +74,8 @@
   }
 
   let query = $state("");
-  let results = $state<P4Record[] | null>(null); // null = show tree
+  let hits = $state<SearchHits | null>(null); // null = show the tree
+  let suggestOpen = $state(false); // fuzzy droplist under the search box
   let searching = $state(false);
   let debounce: number | null = null;
   let seq = 0; // drop out-of-order search responses
@@ -89,7 +91,8 @@
     const term = query.trim();
     if (!term) {
       seq++; // invalidate any in-flight search so a late response can't repopulate
-      results = null;
+      hits = null;
+      suggestOpen = false;
       searching = false;
       return;
     }
@@ -102,14 +105,49 @@
     const mine = ++seq;
     const r = await onSearch(term);
     if (mine !== seq) return; // superseded by a newer keystroke / cleared
-    results = r;
+    hits = r;
+    suggestOpen = true;
+    sugSel = -1;
     searching = false;
+  }
+
+  // Suggestions = fuzzy hits the literal filter does NOT show, so the droplist
+  // adds "did you mean" value instead of repeating the list below it.
+  let sugSel = $state(-1);
+  const suggestions = $derived.by(() => {
+    if (!hits) return [];
+    const shown = new Set(hits.contains);
+    return hits.fuzzy.filter((p) => !shown.has(p)).slice(0, 12);
+  });
+
+  function openSuggestion(p: string) {
+    suggestOpen = false;
+    onOpenResult?.(p);
+  }
+  function onSearchKey(e: KeyboardEvent) {
+    if (e.key === "Escape") {
+      if (suggestOpen) suggestOpen = false;
+      else clearSearch();
+      return;
+    }
+    if (!suggestOpen || !suggestions.length) return;
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      sugSel = (sugSel + 1) % suggestions.length;
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      sugSel = (sugSel - 1 + suggestions.length) % suggestions.length;
+    } else if (e.key === "Enter" && sugSel >= 0) {
+      e.preventDefault();
+      openSuggestion(suggestions[sugSel]);
+    }
   }
 
   function clearSearch() {
     seq++; // drop any in-flight search
     query = "";
-    results = null;
+    hits = null;
+    suggestOpen = false;
     searching = false;
     collapsed = {};
   }
@@ -124,11 +162,10 @@
     n.children.forEach(sortTree);
   }
   const resultTree = $derived.by<RNode | null>(() => {
-    if (!results) return null;
+    if (!hits) return null;
     const base = root?.path ?? "";
     const rootNode: RNode = { name: base, path: base, isDir: true, children: [] };
-    for (const rec of results) {
-      const p = rec.depotFile;
+    for (const p of hits.contains) {
       if (!p) continue;
       const rel = base && p.startsWith(base + "/") ? p.slice(base.length + 1) : p.replace(/^\/+/, "");
       const segs = rel.split("/");
@@ -185,29 +222,60 @@
   {#if onSearch}
     <div class="search">
       <input
-        placeholder={indexing ? "Building index…" : "Search files (fuzzy)"}
+        placeholder={indexing ? "Building index…" : "Search files"}
         bind:value={query}
         oninput={onInput}
+        onkeydown={onSearchKey}
+        onblur={() => setTimeout(() => (suggestOpen = false), 120)}
+        onfocus={() => hits && (suggestOpen = true)}
         spellcheck="false"
       />
       {#if query}
         <button class="clear" title="Clear" onclick={clearSearch}>✕</button>
       {/if}
+      <!-- Fuzzy suggestions: near-misses the literal filter below won't show
+           (↑/↓ to pick, Enter to open, Esc to dismiss). -->
+      {#if suggestOpen && suggestions.length}
+        <div class="suggest">
+          {#each suggestions as p, i (p)}
+            <button
+              class="sug mono"
+              class:sel={i === sugSel}
+              title={p}
+              onmousedown={(e) => {
+                e.preventDefault(); // keep focus so blur can't close first
+                openSuggestion(p);
+              }}
+            >
+              <span class="sname">{p.split("/").pop()}</span>
+              <span class="sdir dim">{p.slice(0, p.lastIndexOf("/") + 1)}</span>
+            </button>
+          {/each}
+        </div>
+      {/if}
     </div>
   {/if}
 
   <div class="scroll body">
-    {#if results !== null || query.trim()}
-      <!-- Search mode -->
-      {#if indexing && results === null}
+    {#if hits !== null || query.trim()}
+      <!-- Search mode: the view lists LITERAL (case-insensitive substring)
+           matches, so what you typed is what you see; fuzzy near-misses are
+           offered in the droplist above instead. -->
+      {#if indexing && hits === null}
         <div class="msg dim">Building search index…</div>
-      {:else if searching && results === null}
+      {:else if searching && hits === null}
         <div class="msg dim">Searching…</div>
-      {:else if results && results.length === 0}
-        <div class="msg dim">No files matching “{query.trim()}”.</div>
-      {:else if results}
+      {:else if hits && hits.contains.length === 0}
+        <div class="msg dim">
+          No file name contains “{query.trim()}”.
+          {#if suggestions.length}Similar names are suggested above.{/if}
+        </div>
+      {:else if hits}
         <div class="reshdr dim">
-          {results.length} result{results.length === 1 ? "" : "s"}{results.length >= 200 ? "+" : ""}
+          {hits.contains.length} match{hits.contains.length === 1 ? "" : "es"}{hits.contains.length >=
+          200
+            ? "+"
+            : ""}
         </div>
         {#if resultTree}
           {@render resultNodes(resultTree, 0)}
@@ -318,11 +386,59 @@
     background: var(--bg-panel);
   }
   .search {
+    position: relative; /* anchors the suggestion droplist */
     display: flex;
     align-items: center;
     gap: 4px;
     padding: 6px 8px;
     border-bottom: 1px solid var(--border);
+  }
+  /* Fuzzy suggestions, overlaid so opening them doesn't shift the file list. */
+  .suggest {
+    position: absolute;
+    top: 100%;
+    left: 6px;
+    right: 6px;
+    z-index: 20;
+    max-height: 45vh;
+    overflow-y: auto;
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    box-shadow: 0 8px 22px rgba(0, 0, 0, 0.4);
+    padding: 3px;
+    display: flex;
+    flex-direction: column;
+  }
+  .sug {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    width: 100%;
+    text-align: left;
+    border: none;
+    background: none;
+    border-radius: 4px;
+    padding: 3px 6px;
+    font-size: 11px;
+    color: var(--text);
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .sug:hover,
+  .sug.sel {
+    background: var(--bg-hover);
+  }
+  .sname {
+    flex: none;
+  }
+  .sdir {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    text-align: right;
+    font-size: 10px;
   }
   .search input {
     flex: 1;

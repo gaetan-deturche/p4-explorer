@@ -9,7 +9,7 @@
 //! fetch from p4/disk and WRITE the store; the derived tree re-renders. One data
 //! path: p4 → store → view.
 
-import { p4, idx, type P4Conn, type P4Record } from "$lib/p4";
+import { p4, idx, type P4Conn, type P4Record, type SearchHits } from "$lib/p4";
 import { makeNode, type TreeNode } from "$lib/tree";
 import { localChildren, type FolderContents } from "$lib/cache";
 import { history } from "$lib/history.svelte";
@@ -675,12 +675,13 @@ export const browse = {
       /* best effort */
     }
   },
-  // Per-keystroke fuzzy search over the CURRENT source's index (no p4 per key).
-  async searchDepot(term: string): Promise<P4Record[]> {
-    if (!h || !term.trim()) return [];
-    if (source !== "depot" && !h.conn().client) return [];
-    const paths = await idx.search(srcKey(), term.trim(), 200);
-    return paths.map((p) => ({ depotFile: p }) as P4Record);
+  // Per-keystroke search over the CURRENT source's index (no p4 per key). The
+  // view filters on `contains`; `fuzzy` feeds the suggestion list.
+  async searchDepot(term: string): Promise<SearchHits> {
+    const none: SearchHits = { contains: [], fuzzy: [] };
+    if (!h || !term.trim()) return none;
+    if (source !== "depot" && !h.conn().client) return none;
+    return await idx.search(srcKey(), term.trim(), 200);
   },
   openResult(depotFile: string) {
     selectedTreePath = depotFile;

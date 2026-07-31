@@ -281,24 +281,37 @@ pub async fn index_build_local(
     store_paths(&state, &key, paths)
 }
 
-/// Fuzzy subsequence search over the client's index. Returns the best `max`
-/// depot paths, ranked. Case-insensitive.
+/// Both halves of a file search over the index, from ONE pass (every substring
+/// match is also a subsequence match): `contains` are literal case-insensitive
+/// substring matches — what the file view filters on, so results are predictable
+/// — and `fuzzy` are ranked subsequence matches, offered as suggestions.
+#[derive(serde::Serialize, Default)]
+pub struct SearchHits {
+    pub contains: Vec<String>,
+    pub fuzzy: Vec<String>,
+}
+
+/// Search the client's index, case-insensitively. `max` caps each list.
 #[tauri::command]
 pub async fn index_search(
     state: State<'_, AppState>,
     client: String,
     query: String,
     max: usize,
-) -> Result<Vec<String>, String> {
+) -> Result<SearchHits, String> {
     let entries = ensure_loaded(&state, &client);
     let q = query.trim().to_lowercase();
     if q.is_empty() || entries.is_empty() {
-        return Ok(Vec::new());
+        return Ok(SearchHits::default());
     }
     let qb = q.as_bytes();
 
     let mut scored: Vec<(i32, usize)> = Vec::new();
+    let mut contains: Vec<usize> = Vec::new();
     for (i, e) in entries.iter().enumerate() {
+        if e.lower.contains(&q) {
+            contains.push(i);
+        }
         if let Some(s) = fuzzy_score(qb, &e.lower) {
             scored.push((s, i));
         }
@@ -310,7 +323,14 @@ pub async fn index_search(
             .then_with(|| entries[a.1].path.cmp(&entries[b.1].path))
     });
     scored.truncate(max);
-    Ok(scored.into_iter().map(|(_, i)| entries[i].path.clone()).collect())
+    // Substring hits stay in index order (alphabetical by path) — a filtered
+    // view of the tree, not a ranking.
+    contains.sort_by(|&a, &b| entries[a].path.cmp(&entries[b].path));
+    contains.truncate(max);
+    Ok(SearchHits {
+        contains: contains.into_iter().map(|i| entries[i].path.clone()).collect(),
+        fuzzy: scored.into_iter().map(|(_, i)| entries[i].path.clone()).collect(),
+    })
 }
 
 /// fzf-style subsequence scorer. `None` if `q` is not a subsequence of `path`.

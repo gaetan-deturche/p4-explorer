@@ -20,7 +20,13 @@ export function emptyConn(): P4Conn {
   return { port: "", user: "", client: "", cwd: "", charset: "", ticket: "" };
 }
 
-/** Local SQLite file index for fuzzy search. */
+/** Result of a file-index search: literal matches plus fuzzy suggestions. */
+export interface SearchHits {
+  contains: string[];
+  fuzzy: string[];
+}
+
+/** Local SQLite file index for file search. */
 export const idx = {
   status: (client: string) => invoke<number>("index_status", { client }),
   build: (conn: P4Conn, client: string, root: string) =>
@@ -28,8 +34,10 @@ export const idx = {
   buildDepot: (conn: P4Conn, key: string) => invoke<number>("index_build_depot", { conn, key }),
   buildLocal: (key: string, root: string, rootPath: string) =>
     invoke<number>("index_build_local", { key, root, rootPath }),
+  /** Index search: `contains` = literal case-insensitive substring matches (what
+   *  the file view filters on), `fuzzy` = ranked subsequence matches (suggestions). */
   search: (client: string, query: string, max = 200) =>
-    invoke<string[]>("index_search", { client, query, max }),
+    invoke<SearchHits>("index_search", { client, query, max }),
 };
 
 export interface LocalDir {
