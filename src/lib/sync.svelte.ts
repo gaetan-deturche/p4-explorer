@@ -138,15 +138,19 @@ export const sync = {
     ) {
       return;
     }
+    // Refresh AFTER the busy flag clears: the offline scan refuses to run while a
+    // sync is in flight (it would see half-written files), so scanning inside the
+    // try would simply be skipped.
+    let n: number | null = null;
     h.setSyncing(true);
     try {
-      const n = await this.run("Sync workspace");
-      if (n !== null) {
-        await h.refresh();
-        h.loadPending(); // offline state changed — refresh list + rescan
-      }
+      n = await this.run("Sync workspace");
     } finally {
       h.setSyncing(false);
+    }
+    if (n !== null) {
+      await h.refresh();
+      h.loadPending(); // offline state changed — refresh list + rescan
     }
   },
 
@@ -166,30 +170,32 @@ export const sync = {
     ) {
       return;
     }
+    let n: number | null = null;
     h.setSyncing(true);
     try {
-      const n = await this.run(`Update to @${change}`, [spec]);
-      if (n !== null) {
-        await h.refresh();
-        h.loadPending();
-      }
+      n = await this.run(`Update to @${change}`, [spec]);
     } finally {
       h.setSyncing(false);
+    }
+    if (n !== null) {
+      await h.refresh(); // see globalSync: refresh once the sync is no longer busy
+      h.loadPending();
     }
   },
 
   /** Sync depot paths (files and/or folders) to the latest revision. */
   async syncPath(targets: SyncTarget[]) {
     if (!h || !h.connected() || h.busy() || !targets.length) return;
+    let n: number | null = null;
     h.setSyncing(true);
     try {
-      const n = await this.run(`Sync ${targetLabel(targets)}`, toSpecs(targets));
-      if (n !== null) {
-        await h.refresh();
-        h.loadPending();
-      }
+      n = await this.run(`Sync ${targetLabel(targets)}`, toSpecs(targets));
     } finally {
       h.setSyncing(false);
+    }
+    if (n !== null) {
+      await h.refresh(); // see globalSync: refresh once the sync is no longer busy
+      h.loadPending();
     }
   },
 
@@ -210,15 +216,16 @@ export const sync = {
     ) {
       return;
     }
+    let n: number | null = null;
     h.setSyncing(true);
     try {
-      const n = await this.run(`Unsync ${targetLabel(targets)}`, specs);
-      if (n !== null) {
-        await h.refresh();
-        h.loadPending();
-      }
+      n = await this.run(`Unsync ${targetLabel(targets)}`, specs);
     } finally {
       h.setSyncing(false);
+    }
+    if (n !== null) {
+      await h.refresh(); // see globalSync: refresh once the sync is no longer busy
+      h.loadPending();
     }
   },
 

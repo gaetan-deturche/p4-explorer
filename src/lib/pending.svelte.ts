@@ -179,6 +179,11 @@ export const pending = {
       offlineVer++;
       return true;
     }
+    // Never scan while a sync is writing files: mid-write they look modified and
+    // not-yet-written ones look deleted, so the scan would cache a list of
+    // phantom "offline changes" that stays until the next scan. Returning false
+    // makes the scan loop retry shortly (see runOfflineLoop).
+    if (h.syncing()) return false;
     const w = window as unknown as { __p4guiOfflineBusy?: boolean };
     if (w.__p4guiOfflineBusy) return false; // a scan is already running — skipped
     w.__p4guiOfflineBusy = true;
