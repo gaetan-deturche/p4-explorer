@@ -115,7 +115,10 @@
   // adds "did you mean" value instead of repeating the list below it.
   let sugSel = $state(-1);
   const suggestions = $derived.by(() => {
-    if (!hits) return [];
+    // Nothing useful to suggest for one or two characters, and never show a
+    // previous query's answer while a newer search is still running (that made
+    // the list look unrelated to what was typed).
+    if (!hits || searching || query.trim().length < 3) return [];
     const shown = new Set(hits.contains);
     return hits.fuzzy.filter((p) => !shown.has(p)).slice(0, 12);
   });

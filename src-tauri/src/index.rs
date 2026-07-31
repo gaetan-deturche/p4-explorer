@@ -312,7 +312,15 @@ pub async fn index_search(
         if e.lower.contains(&q) {
             contains.push(i);
         }
-        if let Some(s) = fuzzy_score(qb, &e.lower) {
+        // Fuzzy suggestions score the FILE NAME, not the whole path: a query
+        // scattered across a long path is meaningless as a "did you mean"
+        // ("linefilter.ush" would otherwise match Definitions.BuildPatchServices.h
+        // by picking letters out of the directories).
+        let name = match e.lower.rfind('/') {
+            Some(k) => &e.lower[k + 1..],
+            None => e.lower.as_str(),
+        };
+        if let Some(s) = fuzzy_score(qb, name) {
             scored.push((s, i));
         }
     }
