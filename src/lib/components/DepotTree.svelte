@@ -111,16 +111,16 @@
     searching = false;
   }
 
-  // Suggestions = fuzzy hits the literal filter does NOT show, so the droplist
-  // adds "did you mean" value instead of repeating the list below it.
+  // Suggestions are the RANKED best matches — the closest file names first, so a
+  // real hit (a file actually called what you typed) leads the list. They are not
+  // filtered against the view's literal matches: doing that removed exactly the
+  // matches worth suggesting and left the low-scoring tail.
   let sugSel = $state(-1);
   const suggestions = $derived.by(() => {
-    // Nothing useful to suggest for one or two characters, and never show a
-    // previous query's answer while a newer search is still running (that made
-    // the list look unrelated to what was typed).
+    // Never show a previous query's answer while a newer search is still running,
+    // and nothing for one or two characters (any ranking there is noise).
     if (!hits || searching || query.trim().length < 3) return [];
-    const shown = new Set(hits.contains);
-    return hits.fuzzy.filter((p) => !shown.has(p)).slice(0, 12);
+    return hits.fuzzy.slice(0, 10);
   });
 
   function openSuggestion(p: string) {
@@ -271,7 +271,7 @@
       {:else if hits && hits.contains.length === 0}
         <div class="msg dim">
           No file name contains “{query.trim()}”.
-          {#if suggestions.length}Similar names are suggested above.{/if}
+          {#if suggestions.length}Closest names are suggested above.{/if}
         </div>
       {:else if hits}
         <div class="reshdr dim">

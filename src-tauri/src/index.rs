@@ -284,7 +284,8 @@ pub async fn index_build_local(
 /// Both halves of a file search over the index, from ONE pass (every substring
 /// match is also a subsequence match): `contains` are literal case-insensitive
 /// substring matches — what the file view filters on, so results are predictable
-/// — and `fuzzy` are ranked subsequence matches, offered as suggestions.
+/// — and `fuzzy` is the ranked best-match list shown as suggestions, closest
+/// file name first (a file literally called what you typed leads it).
 #[derive(serde::Serialize, Default)]
 pub struct SearchHits {
     pub contains: Vec<String>,
