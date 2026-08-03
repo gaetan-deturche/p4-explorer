@@ -330,9 +330,13 @@ export const history = {
           h!.conn(), pair.left, pair.right, unrealAssetName(depotFile), pair.leftLabel, pair.rightLabel,
         );
         h!.setNotice(
-          mode === "remote"
-            ? "Diff opened in the running Unreal Editor."
-            : "Launching Unreal Editor for the diff — this takes a moment…",
+          mode === "nocompare"
+            ? // Empty counterpart: the asset is new (or gone) in this change, so
+              // there is nothing for Unreal's asset diff to compare.
+              "No earlier revision of this asset to compare."
+            : mode === "remote"
+              ? "Diff opened in the running Unreal Editor."
+              : "Launching Unreal Editor for the diff — this takes a moment…",
           8000,
         );
       } else if (editor.diffTool === "inapp") {

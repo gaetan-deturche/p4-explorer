@@ -292,6 +292,14 @@ pub async fn open_unreal_diff(
 ) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let t0 = std::time::Instant::now();
+        // An added (or deleted) asset has no counterpart: that side was printed
+        // as an EMPTY temp file, which Unreal can't load as a package. Bail before
+        // trying — otherwise the in-place script fails and the fallback launches a
+        // whole new editor just to show nothing.
+        let empty = |p: &str| std::fs::metadata(p).map(|m| m.len() == 0).unwrap_or(false);
+        if empty(&left) || empty(&right) {
+            return Ok("nocompare".to_string());
+        }
         // In-place first: a running editor with remote execution enabled. Its
         // pong tells us WHICH project it runs (its Saved dir backs the /Temp
         // package root the copies load through) — no p4 round trip needed; the
