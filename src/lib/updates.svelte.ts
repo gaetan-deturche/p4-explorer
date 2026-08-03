@@ -20,9 +20,14 @@ type UpdateState = {
   message: string;
 };
 
+/** Releases come in bursts, so re-check often enough to catch one the same hour. */
+const AUTO_CHECK_MS = 60 * 60 * 1000;
+
 let hooks: Hooks | null = null;
 let pending: Update | null = null;
 let state = $state<UpdateState | null>(null);
+let timer: ReturnType<typeof setInterval> | null = null;
+let dismissedVersion: string | null = null;
 
 export const updates = {
   init(h: Hooks) {
@@ -32,11 +37,24 @@ export const updates = {
     return state;
   },
   dismiss() {
+    if (state) dismissedVersion = state.version;
     state = null;
   },
 
-  /** Check for a newer release. `silent` suppresses the "up to date" / dev notices. */
-  async check(silent: boolean) {
+  /** Re-check periodically while the app stays open. Idempotent; release builds only. */
+  startAutoCheck() {
+    if (timer || !hooks?.isRelease()) return;
+    timer = setInterval(() => {
+      if (state) return; // already surfaced or downloading — don't clobber the dialog
+      void updates.check(true, true);
+    }, AUTO_CHECK_MS);
+  },
+
+  /**
+   * Check for a newer release. `silent` suppresses the "up to date" / dev notices;
+   * `auto` marks a timer-driven check, which won't re-surface a dismissed version.
+   */
+  async check(silent: boolean, auto = false) {
     if (!hooks) return;
     if (!hooks.isRelease()) {
       if (!silent) hooks.notify("This is a development build — auto-update is disabled.");
@@ -45,6 +63,7 @@ export const updates = {
     try {
       const update = await check();
       if (update) {
+        if (auto && update.version === dismissedVersion) return; // user already said no
         pending = update;
         state = {
           version: update.version,

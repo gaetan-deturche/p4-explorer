@@ -471,7 +471,10 @@
     isReleaseBuild()
       .then((v) => {
         isRelease = v;
-        if (v) updates.check(true); // silent check only on release builds
+        if (v) {
+          updates.check(true); // silent check only on release builds
+          updates.startAutoCheck();
+        }
       })
       .catch(() => {});
   });
