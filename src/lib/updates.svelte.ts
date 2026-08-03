@@ -37,7 +37,8 @@ export const updates = {
     return state;
   },
   dismiss() {
-    if (state) dismissedVersion = state.version;
+    // Only "Later" silences the version; closing a failed download should stay retryable.
+    if (state?.phase === "available") dismissedVersion = state.version;
     state = null;
   },
 
