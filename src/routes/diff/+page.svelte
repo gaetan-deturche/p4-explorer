@@ -276,8 +276,14 @@
     await getCurrentWindow().close();
   }
 
-  async function recolor(name: string, left: string[], right: string[]) {
-    const lang = langForFile(name);
+  /** Basename of a path, for extension sniffing. */
+  function base(p: string): string {
+    return p.split(/[\\/]/).pop() ?? p;
+  }
+  async function recolor(left: string[], right: string[]) {
+    // The window TITLE carries revisions ("foo.cpp#12 vs #14") and has no trailing
+    // extension, so the language has to come from the paths.
+    const lang = langForFile(base(rightPath)) ?? langForFile(base(leftPath));
     if (!lang) return;
     const dark = window.matchMedia("(prefers-color-scheme: dark)").matches;
     const map = new Map(tokens);
@@ -317,7 +323,6 @@
       };
       loading = false;
       void recolor(
-        title || rightPath,
         blocks.flatMap((b) => b.left),
         blocks.flatMap((b) => b.right),
       );
