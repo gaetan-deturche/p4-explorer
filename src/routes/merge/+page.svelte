@@ -609,7 +609,7 @@
     box-shadow: inset 0 0 0 1px rgba(217, 141, 58, 0.55);
   }
   .redit {
-    padding-left: 4.4em;
+    padding-left: calc(4.2em + 8px);
     padding-right: 6px;
   }
   .rw {
@@ -629,13 +629,13 @@
   }
   .rw::before {
     content: attr(data-mk);
-    left: -4.4em;
+    left: calc(-4.2em - 8px);
     width: 1em;
     text-align: center;
   }
   .rw::after {
     content: attr(data-n);
-    left: -3.4em;
+    left: calc(-3.2em - 8px);
     width: 3.2em;
     text-align: right;
     color: var(--text-dim, #999);
