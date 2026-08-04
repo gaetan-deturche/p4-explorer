@@ -272,6 +272,9 @@
         }
         break;
       }
+      case "save":
+        void save();
+        break;
       case "redo": {
         typing = false;
         const r = redo(hist, before);

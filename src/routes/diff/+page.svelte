@@ -69,6 +69,7 @@
     leftFrom: number; // 1-based line number in the left file
   }
 
+  let leftText = "";
   let blocks = $state<Block[]>([]);
   let ds = $state<DocState | null>(null);
   let hist = $state<History>(emptyHistory());
@@ -131,6 +132,46 @@
       return at;
     });
   });
+
+  /** Re-diff `rightText` against the left side and rebuild the regions. `keep` is
+   *  an absolute line index in the right file, so the caret survives the new block
+   *  structure. */
+  function rebuild(rightText: string, caret: Caret | number) {
+    blocks = toBlocks(diffLines(leftText, rightText));
+    const regions = blocks.map((b, i) => ({
+      region: i,
+      kind: b.kind === "same" ? "" : "add",
+      conflict: false,
+      lines: b.right.slice(),
+    }));
+    let target: Caret = { region: 0, line: 0, col: 0 };
+    if (typeof caret === "number") {
+      let n = caret;
+      for (const r of regions) {
+        if (n < r.lines.length) {
+          target = { region: r.region, line: n, col: 0 };
+          break;
+        }
+        n -= r.lines.length;
+        target = { region: r.region, line: Math.max(0, r.lines.length - 1), col: 0 };
+      }
+    } else {
+      target = caret;
+    }
+    ds = { doc: { regions }, caret: target };
+    anchor = null;
+  }
+
+  /** The caret's line counted from the top of the right file. */
+  function absoluteLine(): number {
+    if (!ds) return 0;
+    let n = 0;
+    for (const r of ds.doc.regions) {
+      if (r.region === ds.caret.region) return n + ds.caret.line;
+      n += r.lines.length;
+    }
+    return n;
+  }
 
   function goTo(n: number) {
     if (!changes.length) return;
@@ -246,6 +287,9 @@
         }
         break;
       }
+      case "save":
+        void save();
+        break;
       case "redo": {
         const r = redo(hist, before);
         if (r) {
@@ -263,8 +307,16 @@
     if (!ds || !editable || saving) return;
     saving = true;
     try {
-      await writeLocalFile(rightPath, docText(ds.doc));
+      const text = docText(ds.doc);
+      const at = absoluteLine();
+      await writeLocalFile(rightPath, text);
       dirty = false;
+      // The file on disk is the new right side, so the diff is recomputed against
+      // it: blocks that were edited into agreement stop being changes. The save is
+      // a natural checkpoint, so history starts again from here.
+      rebuild(text, at);
+      hist = emptyHistory();
+      if (changes.length) goTo(Math.min(current, changes.length - 1));
     } catch (e) {
       error = String(e);
     } finally {
@@ -308,19 +360,8 @@
         invoke<string>("read_text_file", { path: leftPath }),
         invoke<string>("read_text_file", { path: rightPath }),
       ]);
-      const rowsOut = diffLines(l, r);
-      blocks = toBlocks(rowsOut);
-      ds = {
-        doc: {
-          regions: blocks.map((b, i) => ({
-            region: i,
-            kind: b.kind === "same" ? "" : "add",
-            conflict: false,
-            lines: b.right.slice(),
-          })),
-        },
-        caret: { region: 0, line: 0, col: 0 },
-      };
+      leftText = l;
+      rebuild(r, { region: 0, line: 0, col: 0 });
       loading = false;
       void recolor(
         blocks.flatMap((b) => b.left),

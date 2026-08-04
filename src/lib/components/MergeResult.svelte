@@ -263,6 +263,11 @@
       act(e.shiftKey ? { t: "redo" } : { t: "undo" });
       return;
     }
+    if (ctrl && e.key.toLowerCase() === "s") {
+      e.preventDefault();
+      act({ t: "save" });
+      return;
+    }
     if (ctrl && e.key.toLowerCase() === "y") {
       e.preventDefault();
       act({ t: "redo" });

@@ -52,7 +52,8 @@ export type MergeAction =
   | { t: "deleteWord"; forward: boolean }
   | { t: "copy"; cut?: boolean }
   | { t: "undo" }
-  | { t: "redo" };
+  | { t: "redo" }
+  | { t: "save" };
 
 /** The merged file, as it would be saved. */
 export function docText(doc: MergeDoc): string {
