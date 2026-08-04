@@ -118,17 +118,14 @@
     origin = { ...origin, [i]: what };
   }
 
-  /** The text of an editable region, gutters excluded: each row is one line,
-   *  and gutter spans are dropped from a clone so a line number can never
-   *  reach the file even if the browser duplicated one splitting a row. */
+  /** The text of an editable region: one line per row. Line numbers live in a
+   *  pseudo element, so nothing but code is ever inside the editable. */
   function readLines(el: HTMLElement): string[] {
     const rows = Array.from(el.children).filter((c): c is HTMLElement => c instanceof HTMLElement);
     if (!rows.length) return el.innerText.replace(/\r/g, "").split("\n");
-    return rows.map((row) => {
-      const clone = row.cloneNode(true) as HTMLElement;
-      clone.querySelectorAll(".gut").forEach((g) => g.remove());
-      return (clone.textContent ?? "").replace(/\r/g, "");
-    });
+    // innerText, not textContent: a <br> inside a row (shift+enter) is a real
+    // line break and has to come back as one.
+    return rows.flatMap((row) => row.innerText.replace(/\r/g, "").split("\n"));
   }
   /** Typing in a region: the DOM is the source of truth until focus leaves. */
   function onType(i: number, el: HTMLElement) {
@@ -381,11 +378,9 @@
               onpaste={pasteAsText}
             >
               {#each live === i ? frozen.lines : mine as line, k}
-                <div class="rw"><span class="gut" contenteditable="false"
-                    ><span class="mk">{MARK[resultKind(r, i)] ?? ""}</span><span class="ln"
-                      >{starts[i].m + k}</span
-                    ></span
-                  ><span class="code">{@render codeOnly(line)}</span></div>
+                <div class="rw" data-mk={MARK[resultKind(r, i)] ?? ""} data-n={starts[i].m + k}
+                  >{@render codeOnly(line)}</div
+                >
               {/each}
             </div>
           </div>
@@ -613,21 +608,35 @@
   .redit:focus {
     box-shadow: inset 0 0 0 1px rgba(217, 141, 58, 0.55);
   }
-  .rw {
-    display: flex;
-    align-items: flex-start;
-  }
-  .gut {
-    flex: none;
-    display: flex;
-    user-select: none;
-  }
-  .code {
-    flex: 1;
-    min-width: 0;
+  .redit {
+    padding-left: 4.4em;
     padding-right: 6px;
+  }
+  .rw {
+    position: relative;
     white-space: pre-wrap;
     overflow-wrap: anywhere;
+  }
+  /* Number + mark drawn beside the row's first visual line, out of the text. */
+  .rw::before {
+    content: attr(data-mk) " " attr(data-n);
+    position: absolute;
+    left: -4.4em;
+    width: 4em;
+    text-align: right;
+    white-space: pre;
+    opacity: 0.55;
+    color: var(--text-dim, #999);
+    user-select: none;
+  }
+  .k-add .rw::before {
+    color: #7cc47c;
+  }
+  .k-del .rw::before {
+    color: #d9873a;
+  }
+  .k-vs .rw::before {
+    color: #e0555a;
   }
   .redit.empty::before {
     content: attr(data-ph);
