@@ -7,13 +7,14 @@
   //! the caret, and we take the finished text from it. Nothing the browser does to
   //! that textarea can touch the document.
   import { tick, type Snippet } from "svelte";
-  import type { Caret, DocState, MergeAction } from "$lib/mergedoc";
+  import { orderCarets, sameCaret, type Caret, type DocState, type MergeAction } from "$lib/mergedoc";
   import type { TokenRun } from "$lib/syntax";
 
   // NOT named `state`: that shadows the $state rune, and `$state` would then read
   // as a store subscription.
   let {
     docState,
+    anchor,
     rows,
     starts,
     kinds,
@@ -24,6 +25,8 @@
     onAction,
   }: {
     docState: DocState;
+    /** The fixed end of the selection; null when there is none. */
+    anchor: Caret | null;
     /** Aligned row count per region index (max of the three panes). */
     rows: number[];
     /** First line number of each region in the merged file. */
@@ -88,6 +91,35 @@
     return code ? code.offsetLeft : 0;
   }
 
+  /** Rectangles covering the selection, one per selected line. */
+  const bands = $derived.by(() => {
+    if (!anchor || sameCaret(anchor, docState.caret) || !probe) return [];
+    const { from, to } = orderCarets(docState.doc, anchor, docState.caret);
+    const fi = docState.doc.regions.findIndex((r) => r.region === from.region);
+    const ti = docState.doc.regions.findIndex((r) => r.region === to.region);
+    if (fi < 0 || ti < 0) return [];
+    const gut = gutter();
+    const out: { top: number; left: number; width: number }[] = [];
+    for (let i = fi; i <= ti; i++) {
+      const r = docState.doc.regions[i];
+      const base = tops[i] + (r.conflict ? toolbarHeight : 0);
+      const first = i === fi ? from.line : 0;
+      const last = i === ti ? to.line : r.lines.length - 1;
+      for (let l = first; l <= last && l < r.lines.length; l++) {
+        const line = r.lines[l];
+        const a0 = i === fi && l === from.line ? from.col : 0;
+        const b0 = i === ti && l === to.line ? to.col : line.length;
+        const x1 = gut + widthOf(line.slice(0, a0));
+        const x2 = gut + widthOf(line.slice(0, b0));
+        // A selected line-break shows as a sliver, so an empty line still reads
+        // as selected.
+        const w = Math.max(x2 - x1, b0 >= line.length && !(i === ti && l === to.line) ? 4 : 0);
+        out.push({ top: base + l * lineHeight, left: x1, width: w });
+      }
+    }
+    return out;
+  });
+
   // Re-measure whenever the caret or the text under it changes.
   $effect(() => {
     const c = caretAt;
@@ -116,8 +148,10 @@
     void reveal();
   }
 
+  let dragging = $state(false);
+
   /** Place the caret from a click: the row gives region+line, x gives the column. */
-  function place(e: MouseEvent) {
+  function place(e: MouseEvent, extend = false) {
     if (!pane) return;
     const row = (e.target as HTMLElement).closest("[data-rgn]") as HTMLElement | null;
     const box = pane.getBoundingClientRect();
@@ -131,8 +165,22 @@
     const x = e.clientX - box.left - gutter();
     const col = columnAtX(r.lines[line] ?? "", x);
     void row;
-    act({ t: "caret", caret: { region: r.region, line, col } });
+    act({ t: "caret", caret: { region: r.region, line, col }, extend });
     focus();
+  }
+
+  function onDown(e: MouseEvent) {
+    if (e.button !== 0) return;
+    dragging = true;
+    place(e, e.shiftKey);
+  }
+  function onMove(e: MouseEvent) {
+    if (!dragging) return;
+    e.preventDefault();
+    place(e, true); // dragging always extends from the press
+  }
+  function onUp() {
+    dragging = false;
   }
 
   /** The character index whose rendered edge is nearest `x`, by binary search over
@@ -165,6 +213,16 @@
       act({ t: "redo" });
       return;
     }
+    if (ctrl && e.key.toLowerCase() === "a") {
+      e.preventDefault();
+      act({ t: "selectAll" });
+      return;
+    }
+    if (ctrl && (e.key.toLowerCase() === "c" || e.key.toLowerCase() === "x")) {
+      e.preventDefault();
+      act({ t: "copy", cut: e.key.toLowerCase() === "x" });
+      return;
+    }
     if (ctrl) return; // leave the rest of the ctrl space alone for now
     const moves: Record<string, MergeAction> = {
       ArrowLeft: { t: "move", dir: "left" },
@@ -174,9 +232,10 @@
       Home: { t: "move", dir: "home" },
       End: { t: "move", dir: "end" },
     };
-    if (moves[e.key]) {
+    const move = moves[e.key];
+    if (move) {
       e.preventDefault();
-      act(moves[e.key]);
+      act(move.t === "move" ? { ...move, extend: e.shiftKey } : move);
       return;
     }
     if (e.key === "Enter") {
@@ -230,7 +289,10 @@
   aria-multiline="true"
   aria-label="merged result"
   tabindex="0"
-  onmousedown={place}
+  onmousedown={onDown}
+  onmousemove={onMove}
+  onmouseup={onUp}
+  onmouseleave={onUp}
   onfocus={focus}
 >
   <!-- Measuring probe: same font, white-space and tab-size as a code line. -->
@@ -256,6 +318,10 @@
         </div>
       {/each}
     </div>
+  {/each}
+
+  {#each bands as b (b.top + ":" + b.left)}
+    <div class="sel" style="top:{b.top}px; left:{b.left}px; width:{b.width}px"></div>
   {/each}
 
   {#if caretAt}
@@ -374,6 +440,12 @@
   }
   .k-keep .mk {
     color: var(--text-dim, #999);
+  }
+  .sel {
+    position: absolute;
+    height: var(--lh);
+    background: rgba(217, 141, 58, 0.28);
+    pointer-events: none;
   }
   .caret {
     position: absolute;

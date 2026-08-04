@@ -36,13 +36,17 @@ export interface DocState {
 
 /** What the result pane asks the host to do. Keeping intent separate from the
  *  model means the component never mutates anything itself. */
+export type MoveDir = "left" | "right" | "up" | "down" | "home" | "end";
+
 export type MergeAction =
   | { t: "insert"; text: string }
   | { t: "enter" }
   | { t: "backspace" }
   | { t: "delete" }
-  | { t: "move"; dir: "left" | "right" | "up" | "down" | "home" | "end" }
-  | { t: "caret"; caret: Caret }
+  | { t: "move"; dir: MoveDir; extend?: boolean }
+  | { t: "caret"; caret: Caret; extend?: boolean }
+  | { t: "selectAll" }
+  | { t: "copy"; cut?: boolean }
   | { t: "undo" }
   | { t: "redo" };
 
@@ -197,6 +201,111 @@ export function setRegionLines(state: DocState, region: number, lines: string[])
       line: Math.max(0, lines.length - 1),
       col: lines.length ? lines[lines.length - 1].length : 0,
     },
+  };
+}
+
+// --- selection -------------------------------------------------------------
+// A selection is an anchor plus the caret. It may span regions — reading across
+// them is useful — but deleting one never merges regions: each keeps its identity
+// and loses only the text that was selected inside it.
+
+/** Position of a region in document order, for comparing carets. */
+function order(doc: MergeDoc, region: number): number {
+  return doc.regions.findIndex((r) => r.region === region);
+}
+
+export function sameCaret(a: Caret, b: Caret): boolean {
+  return a.region === b.region && a.line === b.line && a.col === b.col;
+}
+
+/** The two ends of a selection, in document order. */
+export function orderCarets(doc: MergeDoc, a: Caret, b: Caret): { from: Caret; to: Caret } {
+  const ai = order(doc, a.region);
+  const bi = order(doc, b.region);
+  const aFirst = ai !== bi ? ai < bi : a.line !== b.line ? a.line < b.line : a.col <= b.col;
+  return aFirst ? { from: a, to: b } : { from: b, to: a };
+}
+
+/** The selected text, for the clipboard. */
+export function selectedText(doc: MergeDoc, a: Caret, b: Caret): string {
+  const { from, to } = orderCarets(doc, a, b);
+  const fi = order(doc, from.region);
+  const ti = order(doc, to.region);
+  if (fi < 0 || ti < 0) return "";
+  const out: string[] = [];
+  for (let i = fi; i <= ti; i++) {
+    const r = doc.regions[i];
+    if (!r) continue;
+    const first = i === fi ? from.line : 0;
+    const last = i === ti ? to.line : r.lines.length - 1;
+    for (let l = first; l <= last; l++) {
+      const line = r.lines[l] ?? "";
+      const a0 = i === fi && l === from.line ? from.col : 0;
+      const b0 = i === ti && l === to.line ? to.col : line.length;
+      out.push(line.slice(a0, b0));
+    }
+  }
+  return out.join("\n");
+}
+
+/** Remove the selected text. Regions survive; only their content shrinks. */
+export function deleteRange(state: DocState, a: Caret, b: Caret): DocState {
+  const { from, to } = orderCarets(state.doc, a, b);
+  if (sameCaret(from, to)) return state;
+  const doc = clone(state.doc);
+  const fi = order(doc, from.region);
+  const ti = order(doc, to.region);
+  if (fi < 0 || ti < 0) return state;
+
+  if (fi === ti) {
+    const r = doc.regions[fi];
+    const head = (r.lines[from.line] ?? "").slice(0, from.col);
+    const tail = (r.lines[to.line] ?? "").slice(to.col);
+    r.lines.splice(from.line, to.line - from.line + 1, head + tail);
+    return { doc, caret: { region: from.region, line: from.line, col: from.col } };
+  }
+
+  for (let i = fi; i <= ti; i++) {
+    const r = doc.regions[i];
+    if (!r) continue;
+    if (i === fi) {
+      const head = (r.lines[from.line] ?? "").slice(0, from.col);
+      r.lines = [...r.lines.slice(0, from.line), head];
+      if (r.lines.length === 1 && r.lines[0] === "") r.lines = [];
+    } else if (i === ti) {
+      const tail = (r.lines[to.line] ?? "").slice(to.col);
+      r.lines = [tail, ...r.lines.slice(to.line + 1)];
+      if (r.lines.length === 1 && r.lines[0] === "") r.lines = [];
+    } else {
+      r.lines = [];
+    }
+  }
+  const head = doc.regions[fi];
+  return {
+    doc,
+    caret: {
+      region: from.region,
+      line: Math.min(from.line, Math.max(0, head.lines.length - 1)),
+      col: from.col,
+    },
+  };
+}
+
+/** Replace the selection with `text`. */
+export function insertOverRange(state: DocState, a: Caret, b: Caret, text: string): DocState {
+  const cleared = deleteRange(state, a, b);
+  return insertText(cleared, text);
+}
+
+/** Anchor and head covering everything with text. */
+export function selectAll(doc: MergeDoc): { anchor: Caret; head: Caret } | null {
+  const first = doc.regions.find((r) => r.lines.length);
+  const last = [...doc.regions].reverse().find((r) => r.lines.length);
+  if (!first || !last) return null;
+  const lastLine = last.lines.length - 1;
+  return {
+    anchor: { region: first.region, line: 0, col: 0 },
+    head: { region: last.region, line: lastLine, col: last.lines[lastLine].length },
   };
 }
 

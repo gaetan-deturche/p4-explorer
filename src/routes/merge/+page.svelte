@@ -17,14 +17,21 @@
     moveLineStart,
     moveRight,
     moveVertical,
+    deleteRange,
+    insertOverRange,
     push,
     redo,
+    sameCaret,
+    selectAll,
+    selectedText,
     setRegionLines,
     undo,
+    type Caret,
     type DocState,
     type History,
     type MergeAction,
   } from "$lib/mergedoc";
+  import { setClipboard } from "$lib/p4";
   import type { MergeData, MergeRegion } from "$lib/p4";
 
   // Opened by the Rust `open_merge_window` command; the job itself is fetched by
@@ -42,6 +49,8 @@
   /** The result document: regions that own their lines. */
   let ds = $state<DocState | null>(null);
   let hist = $state<History>(emptyHistory());
+  /** The fixed end of the selection; null when there is none. */
+  let anchor = $state<Caret | null>(null);
   /** Region → where its text came from; also marks a conflict as settled. */
   let origin = $state<Record<number, string>>({});
   let current = $state(0); // which conflict the prev/next buttons are on
@@ -125,32 +134,45 @@
 
   // --- editing --------------------------------------------------------------
   /** Apply an intent from the result pane to the model, recording undo. */
+  /** A live selection, or null. */
+  function selection(): { from: Caret; to: Caret } | null {
+    if (!ds || !anchor || sameCaret(anchor, ds.caret)) return null;
+    return { from: anchor, to: ds.caret };
+  }
+  /** Every edit clears the selection: it has been consumed or replaced. */
   function apply(a: MergeAction) {
     if (!ds) return;
     const before = ds;
+    const sel = selection();
     switch (a.t) {
       case "insert":
-        hist = push(hist, before, typing);
+        hist = push(hist, before, typing && !sel);
         typing = true;
-        ds = insertText(before, a.text);
+        ds = sel
+          ? insertOverRange(before, sel.from, sel.to, a.text)
+          : insertText(before, a.text);
+        anchor = null;
         touched(before.caret.region);
         break;
       case "enter":
         hist = push(hist, before, false);
         typing = false;
-        ds = insertLineBreak(before);
+        ds = sel ? insertOverRange(before, sel.from, sel.to, "\n") : insertLineBreak(before);
+        anchor = null;
         touched(before.caret.region);
         break;
       case "backspace":
         hist = push(hist, before, false);
         typing = false;
-        ds = deleteBackward(before);
+        ds = sel ? deleteRange(before, sel.from, sel.to) : deleteBackward(before);
+        anchor = null;
         touched(before.caret.region);
         break;
       case "delete":
         hist = push(hist, before, false);
         typing = false;
-        ds = deleteForward(before);
+        ds = sel ? deleteRange(before, sel.from, sel.to) : deleteForward(before);
+        anchor = null;
         touched(before.caret.region);
         break;
       case "move": {
@@ -168,19 +190,46 @@
                   : a.dir === "home"
                     ? moveLineStart(before.doc, c)
                     : moveLineEnd(before.doc, c);
+        if (a.extend) anchor = anchor ?? before.caret;
+        else anchor = null;
         ds = { doc: before.doc, caret: next };
         break;
       }
       case "caret":
         typing = false;
+        if (a.extend) anchor = anchor ?? before.caret;
+        else anchor = null;
         ds = { doc: before.doc, caret: clampCaret(before.doc, a.caret) };
         break;
+      case "selectAll": {
+        typing = false;
+        const all = selectAll(before.doc);
+        if (all) {
+          anchor = all.anchor;
+          ds = { doc: before.doc, caret: all.head };
+        }
+        break;
+      }
+      case "copy": {
+        typing = false;
+        if (!sel) break;
+        const text = selectedText(before.doc, sel.from, sel.to);
+        void setClipboard(text).catch((e) => (error = String(e)));
+        if (a.cut) {
+          hist = push(hist, before, false);
+          ds = deleteRange(before, sel.from, sel.to);
+          anchor = null;
+          touched(before.caret.region);
+        }
+        break;
+      }
       case "undo": {
         typing = false;
         const u = undo(hist, before);
         if (u) {
           ds = u.state;
           hist = u.history;
+          anchor = null;
         }
         break;
       }
@@ -190,6 +239,7 @@
         if (r) {
           ds = r.state;
           hist = r.history;
+          anchor = null;
         }
         break;
       }
@@ -210,6 +260,7 @@
     hist = push(hist, ds, false);
     typing = false;
     ds = setRegionLines(ds, i, lines);
+    anchor = null;
     origin = { ...origin, [i]: what };
   }
   /** Back to an undecided conflict. */
@@ -218,6 +269,7 @@
     hist = push(hist, ds, false);
     typing = false;
     ds = setRegionLines(ds, i, []);
+    anchor = null;
     const next = { ...origin };
     delete next[i];
     origin = next;
@@ -420,6 +472,7 @@
         <div class="mid">
           <MergeResult
             docState={ds}
+            {anchor}
             {rows}
             starts={starts.map((s) => s.m)}
             {kinds}
