@@ -50,7 +50,7 @@ export interface MergeEditorConfig {
 }
 
 const MARK: Record<string, string> = { add: "+", del: "-", vs: "!", keep: "=" };
-/** The conflict toolbar's height, pinned in the theme and mirrored by the panes. */
+/** The conflict toolbar's height, mirrored by the strip the side panes reserve. */
 const TOOLBAR_H = 24;
 
 /** Region bounds, mapped through edits by CodeMirror.
@@ -359,16 +359,23 @@ export function createMergeEditor(parent: HTMLElement, cfg: MergeEditorConfig): 
     (state) => buildDecorations(state, current),
   );
 
-  /** Read the real position of every region from the rendered editor. */
+  /** Read the real position of every region from the rendered editor. A conflict
+   *  starts at its toolbar, whose position is measured rather than derived: the
+   *  widget's offset from the line is CodeMirror's business, not ours. */
   const measure = () => {
     if (!current.onGeometry) return;
+    const contentTop = view.contentDOM.getBoundingClientRect().top;
+    // Toolbars in DOM order match conflict regions in document order.
+    const bars = Array.from(view.contentDOM.querySelectorAll(".cm-chead"));
+    let bar = 0;
     const tops: number[] = [];
     const iter = view.state.field(regionField).iter();
     while (iter.value) {
       const spec = iter.value.spec;
-      // The toolbar is a block widget ABOVE the first line, so the region starts
-      // that much higher than the line itself.
-      tops[spec.region] = view.lineBlockAt(iter.from).top - (spec.conflict ? TOOLBAR_H : 0);
+      const el = spec.conflict ? bars[bar++] : undefined;
+      tops[spec.region] = el
+        ? el.getBoundingClientRect().top - contentTop
+        : view.lineBlockAt(iter.from).top;
       iter.next();
     }
     current.onGeometry(tops, view.contentHeight);
