@@ -86,7 +86,10 @@
   }
   const kinds = $derived(
     regions.map((r, i) => {
-      if (r.kind === "conflict") return origin[i] === undefined ? "vs" : origin[i] === "base" ? "keep" : "add";
+      // A conflict stays red once a side is taken: the region is still a conflict
+      // until the merge is saved, and green would read as "settled and done".
+      // Progress is shown by the counter and the marker strip instead.
+      if (r.kind === "conflict") return "vs";
       if (r.kind === "same" && origin[i] === undefined) return "";
       return origin[i] === "base" ? "keep" : "add";
     }),
