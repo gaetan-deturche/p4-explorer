@@ -4,6 +4,7 @@
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { langForFile, tokenizeLines, type TokenRun } from "$lib/syntax";
   import MergeResult from "$lib/components/MergeResult.svelte";
+  import OverviewRuler, { type Mark } from "$lib/components/OverviewRuler.svelte";
   import {
     clampCaret,
     deleteBackward,
@@ -317,6 +318,29 @@
     origin = next;
   }
 
+  let scrollEl: HTMLDivElement | undefined = $state();
+  /** The native scrollbar's width, so the ruler sits beside it rather than under. */
+  const barWidth = $derived(scrollEl ? scrollEl.offsetWidth - scrollEl.clientWidth : 0);
+  /** One tick per conflict: red while it needs a decision, green once settled. */
+  const marks = $derived<Mark[]>(
+    conflicts.map((i) => ({
+      pct: total ? tops[i] / total : 0,
+      kind: origin[i] === undefined ? ("conflict" as const) : ("done" as const),
+      title:
+        `conflict ${conflicts.indexOf(i) + 1}` +
+        (origin[i] === undefined ? " — still to settle" : ` — ${origin[i]}`),
+      index: i,
+    })),
+  );
+  function jumpTo(i: number) {
+    const at = conflicts.indexOf(i);
+    if (at >= 0) goTo(at);
+  }
+  function seek(fraction: number) {
+    if (!scrollEl) return;
+    scrollEl.scrollTop = fraction * (scrollEl.scrollHeight - scrollEl.clientHeight);
+  }
+
   function goTo(n: number) {
     if (!conflicts.length) return;
     current = ((n % conflicts.length) + conflicts.length) % conflicts.length;
@@ -468,7 +492,8 @@
   {:else if !data || !ds}
     <div class="dim pad">Loading…</div>
   {:else}
-    <div class="scroll">
+    <div class="viewport">
+      <div class="scroll" bind:this={scrollEl}>
       <div class="grid mono">
         <div class="head">{data.theirsLabel}</div>
         <div class="head link"></div>
@@ -557,7 +582,11 @@
             </div>
           {/each}
         </div>
+        </div>
       </div>
+      {#if marks.length}
+        <OverviewRuler {marks} offsetRight={barWidth} onPick={jumpTo} onSeek={seek} />
+      {/if}
     </div>
   {/if}
 </div>
@@ -625,6 +654,12 @@
     padding: 10px;
     color: var(--warn, #d9a33a);
     white-space: pre-wrap;
+  }
+  .viewport {
+    position: relative;
+    flex: 1;
+    min-height: 0;
+    display: flex;
   }
   .scroll {
     flex: 1;

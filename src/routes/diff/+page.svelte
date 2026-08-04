@@ -14,6 +14,7 @@
   import { diffLines, type DiffRow } from "$lib/linediff";
   import { langForFile, tokenizeLines, type TokenRun } from "$lib/syntax";
   import MergeResult from "$lib/components/MergeResult.svelte";
+  import OverviewRuler, { type Mark } from "$lib/components/OverviewRuler.svelte";
   import {
     clampCaret,
     deleteBackward,
@@ -179,6 +180,30 @@
       n += r.lines.length;
     }
     return n;
+  }
+
+  let scrollEl: HTMLDivElement | undefined = $state();
+  /** The native scrollbar's width, so the ruler sits beside it rather than under. */
+  const barWidth = $derived(scrollEl ? scrollEl.offsetWidth - scrollEl.clientWidth : 0);
+  /** One tick per block that still differs. */
+  const marks = $derived<Mark[]>(
+    blocks
+      .map((b, i) => ({ b, i }))
+      .filter(({ i }) => !settled[i])
+      .map(({ i }) => ({
+        pct: total ? tops[i] / total : 0,
+        kind: "change" as const,
+        title: `change at line ${starts[i].r}`,
+        index: i,
+      })),
+  );
+  function jumpTo(i: number) {
+    const at = changes.indexOf(i);
+    if (at >= 0) goTo(at);
+  }
+  function seek(fraction: number) {
+    if (!scrollEl) return;
+    scrollEl.scrollTop = fraction * (scrollEl.scrollHeight - scrollEl.clientHeight);
   }
 
   function goTo(n: number) {
@@ -441,7 +466,8 @@
   {:else if loading || !ds}
     <div class="dim pad">Loading…</div>
   {:else}
-    <div class="scroll">
+    <div class="viewport">
+      <div class="scroll" bind:this={scrollEl}>
       <div class="grid mono">
         <div class="head">{leftLabel}</div>
         <div class="head gut"></div>
@@ -497,7 +523,11 @@
             onAction={apply}
           />
         </div>
+        </div>
       </div>
+      {#if marks.length}
+        <OverviewRuler {marks} offsetRight={barWidth} onPick={jumpTo} onSeek={seek} />
+      {/if}
     </div>
   {/if}
 </div>
@@ -559,6 +589,12 @@
     padding: 10px;
     color: var(--warn, #d9a33a);
     white-space: pre-wrap;
+  }
+  .viewport {
+    position: relative;
+    flex: 1;
+    min-height: 0;
+    display: flex;
   }
   .scroll {
     flex: 1;
