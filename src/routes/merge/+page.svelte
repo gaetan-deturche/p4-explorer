@@ -321,20 +321,43 @@
   let scrollEl: HTMLDivElement | undefined = $state();
   /** The native scrollbar's width, so the ruler sits beside it rather than under. */
   const barWidth = $derived(scrollEl ? scrollEl.offsetWidth - scrollEl.clientWidth : 0);
-  /** One tick per conflict: red while it needs a decision, green once settled. */
+  /** A tick for every region that is not identical on both sides — conflicts red
+   *  until settled, and the auto-merged changes in the panes' own colours, so the
+   *  strip is a map of the whole merge rather than only of its conflicts. */
   const marks = $derived<Mark[]>(
-    conflicts.map((i) => ({
-      pct: total ? tops[i] / total : 0,
-      kind: origin[i] === undefined ? ("conflict" as const) : ("done" as const),
-      title:
-        `conflict ${conflicts.indexOf(i) + 1}` +
-        (origin[i] === undefined ? " — still to settle" : ` — ${origin[i]}`),
-      index: i,
-    })),
+    regions
+      .map((r, i) => ({ r, i }))
+      .filter(({ r }) => r.kind !== "same")
+      .map(({ r, i }) => {
+        const pct = total ? tops[i] / total : 0;
+        if (r.kind === "conflict") {
+          return {
+            pct,
+            kind: origin[i] === undefined ? ("conflict" as const) : ("done" as const),
+            title:
+              `conflict ${conflicts.indexOf(i) + 1}` +
+              (origin[i] === undefined ? " — still to settle" : ` — ${origin[i]}`),
+            index: i,
+          };
+        }
+        const lines = ds?.doc.regions[i]?.lines ?? [];
+        const base = "base" in r ? r.base : [];
+        // Kept where the result has lines, dropped where the base had them and the
+        // result does not, both when one replaced the other.
+        const kind = !lines.length ? ("del" as const) : !base.length ? ("add" as const) : ("mod" as const);
+        const what = kind === "add" ? "added" : kind === "del" ? "removed" : "changed";
+        const from = r.kind === "theirs" ? "depot" : r.kind === "ours" ? "workspace" : "both sides";
+        return { pct, kind, title: `${what} — from ${from}`, index: i };
+      }),
   );
+  /** Scroll a region into view; conflicts also move the prev/next counter. */
   function jumpTo(i: number) {
     const at = conflicts.indexOf(i);
-    if (at >= 0) goTo(at);
+    if (at >= 0) {
+      goTo(at);
+      return;
+    }
+    if (scrollEl) scrollEl.scrollTop = Math.max(0, tops[i] - LH * 3);
   }
   function seek(fraction: number) {
     if (!scrollEl) return;
