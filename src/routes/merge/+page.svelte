@@ -24,14 +24,6 @@
   /** line text → colored runs, from tokenizing all three sides once. */
   let tokens = $state<Map<string, TokenRun[]>>(new Map());
 
-  // The region being typed in. While it is live its lines are rendered from
-  // `frozen` — a plain array, deliberately NOT reactive — so nothing re-renders
-  // under the caret while the browser owns that subtree.
-  let live = $state<number | null>(null);
-  // A plain box, never $state and never reassigned: reading it must not create a
-  // dependency, or the subtree the caret sits in would re-render as state moves.
-  const frozen: { lines: string[] } = { lines: [] };
-
   const regions = $derived(data?.regions ?? []);
   const conflicts = $derived(
     regions.map((r, i) => (r.kind === "conflict" ? i : -1)).filter((i) => i >= 0),
@@ -113,39 +105,8 @@
         : what === "base"
           ? r.base.join("\n")
           : r[what].join("\n");
-    live = null; // let the region re-render from the new text
     edited = { ...edited, [i]: text };
     origin = { ...origin, [i]: what };
-  }
-
-  /** The text of an editable region: one line per row. Line numbers live in a
-   *  pseudo element, so nothing but code is ever inside the editable. */
-  function readLines(el: HTMLElement): string[] {
-    const rows = Array.from(el.children).filter((c): c is HTMLElement => c instanceof HTMLElement);
-    if (!rows.length) return el.innerText.replace(/\r/g, "").split("\n");
-    // innerText, not textContent: a <br> inside a row (shift+enter) is a real
-    // line break and has to come back as one.
-    return rows.flatMap((row) => row.innerText.replace(/\r/g, "").split("\n"));
-  }
-  /** Typing in a region: the DOM is the source of truth until focus leaves. */
-  function onType(i: number, el: HTMLElement) {
-    edited = { ...edited, [i]: readLines(el).join("\n") };
-    origin = { ...origin, [i]: "manual" };
-  }
-  /** Paste plain text only — a rich paste would inject markup into the code. */
-  function pasteAsText(e: ClipboardEvent) {
-    const text = e.clipboardData?.getData("text/plain");
-    if (text === undefined) return;
-    e.preventDefault();
-    document.execCommand("insertText", false, text.replace(/\r/g, ""));
-  }
-  function onEnter(r: MergeRegion, i: number) {
-    frozen.lines = linesFor(r, i);
-    live = i;
-  }
-  async function onLeave() {
-    live = null;
-    if (data) await recolor(data); // colour whatever was just typed
   }
   /** Drop a hand edit and go back to what the merge produced. */
   function revert(i: number) {
@@ -153,9 +114,116 @@
     const nextO = { ...origin };
     delete nextE[i];
     delete nextO[i];
-    live = null;
     edited = nextE;
     origin = nextO;
+  }
+
+  // --- the editable result pane --------------------------------------------
+  // Svelte must NOT reconcile these rows: the browser rewrites them as the user
+  // types, which leaves any framework bookkeeping stale (duplicated rows,
+  // mis-read text, reverts that don't take). This action owns the subtree
+  // instead: it builds the rows, reads them back, and rebuilds only when the
+  // element is not being typed in.
+  type EditOpts = {
+    lines: string[];
+    kind: string;
+    from: number;
+    tokens: Map<string, TokenRun[]>;
+    onText: (text: string) => void;
+  };
+
+  function editable(node: HTMLElement, opts: EditOpts) {
+    let o = opts;
+
+    const build = () => {
+      node.replaceChildren();
+      o.lines.forEach((line, k) => node.appendChild(row(line, k)));
+    };
+    const row = (line: string, k: number) => {
+      const el = document.createElement("div");
+      el.className = "rw";
+      el.dataset.mk = MARK[o.kind] ?? "";
+      el.dataset.n = String(o.from + k);
+      const runs = o.tokens.get(line);
+      if (runs?.length) {
+        for (const t of runs) {
+          const s = document.createElement("span");
+          if (t.color) s.style.color = t.color;
+          s.textContent = t.content;
+          el.appendChild(s);
+        }
+      } else if (line) {
+        el.textContent = line;
+      }
+      return el;
+    };
+    /** Read the text by walking real DOM nodes only. innerText would be
+     *  shorter, but whether it includes CSS-generated content is
+     *  implementation-dependent — and the gutter IS generated content, so a
+     *  line number could end up written into the file. A walk cannot see it. */
+    const BLOCK = new Set(["DIV", "P", "PRE", "LI"]);
+    const inlineText = (el: Node): string => {
+      let s = "";
+      for (const n of Array.from(el.childNodes)) {
+        if (n.nodeType === Node.TEXT_NODE) s += n.nodeValue ?? "";
+        else if (n instanceof HTMLElement) s += n.tagName === "BR" ? "\n" : inlineText(n);
+      }
+      return s;
+    };
+    const collect = (el: HTMLElement, out: string[]) => {
+      const blocks = Array.from(el.children).filter((c) => BLOCK.has(c.tagName));
+      if (!blocks.length) {
+        out.push(inlineText(el));
+        return;
+      }
+      for (const b of blocks) collect(b as HTMLElement, out);
+    };
+    const read = () => {
+      const out: string[] = [];
+      collect(node, out);
+      return out.join("\n").replace(/\r/g, "");
+    };
+    /** Keep numbers truthful while typing without touching the caret: only the
+     *  data attributes change, never the nodes the selection lives in. */
+    const renumber = () => {
+      let n = o.from;
+      for (const child of Array.from(node.children)) {
+        if (!(child instanceof HTMLElement)) continue;
+        child.dataset.mk = MARK[o.kind] ?? "";
+        child.dataset.n = String(n++);
+        child.classList.add("rw");
+      }
+    };
+
+    const onInput = () => {
+      renumber();
+      o.onText(read());
+    };
+    const onPaste = (e: ClipboardEvent) => {
+      const text = e.clipboardData?.getData("text/plain");
+      if (text === undefined) return;
+      e.preventDefault(); // a rich paste would inject markup into the code
+      document.execCommand("insertText", false, text.replace(/\r/g, ""));
+    };
+    const onBlur = () => build(); // authoritative redraw: numbers + colours
+
+    node.addEventListener("input", onInput);
+    node.addEventListener("paste", onPaste);
+    node.addEventListener("blur", onBlur);
+    build();
+
+    return {
+      update(next: EditOpts) {
+        o = next;
+        // Never rebuild under the caret; blur will redraw from state.
+        if (document.activeElement !== node) build();
+      },
+      destroy() {
+        node.removeEventListener("input", onInput);
+        node.removeEventListener("paste", onPaste);
+        node.removeEventListener("blur", onBlur);
+      },
+    };
   }
 
   function goTo(n: number) {
@@ -192,7 +260,7 @@
   async function recolor(d: MergeData) {
     const lang = langForFile(d.name);
     if (!lang) return;
-    const dark = !window.matchMedia?.("(prefers-color-scheme: light)").matches;
+    const dark = window.matchMedia("(prefers-color-scheme: dark)").matches;
     const batches: string[][] = [[], [], [], []];
     for (const r of d.regions) {
       batches[0].push(...(r.kind === "conflict" ? r.theirs : r.lines));
@@ -202,13 +270,16 @@
     batches[3] = resultLines; // includes anything hand-typed
     const map = new Map(tokens);
     for (const lines of batches) {
-      const fresh = lines.filter((l) => !map.has(l));
-      if (!fresh.length) continue;
-      const runs = await tokenizeLines(lines.join("\n"), lang, dark);
-      if (!runs) continue;
-      lines.forEach((l, i) => {
-        if (runs[i] && !map.has(l)) map.set(l, runs[i]);
-      });
+      if (!lines.some((l) => !map.has(l))) continue;
+      try {
+        const runs = await tokenizeLines(lines.join("\n"), lang, dark);
+        if (!runs) continue;
+        lines.forEach((l, i) => {
+          if (runs[i] && !map.has(l)) map.set(l, runs[i]);
+        });
+      } catch {
+        /* one batch failing must not cost the others their colour */
+      }
     }
     tokens = map;
   }
@@ -236,14 +307,6 @@
               style:color={run.color}>{run.content}</span>{/each}{:else}{line || " "}{/if}</span
       ></div>
   {/each}
-{/snippet}
-
-<!-- Just the code of one line, coloured — used inside the editable pane, where
-     the gutter must stay OUT of the text the browser edits. -->
-{#snippet codeOnly(line: string)}
-  {#if tokens.get(line)}{#each tokens.get(line) ?? [] as run}<span style:color={run.color}
-        >{run.content}</span
-      >{/each}{:else}{line}{/if}
 {/snippet}
 
 <div class="wrap">
@@ -335,8 +398,10 @@
                   both
                 </button>
                 <button class:on={origin[i] === "base"} onclick={() => take(i, "base")}>base</button>
-                {#if origin[i] === "manual"}
-                  <button onclick={() => revert(i)} title="Back to the merged text">revert</button>
+                {#if edited[i] !== undefined}
+                  <button onclick={() => revert(i)} title="Back to an undecided conflict">
+                    reset
+                  </button>
                 {/if}
                 <button
                   class="peek"
@@ -357,11 +422,9 @@
               </div>
             {/if}
 
-            <!-- The result pane is always typeable: no edit mode, no reflow. The
-                 gutter sits outside the editable element so line numbers can
-                 never end up in the file; while a region is `live` its lines
-                 come from `frozen`, which no state change can re-render. -->
-            <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+            <!-- Always typeable, no edit mode. The action owns these rows; the
+                 gutter is drawn by CSS in the padding, so nothing but code is
+                 ever inside the editable. -->
             <div
               class="redit k-{resultKind(r, i)}"
               class:empty={!mine.length}
@@ -372,17 +435,17 @@
               contenteditable="true"
               spellcheck="false"
               data-ph={conflict ? "take a side above, or type the resolution" : ""}
-              onfocusin={() => onEnter(r, i)}
-              onfocusout={onLeave}
-              oninput={(e) => onType(i, e.currentTarget)}
-              onpaste={pasteAsText}
-            >
-              {#each live === i ? frozen.lines : mine as line, k}
-                <div class="rw" data-mk={MARK[resultKind(r, i)] ?? ""} data-n={starts[i].m + k}
-                  >{@render codeOnly(line)}</div
-                >
-              {/each}
-            </div>
+              use:editable={{
+                lines: mine,
+                kind: resultKind(r, i),
+                from: starts[i].m,
+                tokens,
+                onText: (text) => {
+                  edited = { ...edited, [i]: text };
+                  origin = { ...origin, [i]: "manual" };
+                },
+              }}
+            ></div>
           </div>
 
           <div class="cell link" class:conflict class:on={flow.right}>
@@ -547,8 +610,6 @@
     white-space: pre-wrap;
     overflow-wrap: anywhere;
     min-width: 0;
-  }
-  .src {
     padding-right: 6px;
   }
   .mk {
@@ -596,44 +657,47 @@
   .k-keep .mk {
     color: var(--text-dim, #999);
   }
-  /* The editable result. The gutter sits inside each row, so a number stays
-     beside its own wrapped line, but is contenteditable="false": out of the text
-     and atomic to the caret. */
+  /* The editable result: rows are plain blocks (so Enter splits one, as in any
+     editor) and the gutter is drawn in the left padding. */
   .redit {
+    padding-left: calc(4.2em + 8px);
+    padding-right: 6px;
     border-left: 3px solid transparent;
     outline: none;
     cursor: text;
+    min-height: 1.45em;
   }
   /* An inset ring, not a background: the add/drop tint must survive focus. */
   .redit:focus {
     box-shadow: inset 0 0 0 1px rgba(217, 141, 58, 0.55);
   }
-  .redit {
-    padding-left: calc(4.2em + 8px);
-    padding-right: 6px;
+  .redit.empty::before {
+    content: attr(data-ph);
+    color: #e0555a;
+    font-style: italic;
   }
-  .rw {
+  :global(.rw) {
     position: relative;
     white-space: pre-wrap;
     overflow-wrap: anywhere;
     min-height: 1.45em;
+    line-height: 1.45;
   }
-  /* Mark and number are separate pseudo elements, both drawn in the padding
-     beside the row's first visual line: one colour each, exactly like the marks
-     and numbers of the read-only panes. */
-  .rw::before,
-  .rw::after {
+  /* Mark and number: one pseudo element each, so they colour independently and
+     sit at the same offsets as the read-only panes' .mk / .ln. */
+  :global(.rw::before),
+  :global(.rw::after) {
     position: absolute;
     white-space: pre;
     user-select: none;
   }
-  .rw::before {
+  :global(.rw::before) {
     content: attr(data-mk);
     left: calc(-4.2em - 8px);
     width: 1em;
     text-align: center;
   }
-  .rw::after {
+  :global(.rw::after) {
     content: attr(data-n);
     left: calc(-3.2em - 8px);
     width: 3.2em;
@@ -641,22 +705,17 @@
     color: var(--text-dim, #999);
     opacity: 0.55;
   }
-  .k-add .rw::before {
+  :global(.k-add .rw::before) {
     color: #7cc47c;
   }
-  .k-del .rw::before {
+  :global(.k-del .rw::before) {
     color: #d9873a;
   }
-  .k-vs .rw::before {
+  :global(.k-vs .rw::before) {
     color: #e0555a;
   }
-  .k-keep .rw::before {
+  :global(.k-keep .rw::before) {
     color: var(--text-dim, #999);
-  }
-  .redit.empty::before {
-    content: attr(data-ph);
-    color: #e0555a;
-    font-style: italic;
   }
   .chead,
   .editbar {
