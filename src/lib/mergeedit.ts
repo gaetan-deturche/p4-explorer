@@ -47,8 +47,17 @@ export interface MergeEditorConfig {
 
 const MARK: Record<string, string> = { add: "+", del: "-", vs: "!", keep: "=" };
 
-/** Region bounds, mapped through edits by CodeMirror. */
+/** Region bounds, mapped through edits by CodeMirror.
+ *
+ *  startSide/endSide decide where text typed exactly AT a boundary lands. With
+ *  the defaults, typing at the start of a region put the text before it: those
+ *  lines then belonged to no region, so the region never saw them — the side
+ *  panes were never padded for them and the conflict stayed unsettled. -1/+1
+ *  makes both edges absorb insertions, so typing anywhere in a region — including
+ *  into an empty one — is that region's text. */
 class RegionValue extends RangeValue {
+  startSide = -1;
+  endSide = 1;
   constructor(readonly spec: RegionSpec) {
     super();
   }
@@ -263,13 +272,17 @@ const theme = EditorView.theme(
     ".cm-band-vs::before": { color: "#e0555a" },
     ".cm-band-keep": { backgroundColor: "rgba(180,180,180,0.08)", borderLeft: "3px solid #6d6d6d" },
     ".cm-band-keep::before": { color: "var(--text-dim, #999)" },
+    // Exactly 24px, matching the strip the side panes reserve for it: a taller
+    // toolbar would make the editor outgrow the rows it spans, and the grid would
+    // spread the difference over every row.
     ".cm-chead": {
       display: "flex",
       alignItems: "center",
       gap: "6px",
-      minHeight: "24px",
-      padding: "2px 6px",
+      height: "24px",
+      padding: "0 6px",
       boxSizing: "border-box",
+      overflow: "hidden",
       background: "rgba(224,85,90,0.16)",
     },
     ".cm-chead button": {
@@ -277,7 +290,9 @@ const theme = EditorView.theme(
       color: "inherit",
       border: "1px solid var(--border, #333)",
       borderRadius: "4px",
-      padding: "2px 8px",
+      padding: "0 7px",
+      height: "18px",
+      lineHeight: "16px",
       fontSize: "11px",
       cursor: "pointer",
       whiteSpace: "nowrap",

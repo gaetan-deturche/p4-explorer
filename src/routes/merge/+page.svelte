@@ -328,7 +328,9 @@
           {@const conflict = r.kind === "conflict"}
           {@const flow = flows(r, i)}
           {@const plan = rowPlan[i]}
-          <div class="cell theirs" class:conflict style="grid-row:{i + 2}">
+          <div class="cell theirs" class:conflict
+            style="grid-row:{i + 2}; height:calc({plan.rows} * var(--lh) + {conflict ? 24 : 0}px)"
+          >
             {#if conflict}<div class="chead side"></div>{/if}
             {@render pane(
               side(r, "theirs"),
@@ -338,7 +340,9 @@
             )}
           </div>
 
-          <div class="cell link l" class:conflict class:on={flow.left} style="grid-row:{i + 2}">
+          <div class="cell link l" class:conflict class:on={flow.left}
+            style="grid-row:{i + 2}; height:calc({plan.rows} * var(--lh) + {conflict ? 24 : 0}px)"
+          >
             {#if conflict}<div class="chead side"></div>{/if}
             {#if flow.left}
               <div class="arrow" title="This region's text came from the depot side">▶</div>
@@ -347,7 +351,9 @@
             {/if}
           </div>
 
-          <div class="cell link r" class:conflict class:on={flow.right} style="grid-row:{i + 2}">
+          <div class="cell link r" class:conflict class:on={flow.right}
+            style="grid-row:{i + 2}; height:calc({plan.rows} * var(--lh) + {conflict ? 24 : 0}px)"
+          >
             {#if conflict}<div class="chead side"></div>{/if}
             {#if flow.right}
               <div class="arrow" title="This region's text came from the workspace side">◀</div>
@@ -356,7 +362,9 @@
             {/if}
           </div>
 
-          <div class="cell ours" class:conflict style="grid-row:{i + 2}">
+          <div class="cell ours" class:conflict
+            style="grid-row:{i + 2}; height:calc({plan.rows} * var(--lh) + {conflict ? 24 : 0}px)"
+          >
             {#if conflict}<div class="chead side"></div>{/if}
             {@render pane(side(r, "ours"), starts[i].o, sideKind(r, "ours"), plan.rows - plan.ours)}
           </div>
@@ -580,7 +588,7 @@
   .chead {
     display: flex;
     align-items: center;
-    min-height: 24px;
+    height: 24px;
     padding: 2px 6px;
     box-sizing: border-box;
     background: rgba(224, 85, 90, 0.1);
