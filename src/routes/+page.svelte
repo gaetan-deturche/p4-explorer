@@ -307,6 +307,12 @@
     // it, change the file, move it — so a destructive action never sits directly
     // under one that only reads.
     return [
+      // A conflict blocks the submit, so when there is one it comes first — and
+      // the entry is absent otherwise, where it would mean nothing. The set comes
+      // from the same fstat that drives the "needs resolve" badge, so it is free.
+      ...(pending.needsResolve(file.depotFile)
+        ? [{ label: "Resolve…", action: () => merges.resolveFile(file.depotFile) }, { label: "", sep: true }]
+        : []),
       { label: "View diff", action: () => pending.openLocalDiff(file.depotFile) },
       { label: openInLabel, action: () => openLocalInEditor(file.depotFile) },
       { label: "", sep: true },
@@ -314,9 +320,6 @@
       { label: "", sep: true },
       { label: patchLabel, action: () => generatePatch("", sel) },
       { label: "", sep: true },
-      // p4 tells us if there is nothing to resolve, so this stays unconditional
-      // rather than costing an fstat per context-menu open.
-      { label: "Resolve…", action: () => merges.resolveFile(file.depotFile) },
       {
         label: sel.length > 1 ? `Revert (${sel.length} files)…` : "Revert file…",
         action: () => pending.revertMixed(sel),
