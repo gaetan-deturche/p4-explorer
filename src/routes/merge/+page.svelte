@@ -8,7 +8,7 @@
   // id (regions don't fit in a query string).
   const id = new URLSearchParams(window.location.search).get("id") ?? "";
 
-  type Pick = "ours" | "theirs" | "both" | "base" | "custom";
+  type Pick = "theirs" | "ours" | "both" | "base" | "custom";
 
   let data = $state<MergeData | null>(null);
   let error = $state("");
@@ -17,6 +17,7 @@
   let picks = $state<Record<number, Pick>>({});
   let custom = $state<Record<number, string>>({});
   let editing = $state<number | null>(null);
+  let showBase = $state<Record<number, boolean>>({});
   let current = $state(0); // which conflict the prev/next buttons are on
 
   const regions = $derived(data?.regions ?? []);
@@ -24,35 +25,30 @@
     regions.map((r, i) => (r.kind === "conflict" ? i : -1)).filter((i) => i >= 0),
   );
   const unsettled = $derived(conflicts.filter((i) => !picks[i]));
+  const resultLines = $derived(regions.flatMap((r, i) => linesFor(r, i)));
 
-  /** The lines a region contributes given the current picks. */
+  /** The lines the middle (result) pane contributes for a region. */
   function linesFor(r: MergeRegion, i: number): string[] {
     if (r.kind !== "conflict") return r.lines;
     const p = picks[i];
     if (!p) return [];
     if (p === "custom") return (custom[i] ?? "").split("\n");
-    if (p === "ours") return r.ours;
     if (p === "theirs") return r.theirs;
+    if (p === "ours") return r.ours;
     if (p === "base") return r.base;
     return [...r.theirs, ...r.ours]; // "both": depot first, then the workspace
   }
-  const result = $derived(regions.flatMap((r, i) => linesFor(r, i)));
 
-  function label(r: MergeRegion): string {
-    if (r.kind === "same") return "";
-    if (r.kind === "ours") return "workspace only";
-    if (r.kind === "theirs") return "depot only";
-    if (r.kind === "both") return "same on both";
-    return "conflict";
-  }
-  /** What each pane shows for a region (base / theirs / yours columns). */
-  function pane(r: MergeRegion, which: "base" | "theirs" | "ours"): string[] {
+  /** What a side pane shows: its own text, or the base where it didn't change. */
+  function side(r: MergeRegion, which: "theirs" | "ours"): string[] {
     if (r.kind === "same") return r.lines;
     if (r.kind === "conflict") return r[which];
-    if (which === "base") return r.base;
-    // A one-sided change: the other side still holds the base text.
-    if (r.kind === "ours") return which === "ours" ? r.lines : r.base;
-    return which === "theirs" ? r.lines : r.base;
+    if (r.kind === "both") return r.lines;
+    return r.kind === which ? r.lines : r.base;
+  }
+  /** A side pane is the origin of this region's change. */
+  function isSource(r: MergeRegion, which: "theirs" | "ours"): boolean {
+    return r.kind === which || r.kind === "both";
   }
 
   function set(i: number, p: Pick) {
@@ -76,8 +72,7 @@
     if (!data || unsettled.length) return;
     saving = true;
     try {
-      const text = result.join("\n") + "\n";
-      await invoke<string>("merge_save", { id, text });
+      await invoke<string>("merge_save", { id, text: resultLines.join("\n") + "\n" });
       await getCurrentWindow().close();
     } catch (e) {
       error = String(e);
@@ -97,8 +92,8 @@
   onMount(async () => {
     try {
       data = await invoke<MergeData>("merge_data", { id });
-      // Auto-settle nothing: conflicts must be chosen deliberately. Jump to the
-      // first one so the window opens on the work to be done.
+      // Nothing is auto-settled: conflicts must be chosen deliberately. Open on
+      // the first one so the window lands on the work to be done.
       if (data.conflicts > 0) setTimeout(() => goTo(0), 0);
     } catch (e) {
       error = String(e);
@@ -111,8 +106,9 @@
     {#if data}
       <span class="name mono">{data.name}</span>
       <span class="dim">
-        {data.conflicts} conflict{data.conflicts === 1 ? "" : "s"}
-        {#if data.conflicts}· {unsettled.length} still to settle{/if}
+        {data.conflicts} conflict{data.conflicts === 1 ? "" : "s"}{data.conflicts
+          ? ` · ${unsettled.length} still to settle`
+          : ""} · {resultLines.length} lines
       </span>
       <span class="grow"></span>
       {#if conflicts.length > 1}
@@ -141,73 +137,88 @@
   {:else if !data}
     <div class="dim pad">Loading…</div>
   {:else}
-    <div class="heads">
-      <div class="head">{data.baseLabel}</div>
-      <div class="head">{data.theirsLabel}</div>
-      <div class="head">{data.yoursLabel}</div>
-    </div>
-    <div class="panes">
-      {#each regions as r, i (i)}
-        <div class="row {r.kind}" data-region={i}>
-          {#each ["base", "theirs", "ours"] as const as which}
-            <div class="cell">
-              {#each pane(r, which) as line}
-                <div class="line mono">{line || " "}</div>
-              {/each}
-            </div>
-          {/each}
-          {#if r.kind !== "same"}
-            <div class="tag {r.kind}">{label(r)}</div>
-          {/if}
-        </div>
-      {/each}
-    </div>
+    <!-- One grid for headers AND content, so a scrollbar can never push the
+         column titles out of line with their pane. -->
+    <div class="scroll">
+      <div class="grid">
+        <div class="head">{data.theirsLabel}</div>
+        <div class="head mid">result — merged file<span class="dim"> (base: {data.baseLabel})</span></div>
+        <div class="head">{data.yoursLabel}</div>
 
-    <div class="resbar">
-      <span>Result</span>
-      <span class="dim">{result.length} lines</span>
-    </div>
-    <div class="res">
-      {#each regions as r, i (i)}
-        {#if r.kind === "conflict"}
-          <div class="conf" class:settled={!!picks[i]} data-region-res={i}>
-            <div class="confbar">
-              <span class="ctitle">Conflict {conflicts.indexOf(i) + 1}</span>
-              <button class:on={picks[i] === "theirs"} onclick={() => set(i, "theirs")}>
-                Take depot
+        {#each regions as r, i (i)}
+          {@const conflict = r.kind === "conflict"}
+          <div class="cell {r.kind}" class:src={isSource(r, "theirs")}>
+            {#if conflict}
+              <button class="take" title="Take the depot side" onclick={() => set(i, "theirs")}>
+                take ▶
               </button>
-              <button class:on={picks[i] === "ours"} onclick={() => set(i, "ours")}>
-                Take workspace
-              </button>
-              <button class:on={picks[i] === "both"} onclick={() => set(i, "both")}>Both</button>
-              <button class:on={picks[i] === "base"} onclick={() => set(i, "base")}>Base</button>
-              <button class:on={picks[i] === "custom"} onclick={() => set(i, "custom")}>
-                Edit…
-              </button>
-            </div>
-            {#if editing === i}
+            {/if}
+            {#each side(r, "theirs") as line}
+              <div class="line mono">{line || " "}</div>
+            {/each}
+          </div>
+
+          <div class="cell mid {r.kind}" data-region={i}>
+            {#if conflict}
+              <div class="picks">
+                <span class="cnum">conflict {conflicts.indexOf(i) + 1}</span>
+                <button class:on={picks[i] === "theirs"} onclick={() => set(i, "theirs")}>
+                  depot
+                </button>
+                <button class:on={picks[i] === "ours"} onclick={() => set(i, "ours")}>
+                  workspace
+                </button>
+                <button class:on={picks[i] === "both"} onclick={() => set(i, "both")}>both</button>
+                <button class:on={picks[i] === "base"} onclick={() => set(i, "base")}>base</button>
+                <button class:on={picks[i] === "custom"} onclick={() => set(i, "custom")}>
+                  edit…
+                </button>
+                <button
+                  class="peek"
+                  class:on={showBase[i]}
+                  title="Show the common ancestor for this conflict"
+                  onclick={() => (showBase = { ...showBase, [i]: !showBase[i] })}
+                >
+                  base?
+                </button>
+              </div>
+              {#if showBase[i] && r.kind === "conflict"}
+                <div class="baseblock">
+                  {#each r.base as line}
+                    <div class="line mono dim">{line || " "}</div>
+                  {/each}
+                </div>
+              {/if}
+            {/if}
+
+            {#if conflict && editing === i}
               <textarea
                 class="mono"
-                rows={Math.min(20, (custom[i] ?? "").split("\n").length + 1)}
+                rows={Math.min(24, (custom[i] ?? "").split("\n").length + 1)}
                 value={custom[i] ?? ""}
                 oninput={(e) => (custom = { ...custom, [i]: e.currentTarget.value })}
               ></textarea>
-            {:else if picks[i]}
+            {:else if conflict && !picks[i]}
+              <div class="line pending">— take a side, or edit —</div>
+            {:else}
               {#each linesFor(r, i) as line}
                 <div class="line mono">{line || " "}</div>
               {/each}
-            {:else}
-              <div class="line dim">— pick a side —</div>
             {/if}
           </div>
-        {:else}
-          {#each linesFor(r, i) as line}
-            <div class="line mono" class:ours={r.kind === "ours"} class:theirs={r.kind === "theirs"}>
-              {line || " "}
-            </div>
-          {/each}
-        {/if}
-      {/each}
+
+          <div class="cell {r.kind}" class:src={isSource(r, "ours")}>
+            {#if conflict}
+              <button class="take left" title="Take the workspace side" onclick={() => set(i, "ours")}>
+                ◀ take
+              </button>
+            {/if}
+            {#each side(r, "ours") as line}
+              <div class="line mono">{line || " "}</div>
+            {/each}
+          </div>
+        {/each}
+      </div>
     </div>
   {/if}
 </div>
@@ -253,113 +264,102 @@
     color: var(--warn, #d9a33a);
     white-space: pre-wrap;
   }
-  .heads,
-  .row {
-    display: grid;
-    grid-template-columns: 1fr 1fr 1fr;
-  }
-  .heads {
-    flex: none;
-    border-bottom: 1px solid var(--border, #333);
-    background: var(--bg-alt, #1f1f1f);
-  }
-  .head {
-    padding: 4px 8px;
-    font-size: 11px;
-    font-weight: 600;
-    color: var(--text-dim, #999);
-    border-right: 1px solid var(--border, #333);
-  }
-  .panes {
-    flex: 1 1 55%;
+  .scroll {
+    flex: 1;
     overflow: auto;
     min-height: 0;
   }
-  .row {
-    position: relative;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  .grid {
+    display: grid;
+    /* A third of the viewport each, growing for long lines. One scrollbar on the
+       container then pans all three panes together, so rows stay lined up. */
+    grid-template-columns: repeat(3, minmax(33.333%, max-content));
+    align-items: stretch;
   }
-  .row.conflict {
-    background: rgba(215, 106, 106, 0.09);
-    outline: 1px solid rgba(215, 106, 106, 0.35);
+  .head {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    padding: 5px 8px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-dim, #999);
+    background: var(--bg-alt, #1f1f1f);
+    border-bottom: 1px solid var(--border, #333);
+    border-right: 1px solid var(--border, #333);
+    white-space: nowrap;
   }
-  .row.ours {
-    background: rgba(108, 195, 108, 0.07);
-  }
-  .row.theirs {
-    background: rgba(106, 154, 215, 0.07);
-  }
-  .row.both {
-    background: rgba(180, 180, 180, 0.05);
+  .head.mid {
+    color: var(--text, #ddd);
   }
   .cell {
+    position: relative;
     border-right: 1px solid var(--border, #333);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.04);
     min-width: 0;
-    overflow-x: auto;
+  }
+  /* The middle pane is the result: keep it visually the subject. */
+  .cell.mid {
+    background: rgba(255, 255, 255, 0.02);
+  }
+  .cell.theirs.src {
+    background: rgba(106, 154, 215, 0.1);
+  }
+  .cell.ours.src {
+    background: rgba(108, 195, 108, 0.1);
+  }
+  .cell.both.src {
+    background: rgba(180, 180, 180, 0.07);
+  }
+  .cell.conflict {
+    background: rgba(215, 106, 106, 0.1);
+    box-shadow: inset 0 0 0 1px rgba(215, 106, 106, 0.35);
+  }
+  .cell.mid.conflict {
+    background: rgba(215, 106, 106, 0.06);
   }
   .line {
     padding: 0 8px;
     white-space: pre;
     line-height: 1.45;
   }
-  .line.ours {
-    background: rgba(108, 195, 108, 0.09);
-  }
-  .line.theirs {
-    background: rgba(106, 154, 215, 0.09);
-  }
-  .tag {
-    position: absolute;
-    top: 0;
-    right: 0;
-    font-size: 9px;
-    padding: 0 5px;
-    border-bottom-left-radius: 4px;
-    background: var(--bg-panel, #232323);
-    color: var(--text-dim, #999);
-  }
-  .tag.conflict {
+  .line.pending {
     color: var(--danger, #d76a6a);
+    font-style: italic;
   }
-  .resbar {
-    flex: none;
-    display: flex;
-    gap: 10px;
-    align-items: center;
-    padding: 4px 10px;
-    border-top: 1px solid var(--border, #333);
-    border-bottom: 1px solid var(--border, #333);
-    background: var(--bg-alt, #1f1f1f);
-    font-size: 11px;
-    font-weight: 600;
-    color: var(--text-dim, #999);
-  }
-  .res {
-    flex: 1 1 45%;
-    overflow: auto;
-    min-height: 0;
-  }
-  .conf {
-    border: 1px solid rgba(215, 106, 106, 0.45);
-    border-radius: 4px;
-    margin: 4px 6px;
-  }
-  .conf.settled {
-    border-color: rgba(108, 195, 108, 0.4);
-  }
-  .confbar {
+  .picks {
     display: flex;
     align-items: center;
-    gap: 6px;
-    padding: 3px 6px;
-    background: rgba(255, 255, 255, 0.04);
+    gap: 5px;
     flex-wrap: wrap;
+    padding: 3px 6px;
+    background: rgba(255, 255, 255, 0.05);
   }
-  .ctitle {
+  .cnum {
     font-size: 10px;
     font-weight: 600;
     color: var(--text-dim, #999);
-    margin-right: 4px;
+  }
+  .baseblock {
+    border-left: 2px solid var(--border, #333);
+    margin: 2px 0 2px 6px;
+  }
+  /* Inline "take this side" affordance on a conflict's side panes. */
+  .take {
+    position: absolute;
+    top: 2px;
+    right: 4px;
+    z-index: 1;
+    opacity: 0.75;
+    font-size: 10px;
+    padding: 0 5px;
+  }
+  .take.left {
+    right: auto;
+    left: 4px;
+  }
+  .take:hover {
+    opacity: 1;
   }
   button {
     background: var(--bg-alt, #1f1f1f);
@@ -377,6 +377,9 @@
   button.on {
     border-color: var(--accent, #d98d3a);
     color: var(--accent, #d98d3a);
+  }
+  .peek {
+    margin-left: auto;
   }
   .primary {
     border-color: var(--accent, #d98d3a);
