@@ -382,8 +382,34 @@
       ?.scrollIntoView({ block: "center" });
   }
 
+  /** Conflicts settled by editing that ended up with no text at all: legitimate
+   *  ("drop this code") but the most likely shape of an accident, so it is said
+   *  out loud in the header rather than only counted as settled. */
+  const emptied = $derived(
+    conflicts.filter((i) => origin[i] !== undefined && !(ds?.doc.regions[i]?.lines.length ?? 0)),
+  );
+
+  /** Re-checked at save time, not only when the button is drawn: whatever the UI
+   *  state, these must never reach the file. */
+  function saveProblem(text: string): string | null {
+    if (unsettled.length) {
+      const which = unsettled.map((i) => conflicts.indexOf(i) + 1).join(", ");
+      return `Conflict ${which} still to settle — nothing was written.`;
+    }
+    const at = text.split("\n").findIndex((l) => /^(<{7}|={7}|>{7})/.test(l));
+    if (at >= 0) {
+      return `Conflict markers on line ${at + 1} — remove them before saving.`;
+    }
+    return null;
+  }
+
   async function save() {
     if (!data || !ds || unsettled.length) return;
+    const problem = saveProblem(docText(ds.doc));
+    if (problem) {
+      error = problem;
+      return;
+    }
     saving = true;
     try {
       const text = docText(ds.doc);
@@ -492,6 +518,8 @@
       <span class="dim">
         {data.conflicts} conflict{data.conflicts === 1 ? "" : "s"}{data.conflicts
           ? ` · ${unsettled.length} still to settle`
+          : ""}{emptied.length
+          ? ` · ${emptied.length} resolve${emptied.length === 1 ? "s" : ""} to nothing`
           : ""}
       </span>
       <span class="grow"></span>
