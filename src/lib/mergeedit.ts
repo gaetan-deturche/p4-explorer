@@ -17,7 +17,7 @@ import {
   lineNumbers,
   type DecorationSet,
 } from "@codemirror/view";
-import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
+import { defaultKeymap, history, historyKeymap, invertedEffects } from "@codemirror/commands";
 import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import { cpp } from "@codemirror/lang-cpp";
 import { tags as t } from "@lezer/highlight";
@@ -82,6 +82,15 @@ const regionField = StateField.define<RangeSet<RegionValue>>({
     return value.map(tr.changes);
   },
 });
+
+/** Make the region boundaries part of undo history. Mapping them forward through
+ *  changes is not enough: an undo restores the DOCUMENT, and without this the
+ *  ranges stay where the undone edit left them — after deleting a conflict's line
+ *  and pressing ctrl+z, the text came back but the region had drifted over the
+ *  line above it. This hands the pre-change set back on undo. */
+const trackRegions = invertedEffects.of((tr) =>
+  tr.docChanged ? [setRegions.of(tr.startState.field(regionField))] : [],
+);
 
 /** region → blank rows to leave after it, so the side panes stay level. */
 const spacerField = StateField.define<Map<number, number>>({
@@ -435,6 +444,7 @@ export function createMergeEditor(parent: HTMLElement, cfg: MergeEditorConfig): 
         syntaxHighlighting(darkPlus),
         theme,
         regionField,
+        trackRegions,
         spacerField,
         versionField,
         decorations,
