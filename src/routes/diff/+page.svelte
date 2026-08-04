@@ -63,9 +63,9 @@
   const LH = 17.4; // one row: 12px * 1.45
   const TOOLBAR = 0; // the diff has no per-region toolbar
 
-  /** One run of rows that are all the same kind of change. */
+  /** One hunk: a run of unchanged rows, or a run of changed ones. */
   interface Block {
-    kind: "same" | "del" | "add" | "mod";
+    kind: "same" | "change";
     left: string[];
     right: string[];
     leftFrom: number; // 1-based line number in the left file
@@ -93,18 +93,22 @@
   const settled = $derived(blocks.map((_, i) => agrees(i)));
   const changes = $derived(blocks.map((_, i) => (settled[i] ? -1 : i)).filter((i) => i >= 0));
 
-  /** Group the aligned rows into runs — the regions of the document. */
+  /** Group the aligned rows into hunks. Adjacent changed rows belong to ONE hunk
+   *  whatever their individual types: a change where the sides have different line
+   *  counts comes back from the diff as mod rows followed by add or del rows, and
+   *  counting those separately reported one visible change as several. */
   function toBlocks(rows: DiffRow[]): Block[] {
     const out: Block[] = [];
     for (const row of rows) {
+      const kind: Block["kind"] = row.type === "same" ? "same" : "change";
       const last = out[out.length - 1];
-      if (last && last.kind === row.type) {
+      if (last && last.kind === kind) {
         if (row.l) last.left.push(row.l.text);
         if (row.r) last.right.push(row.r.text);
         continue;
       }
       out.push({
-        kind: row.type,
+        kind,
         left: row.l ? [row.l.text] : [],
         right: row.r ? [row.r.text] : [],
         leftFrom: row.l?.no ?? (last ? last.leftFrom + last.left.length : 1),
