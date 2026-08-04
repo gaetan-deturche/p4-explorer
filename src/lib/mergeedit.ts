@@ -230,7 +230,8 @@ const theme = EditorView.theme(
       overflowX: "auto",
     },
     ".cm-content": { padding: "0" },
-    ".cm-line": { position: "relative", padding: "0 6px 0 8px" },
+    // Left padding leaves room for the mark, so the code is not flush against it.
+    ".cm-line": { position: "relative", padding: "0 6px 0 calc(1em + 7px)" },
     "&.cm-focused": { outline: "none" },
     ".cm-gutters": {
       backgroundColor: "transparent",
@@ -249,7 +250,7 @@ const theme = EditorView.theme(
     ".cm-band::before": {
       content: "attr(data-mk)",
       position: "absolute",
-      left: "0",
+      left: "1px",
       width: "1em",
       textAlign: "center",
       userSelect: "none",

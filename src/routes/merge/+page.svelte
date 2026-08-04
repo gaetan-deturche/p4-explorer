@@ -322,7 +322,7 @@
 
         <!-- The result is ONE editor spanning every region row; the side panes
              are per-region cells padded to the same heights. -->
-        <div class="editorcell" bind:this={host}></div>
+        <div class="editorcell" bind:this={host} style="grid-row:2 / span {regions.length}"></div>
 
         {#each regions as r, i (i)}
           {@const conflict = r.kind === "conflict"}
@@ -477,7 +477,6 @@
   }
   .editorcell {
     grid-column: 3;
-    grid-row: 2 / -1;
     background: rgba(255, 255, 255, 0.02);
     border-right: 1px solid var(--border, #333);
     overflow: hidden;
