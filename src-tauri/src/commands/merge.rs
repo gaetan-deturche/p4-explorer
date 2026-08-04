@@ -97,46 +97,48 @@ pub async fn resolve_needed(conn: P4Conn, path: String) -> Result<Vec<String>, S
 /// come from the depot, yours is the workspace file as it stands.
 #[tauri::command]
 pub async fn merge_start_resolve(conn: P4Conn, depot_file: String) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let recs = p4::run(&conn, &["fstat", "-Ru", "-Or", &depot_file])?;
-        let rec = recs.first().ok_or("p4 reports nothing to resolve for this file")?;
-        let client = rec
-            .get("clientFile")
-            .and_then(|v| v.as_str())
-            .ok_or("this file is not in the current workspace")?
-            .to_string();
-        let subs = p4::explode_indexed(rec, "resolveBaseFile");
-        let sub = subs.first().ok_or("p4 gave no resolve record for this file")?;
-        let get = |k: &str| sub.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let (bf, br) = (get("resolveBaseFile"), get("resolveBaseRev"));
-        let (ff, fr) = (get("resolveFromFile"), get("resolveEndFromRev"));
-        if bf.is_empty() || ff.is_empty() {
-            return Err("this file needs a resolve p4 cannot describe (binary or branch)".into());
-        }
+    tauri::async_runtime::spawn_blocking(move || prepare_resolve_merge(&conn, &depot_file))
+        .await
+        .map_err(|e| format!("merge-start task failed: {e}"))?
+}
 
-        let name = depot_file.rsplit('/').next().unwrap_or("file").to_string();
-        let base = print_lines(&conn, &format!("{bf}#{br}"), &format!("base_{name}"))?;
-        let theirs = print_lines(&conn, &format!("{ff}#{fr}"), &format!("theirs_{name}"))?;
-        let ours = read_lines(&client)?;
+pub(crate) fn prepare_resolve_merge(conn: &P4Conn, depot_file: &str) -> Result<String, String> {
+    let recs = p4::run(conn, &["fstat", "-Ru", "-Or", depot_file])?;
+    let rec = recs.first().ok_or("p4 reports nothing to resolve for this file")?;
+    let client = rec
+        .get("clientFile")
+        .and_then(|v| v.as_str())
+        .ok_or("this file is not in the current workspace")?
+        .to_string();
+    let subs = p4::explode_indexed(rec, "resolveBaseFile");
+    let sub = subs.first().ok_or("p4 gave no resolve record for this file")?;
+    let get = |k: &str| sub.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let (bf, br) = (get("resolveBaseFile"), get("resolveBaseRev"));
+    let (ff, fr) = (get("resolveFromFile"), get("resolveEndFromRev"));
+    if bf.is_empty() || ff.is_empty() {
+        return Err("this file needs a resolve p4 cannot describe (binary or branch)".into());
+    }
 
-        Ok(register(MergeJob {
-            kind: "resolve".into(),
-            conn: conn.clone(),
-            depot: depot_file.clone(),
-            target: client,
-            name,
-            base_label: format!("base #{br}"),
-            theirs_label: format!("depot #{fr}"),
-            yours_label: "workspace".into(),
-            base,
-            ours,
-            theirs,
-            splice: None,
-            rej: None,
-        }))
-    })
-    .await
-    .map_err(|e| format!("merge-start task failed: {e}"))?
+    let name = depot_file.rsplit('/').next().unwrap_or("file").to_string();
+    let base = print_lines(conn, &format!("{bf}#{br}"), &format!("base_{name}"))?;
+    let theirs = print_lines(conn, &format!("{ff}#{fr}"), &format!("theirs_{name}"))?;
+    let ours = read_lines(&client)?;
+
+    Ok(register(MergeJob {
+        kind: "resolve".into(),
+        conn: conn.clone(),
+        depot: depot_file.to_string(),
+        target: client,
+        name,
+        base_label: format!("base #{br}"),
+        theirs_label: format!("depot #{fr}"),
+        yours_label: "workspace".into(),
+        base,
+        ours,
+        theirs,
+        splice: None,
+        rej: None,
+    }))
 }
 
 /// Write the settled text back. For a resolve that also marks the file resolved
@@ -235,7 +237,7 @@ pub async fn open_merge_window(app: AppHandle, id: String, name: String) -> Resu
 }
 
 /// The write-back half of `merge_save`, shared with the external-tool path.
-fn merge_save_inner(id: &str, text: &str) -> Result<String, String> {
+pub(crate) fn merge_save_inner(id: &str, text: &str) -> Result<String, String> {
     let (target, kind, depot, splice, rej, conn) = {
         let reg = registry().lock().unwrap();
         let job = reg.get(id).ok_or("this merge is no longer available")?;

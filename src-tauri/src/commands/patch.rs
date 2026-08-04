@@ -122,48 +122,57 @@ pub async fn merge_start_patch(
     hunk_index: usize,
 ) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let text = std::fs::read_to_string(&patch_path)
-            .map_err(|e| format!("cannot read the patch: {e}"))?;
-        let files = parse_patch(&text);
-        let pf = files
-            .iter()
-            .find(|f| f.depot == depot_file)
-            .ok_or("this patch no longer contains that file")?;
-        let h = pf
-            .hunks
-            .get(hunk_index.saturating_sub(1))
-            .ok_or("this patch no longer contains that hunk")?;
-        let local = resolve_target(&conn, &pf.depot, &pf.local_hint)
-            .ok_or("the target file is not in this workspace")?;
-        let raw = std::fs::read(&local).map_err(|e| format!("cannot read the target: {e}"))?;
-        let (_, body) = split_bom(&raw);
-        let body = String::from_utf8(body.to_vec())
-            .map_err(|_| "the target is not a UTF-8 text file".to_string())?;
-        let lines = split_lines(&body);
-
-        // The region the hunk was meant for: whichever window of the file looks
-        // most like its expected text.
-        let (from, to) = closest_region(&lines, &h.old, h.old_start.saturating_sub(1));
-        let name = pf.depot.rsplit('/').next().unwrap_or("file").to_string();
-        let rej = rej_for(&local, &h.raw);
-        Ok(super::merge::register(super::merge::MergeJob {
-            kind: "patch".into(),
-            conn: conn.clone(),
-            depot: pf.depot.clone(),
-            target: local,
-            name,
-            base_label: format!("patch expects (hunk #{hunk_index})"),
-            theirs_label: "patch".into(),
-            yours_label: format!("workspace (lines {}–{})", from + 1, to.max(from + 1)),
-            base: h.old.clone(),
-            ours: lines[from..to].to_vec(),
-            theirs: h.new.clone(),
-            splice: Some((from, to)),
-            rej,
-        }))
+        prepare_patch_merge(&conn, &patch_path, &depot_file, hunk_index)
     })
     .await
     .map_err(|e| format!("merge-start-patch task failed: {e}"))?
+}
+
+pub(crate) fn prepare_patch_merge(
+    conn: &P4Conn,
+    patch_path: &str,
+    depot_file: &str,
+    hunk_index: usize,
+) -> Result<String, String> {
+    let text = std::fs::read_to_string(patch_path)
+        .map_err(|e| format!("cannot read the patch: {e}"))?;
+    let files = parse_patch(&text);
+    let pf = files
+        .iter()
+        .find(|f| f.depot == *depot_file)
+        .ok_or("this patch no longer contains that file")?;
+    let h = pf
+        .hunks
+        .get(hunk_index.saturating_sub(1))
+        .ok_or("this patch no longer contains that hunk")?;
+    let local = resolve_target(conn, &pf.depot, &pf.local_hint)
+        .ok_or("the target file is not in this workspace")?;
+    let raw = std::fs::read(&local).map_err(|e| format!("cannot read the target: {e}"))?;
+    let (_, body) = split_bom(&raw);
+    let body = String::from_utf8(body.to_vec())
+        .map_err(|_| "the target is not a UTF-8 text file".to_string())?;
+    let lines = split_lines(&body);
+
+    // The region the hunk was meant for: whichever window of the file looks
+    // most like its expected text.
+    let (from, to) = closest_region(&lines, &h.old, h.old_start.saturating_sub(1));
+    let name = pf.depot.rsplit('/').next().unwrap_or("file").to_string();
+    let rej = rej_for(&local, &h.raw);
+    Ok(super::merge::register(super::merge::MergeJob {
+        kind: "patch".into(),
+        conn: conn.clone(),
+        depot: pf.depot.clone(),
+        target: local,
+        name,
+        base_label: format!("patch expects (hunk #{hunk_index})"),
+        theirs_label: "patch".into(),
+        yours_label: format!("workspace (lines {}–{})", from + 1, to.max(from + 1)),
+        base: h.old.clone(),
+        ours: lines[from..to].to_vec(),
+        theirs: h.new.clone(),
+        splice: Some((from, to)),
+        rej,
+    }))
 }
 
 /// The `.rej` beside `local` and this hunk's text, so resolving it can prune

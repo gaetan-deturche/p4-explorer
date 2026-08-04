@@ -52,13 +52,19 @@ pub async fn export_patch(
         }
         // -f: force the diff even for files that aren't opened, so a patch can
         // be exported from OFFLINE-modified files too (no effect on opened ones).
+        // #have is REQUIRED: for a file that isn't opened, a bare `p4 diff -f`
+        // compares against #head, so on a workspace that is behind, the patch
+        // would also carry the depot changes not yet synced.
+        let specs: Vec<String> = targets.iter().map(|t| format!("{t}#have")).collect();
         let mut args: Vec<&str> = vec!["diff", "-f", "-du"];
-        for t in &targets {
-            args.push(t.as_str());
+        for s in &specs {
+            args.push(s.as_str());
         }
         let patch = p4::run_raw_stdout_diff(&conn, &args)?;
-        if patch.trim().is_empty() {
-            return Err("No textual diff to export (files may be adds or binaries).".into());
+        // p4 prints `--- / +++` headers even for an unchanged file, so emptiness
+        // has to be judged on hunks, not on the output being blank.
+        if !patch.lines().any(|l| l.starts_with("@@")) {
+            return Err("No textual diff to export (files may be adds, binaries or unchanged).".into());
         }
         let picked = app
             .dialog()
@@ -92,11 +98,14 @@ pub async fn p4_diff_local(conn: P4Conn, depot_file: String) -> Result<String, S
 
 /// As `p4_diff_local`, but `-f` forces the diff for a file that is NOT open —
 /// used for offline-modified files. Text files give a unified diff; binaries
-/// give a "files differ" line.
+/// give a "files differ" line. Pinned to #have: without it p4 diffs an unopened
+/// file against #head, which on a workspace that is behind reports revisions
+/// the user never synced as if they were local edits.
 #[tauri::command]
 pub async fn p4_diff_local_forced(conn: P4Conn, depot_file: String) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        p4::run_raw_stdout_diff(&conn, &["diff", "-f", "-du", &depot_file])
+        let spec = format!("{depot_file}#have");
+        p4::run_raw_stdout_diff(&conn, &["diff", "-f", "-du", &spec])
     })
     .await
     .map_err(|e| format!("diff task failed: {e}"))?
