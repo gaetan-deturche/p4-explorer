@@ -7,7 +7,7 @@
   //! the caret, and we take the finished text from it. Nothing the browser does to
   //! that textarea can touch the document.
   import { tick, type Snippet } from "svelte";
-  import { columnFromVisual, visualColumn, type Caret, type DocState, type MergeAction } from "$lib/mergedoc";
+  import type { Caret, DocState, MergeAction } from "$lib/mergedoc";
   import type { TokenRun } from "$lib/syntax";
 
   // NOT named `state`: that shadows the $state rune, and `$state` would then read
@@ -60,7 +60,7 @@
     ),
   );
 
-  /** The caret's pixel position: which row it sits on, and its column. */
+  /** The caret's row, and the text before it on that row. */
   const caretAt = $derived.by(() => {
     const i = docState.doc.regions.findIndex((r) => r.region === docState.caret.region);
     if (i < 0) return null;
@@ -68,7 +68,31 @@
     const top =
       tops[i] + (r.conflict ? toolbarHeight : 0) + Math.min(docState.caret.line, r.lines.length) * lineHeight;
     const line = r.lines[docState.caret.line] ?? "";
-    return { top, col: visualColumn(line, docState.caret.col) };
+    return { top, prefix: line.slice(0, docState.caret.col) };
+  });
+
+  let probe: HTMLSpanElement | undefined = $state();
+  let caretLeft = $state(0);
+
+  /** Width of `text` as this pane renders it. The probe carries the same font,
+   *  white-space and tab-size as a code line, so measuring beats computing:
+   *  tabs, ch units and font metrics cannot get out of step with the rendering. */
+  function widthOf(text: string): number {
+    if (!probe) return 0;
+    probe.textContent = text;
+    return probe.getBoundingClientRect().width;
+  }
+  /** Where the code column starts, read from a real line rather than assumed. */
+  function gutter(): number {
+    const code = pane?.querySelector(".code") as HTMLElement | null;
+    return code ? code.offsetLeft : 0;
+  }
+
+  // Re-measure whenever the caret or the text under it changes.
+  $effect(() => {
+    const c = caretAt;
+    if (!c || !probe) return;
+    caretLeft = gutter() + widthOf(c.prefix);
   });
 
   /** Keep the caret visible without yanking the view around. */
@@ -104,20 +128,28 @@
     const r = docState.doc.regions[idx];
     const inner = y - tops[idx] - (r.conflict ? toolbarHeight : 0);
     const line = Math.max(0, Math.min(Math.floor(inner / lineHeight), Math.max(0, r.lines.length - 1)));
-    const gut = pane.querySelector(".code") as HTMLElement | null;
-    const charW = charWidth();
-    const left = gut ? gut.getBoundingClientRect().left : box.left;
-    const vx = Math.max(0, Math.round((e.clientX - left) / charW));
-    const col = columnFromVisual(r.lines[line] ?? "", vx);
+    const x = e.clientX - box.left - gutter();
+    const col = columnAtX(r.lines[line] ?? "", x);
     void row;
     act({ t: "caret", caret: { region: r.region, line, col } });
     focus();
   }
 
-  /** Monospace: one probe is enough, and it follows zoom because we re-measure. */
-  function charWidth(): number {
-    const probe = pane?.querySelector(".probe") as HTMLElement | null;
-    return probe ? probe.getBoundingClientRect().width / 10 : 7;
+  /** The character index whose rendered edge is nearest `x`, by binary search over
+   *  measured prefixes — correct through tabs and any font. */
+  function columnAtX(line: string, x: number): number {
+    if (x <= 0) return 0;
+    let lo = 0;
+    let hi = line.length;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (widthOf(line.slice(0, mid)) <= x) lo = mid;
+      else hi = mid - 1;
+    }
+    if (lo >= line.length) return line.length;
+    const before = widthOf(line.slice(0, lo));
+    const after = widthOf(line.slice(0, lo + 1));
+    return x - before <= after - x ? lo : lo + 1;
   }
 
   function onKey(e: KeyboardEvent) {
@@ -201,8 +233,8 @@
   onmousedown={place}
   onfocus={focus}
 >
-  <!-- Width probe for column arithmetic; ten characters of the real font. -->
-  <span class="probe" aria-hidden="true">0000000000</span>
+  <!-- Measuring probe: same font, white-space and tab-size as a code line. -->
+  <span class="probe" bind:this={probe} aria-hidden="true"></span>
 
   {#each docState.doc.regions as r, i (r.region)}
     {@const kind = kinds[i] ?? ""}
@@ -227,7 +259,7 @@
   {/each}
 
   {#if caretAt}
-    <div class="caret" style="top:{caretAt.top}px; left:calc(var(--gut) + {caretAt.col}ch)"></div>
+    <div class="caret" style="top:{caretAt.top}px; left:{caretLeft}px"></div>
   {/if}
 
   <!-- The input sink: invisible, but a real text control at the caret, so dead
@@ -235,7 +267,7 @@
   <textarea
     class="sink"
     bind:this={sink}
-    style="top:{caretAt?.top ?? 0}px; left:calc(var(--gut) + {caretAt?.col ?? 0}ch)"
+    style="top:{caretAt?.top ?? 0}px; left:{caretLeft}px"
     spellcheck="false"
     autocapitalize="off"
     autocomplete="off"
@@ -265,6 +297,7 @@
     position: absolute;
     visibility: hidden;
     white-space: pre;
+    tab-size: 4;
     top: 0;
     left: 0;
   }
