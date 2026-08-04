@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { getCurrentWindow } from "@tauri-apps/api/window";
+  import { langForFile, tokenizeLines, type TokenRun } from "$lib/syntax";
   import type { MergeData, MergeRegion } from "$lib/p4";
 
   // Opened by the Rust `open_merge_window` command; the job itself is fetched by
@@ -19,6 +20,8 @@
   let editing = $state<number | null>(null);
   let showBase = $state<Record<number, boolean>>({});
   let current = $state(0); // which conflict the prev/next buttons are on
+  /** line text → colored runs, from tokenizing all three sides once. */
+  let tokens = $state<Map<string, TokenRun[]>>(new Map());
 
   const regions = $derived(data?.regions ?? []);
   const conflicts = $derived(
@@ -41,15 +44,29 @@
 
   /** What a side pane shows: its own text, or the base where it didn't change. */
   function side(r: MergeRegion, which: "theirs" | "ours"): string[] {
-    if (r.kind === "same") return r.lines;
+    if (r.kind === "same" || r.kind === "both") return r.lines;
     if (r.kind === "conflict") return r[which];
-    if (r.kind === "both") return r.lines;
     return r.kind === which ? r.lines : r.base;
   }
   /** A side pane is the origin of this region's change. */
   function isSource(r: MergeRegion, which: "theirs" | "ours"): boolean {
     return r.kind === which || r.kind === "both";
   }
+
+  // First line number of each region, per pane: the panes are whole files, so
+  // each one's numbering runs continuously across regions.
+  const starts = $derived.by(() => {
+    let t = 1,
+      o = 1,
+      m = 1;
+    return regions.map((r, i) => {
+      const at = { t, o, m };
+      t += side(r, "theirs").length;
+      o += side(r, "ours").length;
+      m += linesFor(r, i).length;
+      return at;
+    });
+  });
 
   function set(i: number, p: Pick) {
     picks = { ...picks, [i]: p };
@@ -89,17 +106,52 @@
     await getCurrentWindow().close();
   }
 
+  /** Colour every line once, from all three sides — identical text tokenizes the
+   *  same, so one map serves the side panes AND the assembled result. */
+  async function highlight(d: MergeData) {
+    const lang = langForFile(d.name);
+    if (!lang) return;
+    const dark = !window.matchMedia?.("(prefers-color-scheme: light)").matches;
+    const sides: string[][] = [[], [], []];
+    for (const r of d.regions) {
+      sides[0].push(...(r.kind === "conflict" ? r.theirs : r.lines));
+      sides[1].push(...(r.kind === "conflict" ? r.ours : r.lines));
+      if (r.kind !== "same") sides[2].push(...r.base);
+    }
+    const map = new Map<string, TokenRun[]>();
+    for (const lines of sides) {
+      const runs = await tokenizeLines(lines.join("\n"), lang, dark);
+      if (!runs) continue;
+      lines.forEach((l, i) => {
+        if (runs[i] && !map.has(l)) map.set(l, runs[i]);
+      });
+    }
+    tokens = map;
+  }
+
   onMount(async () => {
     try {
       data = await invoke<MergeData>("merge_data", { id });
       // Nothing is auto-settled: conflicts must be chosen deliberately. Open on
       // the first one so the window lands on the work to be done.
       if (data.conflicts > 0) setTimeout(() => goTo(0), 0);
+      void highlight(data);
     } catch (e) {
       error = String(e);
     }
   });
 </script>
+
+<!-- `from` = this pane's first line number; 0 for text that isn't part of any
+     file (the base peek), which keeps an empty gutter so code stays aligned. -->
+{#snippet code(lines: string[], from: number)}
+  {#each lines as line, k}
+    <div class="line"><span class="ln">{from ? from + k : ""}</span><span class="src"
+        >{#if tokens.get(line)}{#each tokens.get(line) ?? [] as run}<span
+              style:color={run.color}>{run.content}</span>{/each}{:else}{line || " "}{/if}</span
+      ></div>
+  {/each}
+{/snippet}
 
 <div class="wrap">
   <div class="bar">
@@ -137,85 +189,68 @@
   {:else if !data}
     <div class="dim pad">Loading…</div>
   {:else}
-    <!-- One grid for headers AND content, so a scrollbar can never push the
-         column titles out of line with their pane. -->
+    <!-- Headers live in the same grid as the content, so a scrollbar can never
+         push a column out of line with its title. -->
     <div class="scroll">
-      <div class="grid">
+      <div class="grid mono">
         <div class="head">{data.theirsLabel}</div>
-        <div class="head mid">result — merged file<span class="dim"> (base: {data.baseLabel})</span></div>
+        <div class="head mid">
+          result — merged file<span class="dim"> (base: {data.baseLabel})</span>
+        </div>
         <div class="head">{data.yoursLabel}</div>
 
         {#each regions as r, i (i)}
-          {@const conflict = r.kind === "conflict"}
-          <div class="cell {r.kind}" class:src={isSource(r, "theirs")}>
-            {#if conflict}
-              <button class="take" title="Take the depot side" onclick={() => set(i, "theirs")}>
-                take ▶
+          {#if r.kind === "conflict"}
+            <!-- Spanning bar: keeps the three panes' code lines level with each
+                 other instead of offset by the height of these buttons. -->
+            <div class="cbar" data-region={i}>
+              <span class="cnum">conflict {conflicts.indexOf(i) + 1}</span>
+              <button class:on={picks[i] === "theirs"} onclick={() => set(i, "theirs")}>
+                ◀ take depot
               </button>
-            {/if}
-            {#each side(r, "theirs") as line}
-              <div class="line mono">{line || " "}</div>
-            {/each}
+              <button class:on={picks[i] === "ours"} onclick={() => set(i, "ours")}>
+                take workspace ▶
+              </button>
+              <button class:on={picks[i] === "both"} onclick={() => set(i, "both")}>both</button>
+              <button class:on={picks[i] === "base"} onclick={() => set(i, "base")}>base</button>
+              <button class:on={picks[i] === "custom"} onclick={() => set(i, "custom")}>
+                edit…
+              </button>
+              <button
+                class="peek"
+                class:on={showBase[i]}
+                title="Show the common ancestor for this conflict"
+                onclick={() => (showBase = { ...showBase, [i]: !showBase[i] })}
+              >
+                {showBase[i] ? "hide base" : "show base"}
+              </button>
+            </div>
+          {/if}
+
+          <div class="cell {r.kind}" class:src={isSource(r, "theirs")}>
+            {@render code(side(r, "theirs"), starts[i].t)}
           </div>
 
-          <div class="cell mid {r.kind}" data-region={i}>
-            {#if conflict}
-              <div class="picks">
-                <span class="cnum">conflict {conflicts.indexOf(i) + 1}</span>
-                <button class:on={picks[i] === "theirs"} onclick={() => set(i, "theirs")}>
-                  depot
-                </button>
-                <button class:on={picks[i] === "ours"} onclick={() => set(i, "ours")}>
-                  workspace
-                </button>
-                <button class:on={picks[i] === "both"} onclick={() => set(i, "both")}>both</button>
-                <button class:on={picks[i] === "base"} onclick={() => set(i, "base")}>base</button>
-                <button class:on={picks[i] === "custom"} onclick={() => set(i, "custom")}>
-                  edit…
-                </button>
-                <button
-                  class="peek"
-                  class:on={showBase[i]}
-                  title="Show the common ancestor for this conflict"
-                  onclick={() => (showBase = { ...showBase, [i]: !showBase[i] })}
-                >
-                  base?
-                </button>
-              </div>
-              {#if showBase[i] && r.kind === "conflict"}
-                <div class="baseblock">
-                  {#each r.base as line}
-                    <div class="line mono dim">{line || " "}</div>
-                  {/each}
-                </div>
-              {/if}
+          <div class="cell mid {r.kind}">
+            {#if r.kind === "conflict" && showBase[i]}
+              <div class="baseblock">{@render code(r.base, 0)}</div>
             {/if}
-
-            {#if conflict && editing === i}
+            {#if r.kind === "conflict" && editing === i}
               <textarea
                 class="mono"
                 rows={Math.min(24, (custom[i] ?? "").split("\n").length + 1)}
                 value={custom[i] ?? ""}
                 oninput={(e) => (custom = { ...custom, [i]: e.currentTarget.value })}
               ></textarea>
-            {:else if conflict && !picks[i]}
+            {:else if r.kind === "conflict" && !picks[i]}
               <div class="line pending">— take a side, or edit —</div>
             {:else}
-              {#each linesFor(r, i) as line}
-                <div class="line mono">{line || " "}</div>
-              {/each}
+              {@render code(linesFor(r, i), starts[i].m)}
             {/if}
           </div>
 
           <div class="cell {r.kind}" class:src={isSource(r, "ours")}>
-            {#if conflict}
-              <button class="take left" title="Take the workspace side" onclick={() => set(i, "ours")}>
-                ◀ take
-              </button>
-            {/if}
-            {#each side(r, "ours") as line}
-              <div class="line mono">{line || " "}</div>
-            {/each}
+            {@render code(side(r, "ours"), starts[i].o)}
           </div>
         {/each}
       </div>
@@ -271,9 +306,7 @@
   }
   .grid {
     display: grid;
-    /* A third of the viewport each, growing for long lines. One scrollbar on the
-       container then pans all three panes together, so rows stay lined up. */
-    grid-template-columns: repeat(3, minmax(33.333%, max-content));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     align-items: stretch;
   }
   .head {
@@ -288,17 +321,18 @@
     border-bottom: 1px solid var(--border, #333);
     border-right: 1px solid var(--border, #333);
     white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .head.mid {
     color: var(--text, #ddd);
   }
   .cell {
-    position: relative;
     border-right: 1px solid var(--border, #333);
     border-bottom: 1px solid rgba(255, 255, 255, 0.04);
     min-width: 0;
   }
-  /* The middle pane is the result: keep it visually the subject. */
+  /* The middle pane is the result: keep it the visual subject. */
   .cell.mid {
     background: rgba(255, 255, 255, 0.02);
   }
@@ -313,27 +347,45 @@
   }
   .cell.conflict {
     background: rgba(215, 106, 106, 0.1);
-    box-shadow: inset 0 0 0 1px rgba(215, 106, 106, 0.35);
   }
   .cell.mid.conflict {
     background: rgba(215, 106, 106, 0.06);
   }
   .line {
-    padding: 0 8px;
-    white-space: pre;
+    display: flex;
+    align-items: flex-start;
     line-height: 1.45;
+  }
+  /* Wrap long lines inside their own pane instead of bleeding into the next. */
+  .src {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    padding-right: 6px;
+    min-width: 0;
+  }
+  .ln {
+    flex: none;
+    width: 3.2em;
+    padding-right: 8px;
+    text-align: right;
+    color: var(--text-dim, #999);
+    opacity: 0.55;
+    user-select: none;
   }
   .line.pending {
     color: var(--danger, #d76a6a);
     font-style: italic;
+    padding-left: 8px;
   }
-  .picks {
+  .cbar {
+    grid-column: 1 / -1;
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 6px;
     flex-wrap: wrap;
-    padding: 3px 6px;
-    background: rgba(255, 255, 255, 0.05);
+    padding: 3px 8px;
+    background: rgba(215, 106, 106, 0.18);
+    border-top: 1px solid rgba(215, 106, 106, 0.5);
   }
   .cnum {
     font-size: 10px;
@@ -342,24 +394,7 @@
   }
   .baseblock {
     border-left: 2px solid var(--border, #333);
-    margin: 2px 0 2px 6px;
-  }
-  /* Inline "take this side" affordance on a conflict's side panes. */
-  .take {
-    position: absolute;
-    top: 2px;
-    right: 4px;
-    z-index: 1;
-    opacity: 0.75;
-    font-size: 10px;
-    padding: 0 5px;
-  }
-  .take.left {
-    right: auto;
-    left: 4px;
-  }
-  .take:hover {
-    opacity: 1;
+    opacity: 0.7;
   }
   button {
     background: var(--bg-alt, #1f1f1f);
