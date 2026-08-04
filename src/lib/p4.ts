@@ -144,7 +144,15 @@ export interface DiffPair {
   leftLabel: string;
   rightLabel: string;
   title: string;
+  /** True when the right side is the workspace file, so it can be edited. */
+  rightEditable?: boolean;
 }
+/** Write an edited workspace file back (the diff window's editable side). Goes
+ *  through the safe-mode gate: it writes to the workspace. */
+export function writeLocalFile(path: string, text: string): Promise<void> {
+  return safe.guard("write_local_file", () => invoke<void>("write_local_file", { path, text }));
+}
+
 /** Open the in-app side-by-side diff window on a materialized pair. */
 export function openDiffWindow(pair: DiffPair): Promise<void> {
   return invoke<void>("open_diff_window", { pair });

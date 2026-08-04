@@ -63,6 +63,7 @@ export const P4_COMMANDS: P4Cmd[] = [
   { key: "p4_reconcile_files", label: "reconcile (check out)", read: false },
   { key: "p4_clean", label: "clean (revert offline)", read: false },
   { key: "apply_patch", label: "patch (apply)", read: false },
+  { key: "write_local_file", label: "write file (diff editor)", read: false },
   { key: "merge_save", label: "resolve (save merge)", read: false },
   { key: "merge_external", label: "resolve (P4MERGE)", read: false },
   { key: "p4_switch", label: "switch", read: false },

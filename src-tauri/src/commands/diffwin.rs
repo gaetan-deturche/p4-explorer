@@ -17,6 +17,10 @@ pub struct DiffPair {
     pub left_label: String,
     pub right_label: String,
     pub title: String,
+    /// True when `right` is the workspace file itself rather than a printed
+    /// revision — the only case where editing it in the window means anything.
+    #[serde(default)]
+    pub right_editable: bool,
 }
 
 fn base_name(depot_file: &str) -> &str {
@@ -73,6 +77,7 @@ pub async fn diff_pair_rev(conn: P4Conn, depot_file: String, rev: i64) -> Result
             left_label: if rev > 1 { format!("{name}#{}", rev - 1) } else { format!("{name} (added)") },
             right_label: format!("{name}#{rev}"),
             title: format!("{name}  #{}{rev}", if rev > 1 { format!("{} → #", rev - 1) } else { String::new() }),
+            right_editable: false,
         })
     })
     .await
@@ -98,6 +103,7 @@ pub async fn diff_pair_shelved(
             left_label: if rev >= 1 { format!("{name}#{rev}") } else { format!("{name} (added)") },
             right_label: format!("{name} (shelved @{change})"),
             title: format!("{name}  shelf @{change}"),
+            right_editable: false,
         })
     })
     .await
@@ -126,6 +132,7 @@ pub async fn diff_pair_local(conn: P4Conn, depot_file: String) -> Result<DiffPai
             left_label: if have.is_empty() { format!("{name} (new)") } else { format!("{name}#{have}") },
             right_label: format!("{name} (workspace)"),
             title: format!("{name}  local changes"),
+            right_editable: true,
         })
     })
     .await
@@ -371,6 +378,29 @@ fn enc(s: &str) -> String {
     out
 }
 
+/// Write `text` to a workspace file, keeping its BOM, line endings and trailing
+/// newline, and clearing the read-only flag p4 leaves on unopened files.
+#[tauri::command]
+pub async fn write_local_file(path: String, text: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let raw = std::fs::read(&path).map_err(|e| format!("cannot read {path}: {e}"))?;
+        let (bom, body) = super::patch::split_bom(&raw);
+        let existing = String::from_utf8(body.to_vec()).map_err(|_| "not a UTF-8 text file")?;
+        let eol = if existing.contains("\r\n") { "\r\n" } else { "\n" };
+        let ends = existing.ends_with('\n');
+        let mut out = bom.to_vec();
+        let mut joined = super::patch::split_lines(&text).join(eol);
+        if ends {
+            joined.push_str(eol);
+        }
+        out.extend_from_slice(joined.as_bytes());
+        super::patch::make_writable(&path).map_err(|e| format!("cannot make {path} writable: {e}"))?;
+        std::fs::write(&path, &out).map_err(|e| format!("cannot write {path}: {e}"))
+    })
+    .await
+    .map_err(|e| format!("write task failed: {e}"))?
+}
+
 /// Open the in-app diff window on the `/diff` route. Each call gets its own
 /// window (unique label), like an external diff tool would.
 #[tauri::command]
@@ -379,12 +409,13 @@ pub async fn open_diff_window(app: AppHandle, pair: DiffPair) -> Result<(), Stri
     let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let label = format!("diff-{n}");
     let url = format!(
-        "diff?left={}&right={}&ll={}&rl={}&title={}",
+        "diff?left={}&right={}&ll={}&rl={}&title={}&edit={}",
         enc(&pair.left),
         enc(&pair.right),
         enc(&pair.left_label),
         enc(&pair.right_label),
         enc(&pair.title),
+        if pair.right_editable { "1" } else { "0" },
     );
     let title = format!("Diff — {}", pair.title);
     WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(url.into()))
