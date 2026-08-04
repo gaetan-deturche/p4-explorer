@@ -149,38 +149,93 @@
   }
 
   let dragging = $state(false);
+  let lastMouse: { x: number; y: number } | null = null;
+  let scroller: number | null = null;
 
-  /** Place the caret from a click: the row gives region+line, x gives the column. */
-  function place(e: MouseEvent, extend = false) {
-    if (!pane) return;
-    const row = (e.target as HTMLElement).closest("[data-rgn]") as HTMLElement | null;
+  function scrollBox(): HTMLElement | null {
+    return (pane?.closest(".scroll") as HTMLElement) ?? null;
+  }
+  /** Rows that fit in the viewport — the size of a page. */
+  function viewportRows(): number {
+    const box = scrollBox();
+    return box ? box.clientHeight / lineHeight : 20;
+  }
+
+  /** While dragging past an edge, keep scrolling and keep extending. */
+  function autoscroll() {
+    if (scroller !== null) return;
+    scroller = window.setInterval(() => {
+      const box = scrollBox();
+      if (!dragging || !box || !lastMouse) return stopScroll();
+      const r = box.getBoundingClientRect();
+      const above = r.top + lineHeight - lastMouse.y;
+      const below = lastMouse.y - (r.bottom - lineHeight);
+      const step = above > 0 ? -Math.min(4 * lineHeight, above) : below > 0 ? Math.min(4 * lineHeight, below) : 0;
+      if (!step) return;
+      box.scrollTop += step;
+      // The content moved under the pointer, so re-read the position from it.
+      extendTo(lastMouse.x, lastMouse.y);
+    }, 50);
+  }
+  function stopScroll() {
+    if (scroller !== null) window.clearInterval(scroller);
+    scroller = null;
+  }
+
+  /** Which region, line and column a point maps to. */
+  function hit(clientX: number, clientY: number): Caret | null {
+    if (!pane) return null;
     const box = pane.getBoundingClientRect();
-    const y = e.clientY - box.top;
+    const y = clientY - box.top;
     // Which region owns this y, then which of its lines.
     let idx = 0;
     for (let i = 0; i < tops.length; i++) if (y >= tops[i]) idx = i;
     const r = docState.doc.regions[idx];
     const inner = y - tops[idx] - (r.conflict ? toolbarHeight : 0);
     const line = Math.max(0, Math.min(Math.floor(inner / lineHeight), Math.max(0, r.lines.length - 1)));
-    const x = e.clientX - box.left - gutter();
-    const col = columnAtX(r.lines[line] ?? "", x);
-    void row;
-    act({ t: "caret", caret: { region: r.region, line, col }, extend });
+    const x = clientX - box.left - gutter();
+    return { region: r.region, line, col: columnAtX(r.lines[line] ?? "", x) };
+  }
+
+  function place(e: MouseEvent, extend = false) {
+    const caret = hit(e.clientX, e.clientY);
+    if (!caret) return;
+    act({ t: "caret", caret, extend });
     focus();
+  }
+  function extendTo(clientX: number, clientY: number) {
+    const caret = hit(clientX, clientY);
+    if (caret) act({ t: "caret", caret, extend: true });
   }
 
   function onDown(e: MouseEvent) {
     if (e.button !== 0) return;
+    const caret = hit(e.clientX, e.clientY);
+    if (!caret) return;
+    focus();
+    if (e.detail >= 3) {
+      act({ t: "selectLine", caret });
+      return;
+    }
+    if (e.detail === 2) {
+      act({ t: "selectWord", caret });
+      return;
+    }
     dragging = true;
-    place(e, e.shiftKey);
+    lastMouse = { x: e.clientX, y: e.clientY };
+    act({ t: "caret", caret, extend: e.shiftKey });
   }
   function onMove(e: MouseEvent) {
     if (!dragging) return;
     e.preventDefault();
-    place(e, true); // dragging always extends from the press
+    lastMouse = { x: e.clientX, y: e.clientY };
+    extendTo(e.clientX, e.clientY);
+    autoscroll();
   }
   function onUp() {
     dragging = false;
+    lastMouse = null;
+    stopScroll();
   }
 
   /** The character index whose rendered edge is nearest `x`, by binary search over
@@ -223,6 +278,16 @@
       act({ t: "copy", cut: e.key.toLowerCase() === "x" });
       return;
     }
+    if (ctrl && (e.key === "ArrowLeft" || e.key === "ArrowRight")) {
+      e.preventDefault();
+      act({ t: "move", dir: e.key === "ArrowLeft" ? "wordLeft" : "wordRight", extend: e.shiftKey });
+      return;
+    }
+    if (ctrl && (e.key === "Backspace" || e.key === "Delete")) {
+      e.preventDefault();
+      act({ t: "deleteWord", forward: e.key === "Delete" });
+      return;
+    }
     if (ctrl) return; // leave the rest of the ctrl space alone for now
     const moves: Record<string, MergeAction> = {
       ArrowLeft: { t: "move", dir: "left" },
@@ -236,6 +301,12 @@
     if (move) {
       e.preventDefault();
       act(move.t === "move" ? { ...move, extend: e.shiftKey } : move);
+      return;
+    }
+    if (e.key === "PageUp" || e.key === "PageDown") {
+      e.preventDefault();
+      const page = Math.max(1, Math.floor(viewportRows()) - 1);
+      act({ t: "moveLines", delta: e.key === "PageUp" ? -page : page, extend: e.shiftKey });
       return;
     }
     if (e.key === "Enter") {
@@ -293,6 +364,7 @@
   onmousemove={onMove}
   onmouseup={onUp}
   onmouseleave={onUp}
+  ondblclick={(e) => e.preventDefault()}
   onfocus={focus}
 >
   <!-- Measuring probe: same font, white-space and tab-size as a code line. -->

@@ -18,7 +18,13 @@
     moveRight,
     moveVertical,
     deleteRange,
+    deleteWord,
     insertOverRange,
+    lineRange,
+    moveByLines,
+    wordLeft,
+    wordRange,
+    wordRight,
     push,
     redo,
     sameCaret,
@@ -189,7 +195,11 @@
                   ? moveVertical(before.doc, c, 1)
                   : a.dir === "home"
                     ? moveLineStart(before.doc, c)
-                    : moveLineEnd(before.doc, c);
+                    : a.dir === "end"
+                      ? moveLineEnd(before.doc, c)
+                      : a.dir === "wordLeft"
+                        ? wordLeft(before.doc, c)
+                        : wordRight(before.doc, c);
         if (a.extend) anchor = anchor ?? before.caret;
         else anchor = null;
         ds = { doc: before.doc, caret: next };
@@ -201,6 +211,35 @@
         else anchor = null;
         ds = { doc: before.doc, caret: clampCaret(before.doc, a.caret) };
         break;
+      case "moveLines": {
+        typing = false;
+        if (a.extend) anchor = anchor ?? before.caret;
+        else anchor = null;
+        ds = { doc: before.doc, caret: moveByLines(before.doc, before.caret, a.delta) };
+        break;
+      }
+      case "selectWord": {
+        typing = false;
+        const w = wordRange(before.doc, a.caret);
+        anchor = w.from;
+        ds = { doc: before.doc, caret: w.to };
+        break;
+      }
+      case "selectLine": {
+        typing = false;
+        const l = lineRange(before.doc, a.caret);
+        anchor = l.from;
+        ds = { doc: before.doc, caret: l.to };
+        break;
+      }
+      case "deleteWord": {
+        hist = push(hist, before, false);
+        typing = false;
+        ds = sel ? deleteRange(before, sel.from, sel.to) : deleteWord(before, a.forward);
+        anchor = null;
+        touched(before.caret.region);
+        break;
+      }
       case "selectAll": {
         typing = false;
         const all = selectAll(before.doc);

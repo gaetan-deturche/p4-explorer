@@ -36,7 +36,7 @@ export interface DocState {
 
 /** What the result pane asks the host to do. Keeping intent separate from the
  *  model means the component never mutates anything itself. */
-export type MoveDir = "left" | "right" | "up" | "down" | "home" | "end";
+export type MoveDir = "left" | "right" | "up" | "down" | "home" | "end" | "wordLeft" | "wordRight";
 
 export type MergeAction =
   | { t: "insert"; text: string }
@@ -45,7 +45,11 @@ export type MergeAction =
   | { t: "delete" }
   | { t: "move"; dir: MoveDir; extend?: boolean }
   | { t: "caret"; caret: Caret; extend?: boolean }
+  | { t: "moveLines"; delta: number; extend?: boolean }
   | { t: "selectAll" }
+  | { t: "selectWord"; caret: Caret }
+  | { t: "selectLine"; caret: Caret }
+  | { t: "deleteWord"; forward: boolean }
   | { t: "copy"; cut?: boolean }
   | { t: "undo" }
   | { t: "redo" };
@@ -355,6 +359,90 @@ export function moveVertical(doc: MergeDoc, caret: Caret, dir: -1 | 1): Caret {
   if (!other) return c;
   const target = dir < 0 ? other.lines.length - 1 : 0;
   return clampCaret(doc, { region: other.region, line: target, col: c.col });
+}
+
+// --- words and pages -------------------------------------------------------
+// Word boundaries are the usual three classes: identifier characters, whitespace,
+// and everything else. Motion stops where the class changes, which is what makes
+// ctrl+arrow feel right in code.
+
+type CharClass = "word" | "space" | "punct";
+function classOf(ch: string): CharClass {
+  if (/\s/.test(ch)) return "space";
+  return /[A-Za-z0-9_$]/.test(ch) ? "word" : "punct";
+}
+
+export function wordLeft(doc: MergeDoc, caret: Caret): Caret {
+  const c = clampCaret(doc, caret);
+  const r = at(doc, c.region);
+  if (!r) return c;
+  const line = r.lines[c.line] ?? "";
+  if (c.col === 0) return moveLeft(doc, c); // hop to the previous line / region
+  let i = c.col;
+  while (i > 0 && classOf(line[i - 1]) === "space") i--;
+  if (i > 0) {
+    const cls = classOf(line[i - 1]);
+    while (i > 0 && classOf(line[i - 1]) === cls) i--;
+  }
+  return { ...c, col: i };
+}
+
+export function wordRight(doc: MergeDoc, caret: Caret): Caret {
+  const c = clampCaret(doc, caret);
+  const r = at(doc, c.region);
+  if (!r) return c;
+  const line = r.lines[c.line] ?? "";
+  if (c.col >= line.length) return moveRight(doc, c);
+  // Whitespace first, then the run it leads into: the caret lands at the END of
+  // the next word, which is what ctrl+right does elsewhere.
+  let i = c.col;
+  while (i < line.length && classOf(line[i]) === "space") i++;
+  if (i < line.length) {
+    const cls = classOf(line[i]);
+    while (i < line.length && classOf(line[i]) === cls) i++;
+  }
+  return { ...c, col: i };
+}
+
+/** The word under a caret — what a double click selects. */
+export function wordRange(doc: MergeDoc, caret: Caret): { from: Caret; to: Caret } {
+  const c = clampCaret(doc, caret);
+  const r = at(doc, c.region);
+  const line = r?.lines[c.line] ?? "";
+  if (!line.length) return { from: c, to: c };
+  const pivot = Math.min(c.col, line.length - 1);
+  const cls = classOf(line[pivot]);
+  let a = pivot;
+  let b = pivot + 1;
+  while (a > 0 && classOf(line[a - 1]) === cls) a--;
+  while (b < line.length && classOf(line[b]) === cls) b++;
+  return { from: { ...c, col: a }, to: { ...c, col: b } };
+}
+
+/** The whole line — what a triple click selects. */
+export function lineRange(doc: MergeDoc, caret: Caret): { from: Caret; to: Caret } {
+  const c = clampCaret(doc, caret);
+  const r = at(doc, c.region);
+  const line = r?.lines[c.line] ?? "";
+  return { from: { ...c, col: 0 }, to: { ...c, col: line.length } };
+}
+
+/** Move by whole rows across regions — page up and page down. */
+export function moveByLines(doc: MergeDoc, caret: Caret, delta: number): Caret {
+  const flat: { region: number; line: number }[] = [];
+  for (const r of doc.regions) for (let l = 0; l < r.lines.length; l++) flat.push({ region: r.region, line: l });
+  if (!flat.length) return caret;
+  const c = clampCaret(doc, caret);
+  const here = flat.findIndex((f) => f.region === c.region && f.line === c.line);
+  const idx = Math.max(0, Math.min(flat.length - 1, (here < 0 ? 0 : here) + delta));
+  return clampCaret(doc, { ...flat[idx], col: c.col });
+}
+
+/** Delete the word before or after the caret. */
+export function deleteWord(state: DocState, forward: boolean): DocState {
+  const to = forward ? wordRight(state.doc, state.caret) : wordLeft(state.doc, state.caret);
+  if (sameCaret(to, state.caret)) return state;
+  return deleteRange(state, state.caret, to);
 }
 
 export function moveLineStart(doc: MergeDoc, caret: Caret): Caret {
