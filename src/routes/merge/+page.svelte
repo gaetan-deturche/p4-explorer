@@ -9,16 +9,18 @@
   // id (regions don't fit in a query string).
   const id = new URLSearchParams(window.location.search).get("id") ?? "";
 
-  type Pick = "theirs" | "ours" | "both" | "base" | "custom";
   type Side = "theirs" | "ours";
 
   let data = $state<MergeData | null>(null);
   let error = $state("");
   let saving = $state(false);
-  /** Per-conflict resolution, keyed by region index. Unset = still to settle. */
-  let picks = $state<Record<number, Pick>>({});
-  let custom = $state<Record<number, string>>({});
-  let editing = $state<number | null>(null);
+  /** Region → the result text for it. Set means settled; the side buttons only
+   *  seed it, so anything can be edited afterwards. */
+  let edited = $state<Record<number, string>>({});
+  /** Region → where its text came from, for the origin arrows. */
+  let origin = $state<Record<number, string>>({});
+  /** Which auto-merged region is open for editing (conflicts are always open). */
+  let focused = $state<number | null>(null);
   let showBase = $state<Record<number, boolean>>({});
   let current = $state(0); // which conflict the prev/next buttons are on
   /** line text → colored runs, from tokenizing all three sides once. */
@@ -28,19 +30,18 @@
   const conflicts = $derived(
     regions.map((r, i) => (r.kind === "conflict" ? i : -1)).filter((i) => i >= 0),
   );
-  const unsettled = $derived(conflicts.filter((i) => !picks[i]));
+  const unsettled = $derived(conflicts.filter((i) => edited[i] === undefined));
   const resultLines = $derived(regions.flatMap((r, i) => linesFor(r, i)));
 
-  /** The lines the middle (result) pane contributes for a region. */
+  /** The result text for a region: what was edited, else the auto-merge. A
+   *  conflict with nothing taken or typed yet has no text at all. */
+  function resultText(r: MergeRegion, i: number): string | null {
+    if (edited[i] !== undefined) return edited[i];
+    return r.kind === "conflict" ? null : r.lines.join("\n");
+  }
   function linesFor(r: MergeRegion, i: number): string[] {
-    if (r.kind !== "conflict") return r.lines;
-    const p = picks[i];
-    if (!p) return [];
-    if (p === "custom") return (custom[i] ?? "").split("\n");
-    if (p === "theirs") return r.theirs;
-    if (p === "ours") return r.ours;
-    if (p === "base") return r.base;
-    return [...r.theirs, ...r.ours]; // "both": depot first, then the workspace
+    const t = resultText(r, i);
+    return t === null || t === "" ? [] : t.split("\n");
   }
 
   /** What a side pane shows: its own text, or the base where it didn't change. */
@@ -50,7 +51,7 @@
     return r.kind === which ? r.lines : r.base;
   }
 
-  // --- add / remove, the same meaning in every pane -------------------------
+  // --- add / drop, the same meaning in every pane ---------------------------
   // "add" = text the merge keeps, "del" = base text it drops, "!" = contested.
   // Which SIDE a change came from is shown by the arrows, not by the colour.
   function sideKind(r: MergeRegion, which: Side): string {
@@ -60,28 +61,25 @@
     return r.kind === which ? "add" : "del";
   }
   function resultKind(r: MergeRegion, i: number): string {
-    if (r.kind === "same") return "";
-    if (r.kind !== "conflict") return "add";
-    const p = picks[i];
-    if (!p) return "";
-    return p === "base" ? "keep" : "add";
+    if (r.kind === "same" && edited[i] === undefined) return "";
+    return origin[i] === "base" ? "keep" : "add";
   }
   const MARK: Record<string, string> = { add: "+", del: "-", vs: "!", keep: "=" };
 
   /** Which side(s) feed the result here — drawn as arrows in the link columns. */
   function flows(r: MergeRegion, i: number): { left: boolean; right: boolean; open: boolean } {
+    const o = origin[i];
+    if (o) {
+      return {
+        left: o === "theirs" || o === "both",
+        right: o === "ours" || o === "both",
+        open: false,
+      };
+    }
+    if (r.kind === "conflict") return { left: false, right: false, open: true };
     if (r.kind === "same") return { left: false, right: false, open: false };
     if (r.kind === "both") return { left: true, right: true, open: false };
-    if (r.kind !== "conflict") {
-      return { left: r.kind === "theirs", right: r.kind === "ours", open: false };
-    }
-    const p = picks[i];
-    if (!p) return { left: false, right: false, open: true }; // undecided
-    return {
-      left: p === "theirs" || p === "both",
-      right: p === "ours" || p === "both",
-      open: false,
-    };
+    return { left: r.kind === "theirs", right: r.kind === "ours", open: false };
   }
 
   // First line number of each region, per pane: the panes are whole files, so
@@ -99,13 +97,46 @@
     });
   });
 
-  function set(i: number, p: Pick) {
-    picks = { ...picks, [i]: p };
-    if (p === "custom" && custom[i] === undefined) {
-      const r = regions[i];
-      if (r.kind === "conflict") custom = { ...custom, [i]: [...r.theirs, ...r.ours].join("\n") };
+  /** Copy a side's text into the result, leaving it editable. */
+  function take(i: number, what: "theirs" | "ours" | "both" | "base") {
+    const r = regions[i];
+    if (r.kind !== "conflict") return;
+    const text =
+      what === "both"
+        ? [...r.theirs, ...r.ours].join("\n")
+        : what === "base"
+          ? r.base.join("\n")
+          : r[what].join("\n");
+    edited = { ...edited, [i]: text };
+    origin = { ...origin, [i]: what };
+    focused = i;
+  }
+
+  /** Free-hand edit of any region, conflict or not. */
+  function type(i: number, value: string) {
+    edited = { ...edited, [i]: value };
+    origin = { ...origin, [i]: "manual" };
+  }
+  /** Open an auto-merged region for editing, seeded with its own text. */
+  function openEdit(r: MergeRegion, i: number) {
+    if (edited[i] === undefined) {
+      const t = resultText(r, i);
+      if (t !== null) edited = { ...edited, [i]: t };
     }
-    editing = p === "custom" ? i : null;
+    focused = i;
+  }
+  /** Drop a hand edit and go back to what the merge produced. */
+  function revert(i: number) {
+    const nextE = { ...edited };
+    const nextO = { ...origin };
+    delete nextE[i];
+    delete nextO[i];
+    edited = nextE;
+    origin = nextO;
+    focused = null;
+  }
+  function rows(text: string): number {
+    return Math.min(30, Math.max(2, text.split("\n").length + 1));
   }
 
   function goTo(n: number) {
@@ -163,8 +194,8 @@
   onMount(async () => {
     try {
       data = await invoke<MergeData>("merge_data", { id });
-      // Nothing is auto-settled: conflicts must be chosen deliberately. Open on
-      // the first one so the window lands on the work to be done.
+      // Nothing is auto-settled: conflicts must be dealt with deliberately. Open
+      // on the first one so the window lands on the work to be done.
       if (data.conflicts > 0) setTimeout(() => goTo(0), 0);
       void highlight(data);
     } catch (e) {
@@ -236,7 +267,7 @@
         <div class="head">{data.theirsLabel}</div>
         <div class="head link"></div>
         <div class="head mid">
-          result — merged file<span class="dim"> (base: {data.baseLabel})</span>
+          result — merged file, editable<span class="dim"> (base: {data.baseLabel})</span>
         </div>
         <div class="head link"></div>
         <div class="head">{data.yoursLabel}</div>
@@ -244,74 +275,112 @@
         {#each regions as r, i (i)}
           {@const conflict = r.kind === "conflict"}
           {@const flow = flows(r, i)}
-          <div class="cell">
+          <!-- A conflict tints its whole row, all five cells, so the band reads
+               as one block instead of a few coloured lines. -->
+          <div class="cell" class:conflict>
             {#if conflict}<div class="chead side"></div>{/if}
             {@render code(side(r, "theirs"), starts[i].t, sideKind(r, "theirs"))}
           </div>
 
-          <!-- origin arrow: depot → result -->
-          <div class="cell link" class:on={flow.left}>
+          <div class="cell link" class:conflict class:on={flow.left}>
             {#if conflict}<div class="chead side"></div>{/if}
             {#if flow.left}
-              <div class="arrow" title="This region comes from the depot side">▶</div>
+              <div class="arrow" title="This region's text came from the depot side">▶</div>
             {:else if flow.open}
               <div class="arrow open" title="Undecided conflict">?</div>
             {/if}
           </div>
 
-          <div class="cell mid">
+          <div class="cell mid" class:conflict>
             {#if conflict}
               <div class="chead" data-region={i}>
                 <span class="cnum">conflict {conflicts.indexOf(i) + 1}</span>
-                <button class:on={picks[i] === "theirs"} onclick={() => set(i, "theirs")}>
+                <button class:on={origin[i] === "theirs"} onclick={() => take(i, "theirs")}>
                   ◀ depot
                 </button>
-                <button class:on={picks[i] === "ours"} onclick={() => set(i, "ours")}>
+                <button class:on={origin[i] === "ours"} onclick={() => take(i, "ours")}>
                   workspace ▶
                 </button>
-                <button class:on={picks[i] === "both"} onclick={() => set(i, "both")}>both</button>
-                <button class:on={picks[i] === "base"} onclick={() => set(i, "base")}>base</button>
-                <button class:on={picks[i] === "custom"} onclick={() => set(i, "custom")}>
-                  edit…
+                <button class:on={origin[i] === "both"} onclick={() => take(i, "both")}>
+                  both
                 </button>
+                <button class:on={origin[i] === "base"} onclick={() => take(i, "base")}>base</button>
                 <button
                   class="peek"
                   class:on={showBase[i]}
                   title="Show the common ancestor for this conflict"
                   onclick={() => (showBase = { ...showBase, [i]: !showBase[i] })}
                 >
-                  {showBase[i] ? "hide base" : "base"}
+                  {showBase[i] ? "hide base" : "base?"}
                 </button>
               </div>
-            {/if}
-            {#if conflict && showBase[i] && r.kind === "conflict"}
-              <div class="baseblock">{@render code(r.base, 0, "keep")}</div>
-            {/if}
-            {#if conflict && editing === i}
+              {#if showBase[i] && r.kind === "conflict"}
+                <div class="baseblock">{@render code(r.base, 0, "keep")}</div>
+              {/if}
+              <!-- Always a real editor: take a side to copy it in, then edit
+                   freely, or just type the resolution straight in. -->
               <textarea
-                class="mono"
-                rows={Math.min(24, (custom[i] ?? "").split("\n").length + 1)}
-                value={custom[i] ?? ""}
-                oninput={(e) => (custom = { ...custom, [i]: e.currentTarget.value })}
+                class="mono edit"
+                class:empty={edited[i] === undefined}
+                spellcheck="false"
+                placeholder="take a side above, or type the resolution here"
+                rows={rows(edited[i] ?? "")}
+                value={edited[i] ?? ""}
+                oninput={(e) => type(i, e.currentTarget.value)}
               ></textarea>
-            {:else if conflict && !picks[i]}
-              <div class="line pending">— take a side, or edit —</div>
+            {:else if focused === i && edited[i] !== undefined}
+              <div class="editbar">
+                <span class="cnum">{origin[i] === "manual" ? "hand-edited" : "editing"}</span>
+                <button onclick={() => revert(i)} title="Back to the merged text">revert</button>
+                <button class="primary" onclick={() => (focused = null)}>done</button>
+              </div>
+              <textarea
+                class="mono edit"
+                spellcheck="false"
+                rows={rows(edited[i] ?? "")}
+                value={edited[i] ?? ""}
+                oninput={(e) => type(i, e.currentTarget.value)}
+              ></textarea>
             {:else}
-              {@render code(linesFor(r, i), starts[i].m, resultKind(r, i))}
+              <div
+                class="editable"
+                role="button"
+                tabindex="0"
+                title="Click to edit this part of the result"
+                onclick={() => openEdit(r, i)}
+                onkeydown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    openEdit(r, i);
+                  }
+                }}
+              >
+                {#if edited[i] !== undefined}
+                  <div class="editbar thin">
+                    <span class="cnum">hand-edited</span>
+                    <button
+                      onclick={(e) => {
+                        e.stopPropagation();
+                        revert(i);
+                      }}>revert</button
+                    >
+                  </div>
+                {/if}
+                {@render code(linesFor(r, i), starts[i].m, resultKind(r, i))}
+              </div>
             {/if}
           </div>
 
-          <!-- origin arrow: workspace → result -->
-          <div class="cell link" class:on={flow.right}>
+          <div class="cell link" class:conflict class:on={flow.right}>
             {#if conflict}<div class="chead side"></div>{/if}
             {#if flow.right}
-              <div class="arrow" title="This region comes from the workspace side">◀</div>
+              <div class="arrow" title="This region's text came from the workspace side">◀</div>
             {:else if flow.open}
               <div class="arrow open" title="Undecided conflict">?</div>
             {/if}
           </div>
 
-          <div class="cell">
+          <div class="cell" class:conflict>
             {#if conflict}<div class="chead side"></div>{/if}
             {@render code(side(r, "ours"), starts[i].o, sideKind(r, "ours"))}
           </div>
@@ -425,6 +494,15 @@
   .cell.mid {
     background: rgba(255, 255, 255, 0.02);
   }
+  /* The conflict band: the whole row, not just its lines. */
+  .cell.conflict {
+    background: rgba(224, 85, 90, 0.12);
+    border-top: 1px solid rgba(224, 85, 90, 0.55);
+    border-bottom: 1px solid rgba(224, 85, 90, 0.55);
+  }
+  .cell.mid.conflict {
+    background: rgba(224, 85, 90, 0.09);
+  }
   /* Link columns: the visual connection between a side and the result. */
   .cell.link {
     background: var(--bg-alt, #1f1f1f);
@@ -469,7 +547,7 @@
     opacity: 0.55;
     user-select: none;
   }
-  /* Colour says add / remove, exactly as in a diff — never which side. */
+  /* Colour says add / drop, exactly as in a diff — never which side. */
   .k-add {
     background: rgba(108, 195, 108, 0.15);
     border-left-color: #5faf5f;
@@ -499,12 +577,16 @@
   .k-keep .mk {
     color: var(--text-dim, #999);
   }
-  .line.pending {
-    color: #e0555a;
-    font-style: italic;
-    padding-left: 8px;
+  .editable {
+    cursor: text;
+    min-height: 1.45em;
   }
-  .chead {
+  .editable:hover {
+    outline: 1px dashed rgba(255, 255, 255, 0.12);
+    outline-offset: -1px;
+  }
+  .chead,
+  .editbar {
     display: flex;
     align-items: center;
     gap: 6px;
@@ -512,12 +594,20 @@
     min-height: 24px;
     padding: 2px 6px;
     box-sizing: border-box;
-    background: rgba(224, 85, 90, 0.2);
-    border-top: 1px solid rgba(224, 85, 90, 0.55);
+  }
+  .chead {
+    background: rgba(224, 85, 90, 0.16);
   }
   .chead.side {
-    background: rgba(224, 85, 90, 0.11);
+    background: rgba(224, 85, 90, 0.1);
     padding: 2px 0;
+  }
+  .editbar {
+    background: rgba(255, 255, 255, 0.06);
+  }
+  .editbar.thin {
+    min-height: 0;
+    padding: 1px 6px;
   }
   .cnum {
     font-size: 10px;
@@ -553,15 +643,24 @@
     border-color: var(--accent, #d98d3a);
     color: var(--accent, #d98d3a);
   }
-  textarea {
+  textarea.edit {
+    display: block;
     width: 100%;
     box-sizing: border-box;
-    background: var(--bg, #1b1b1b);
+    background: rgba(0, 0, 0, 0.25);
     color: inherit;
     border: 0;
-    border-top: 1px solid var(--border, #333);
-    padding: 4px 8px;
+    border-left: 3px solid #5faf5f;
+    padding: 0 8px;
     font-size: 12px;
+    line-height: 1.45;
     resize: vertical;
+  }
+  textarea.edit.empty {
+    border-left-color: #e0555a;
+  }
+  textarea.edit:focus {
+    outline: 1px solid var(--accent, #d98d3a);
+    outline-offset: -1px;
   }
 </style>
