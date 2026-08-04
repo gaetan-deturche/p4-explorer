@@ -26,6 +26,8 @@
 
   let host: HTMLDivElement | undefined = $state();
   let editor: MergeEditor | null = null;
+  /** Exact px height for each region, measured in the editor. */
+  let measured = $state<number[]>([]);
 
   const regions = $derived(data?.regions ?? []);
   const conflicts = $derived(
@@ -92,6 +94,13 @@
       return { rows, res, theirs: t, ours: o };
     }),
   );
+  /** A region's cell height: the editor's measurement once it has reported, the
+   *  row arithmetic before that (first paint). */
+  function cellH(i: number, rows: number, conflict: boolean): string {
+    const m = measured[i];
+    return m && m > 0 ? `${m}px` : `calc(${rows} * var(--lh) + ${conflict ? 24 : 0}px)`;
+  }
+
   /** Side pane line numbers run continuously through their own file. */
   const starts = $derived.by(() => {
     let t = 1,
@@ -232,6 +241,11 @@
       onReset: reset,
       conflictNumber: (region) => conflicts.indexOf(region) + 1,
       settled: (region) => edited[region] !== undefined,
+      onGeometry: (tops, total) => {
+        // A region's height is the distance to the next one's start; the last
+        // reaches the end of the content.
+        measured = tops.map((top, k) => (k + 1 < tops.length ? tops[k + 1] : total) - top);
+      },
     });
     if (conflicts.length) setTimeout(() => goTo(0), 0);
   });
@@ -329,7 +343,7 @@
           {@const flow = flows(r, i)}
           {@const plan = rowPlan[i]}
           <div class="cell theirs" class:conflict
-            style="grid-row:{i + 2}; height:calc({plan.rows} * var(--lh) + {conflict ? 24 : 0}px)"
+            style="grid-row:{i + 2}; height:{cellH(i, plan.rows, conflict)}"
           >
             {#if conflict}<div class="chead side"></div>{/if}
             {@render pane(
@@ -341,7 +355,7 @@
           </div>
 
           <div class="cell link l" class:conflict class:on={flow.left}
-            style="grid-row:{i + 2}; height:calc({plan.rows} * var(--lh) + {conflict ? 24 : 0}px)"
+            style="grid-row:{i + 2}; height:{cellH(i, plan.rows, conflict)}"
           >
             {#if conflict}<div class="chead side"></div>{/if}
             {#if flow.left}
@@ -352,7 +366,7 @@
           </div>
 
           <div class="cell link r" class:conflict class:on={flow.right}
-            style="grid-row:{i + 2}; height:calc({plan.rows} * var(--lh) + {conflict ? 24 : 0}px)"
+            style="grid-row:{i + 2}; height:{cellH(i, plan.rows, conflict)}"
           >
             {#if conflict}<div class="chead side"></div>{/if}
             {#if flow.right}
@@ -363,7 +377,7 @@
           </div>
 
           <div class="cell ours" class:conflict
-            style="grid-row:{i + 2}; height:calc({plan.rows} * var(--lh) + {conflict ? 24 : 0}px)"
+            style="grid-row:{i + 2}; height:{cellH(i, plan.rows, conflict)}"
           >
             {#if conflict}<div class="chead side"></div>{/if}
             {@render pane(side(r, "ours"), starts[i].o, sideKind(r, "ours"), plan.rows - plan.ours)}

@@ -43,9 +43,15 @@ export interface MergeEditorConfig {
   /** Conflict number to show in the toolbar, 1-based. */
   conflictNumber: (region: number) => number;
   settled: (region: number) => boolean;
+  /** Where each region actually starts in the editor, in px from the content top,
+   *  plus the total content height. The side panes size themselves from this, so
+   *  no assumption about line heights or widget sizes can drift. */
+  onGeometry?: (tops: number[], total: number) => void;
 }
 
 const MARK: Record<string, string> = { add: "+", del: "-", vs: "!", keep: "=" };
+/** The conflict toolbar's height, pinned in the theme and mirrored by the panes. */
+const TOOLBAR_H = 24;
 
 /** Region bounds, mapped through edits by CodeMirror.
  *
@@ -279,7 +285,7 @@ const theme = EditorView.theme(
       display: "flex",
       alignItems: "center",
       gap: "6px",
-      height: "24px",
+      height: `${TOOLBAR_H}px`,
       padding: "0 6px",
       boxSizing: "border-box",
       overflow: "hidden",
@@ -353,7 +359,23 @@ export function createMergeEditor(parent: HTMLElement, cfg: MergeEditorConfig): 
     (state) => buildDecorations(state, current),
   );
 
+  /** Read the real position of every region from the rendered editor. */
+  const measure = () => {
+    if (!current.onGeometry) return;
+    const tops: number[] = [];
+    const iter = view.state.field(regionField).iter();
+    while (iter.value) {
+      const spec = iter.value.spec;
+      // The toolbar is a block widget ABOVE the first line, so the region starts
+      // that much higher than the line itself.
+      tops[spec.region] = view.lineBlockAt(iter.from).top - (spec.conflict ? TOOLBAR_H : 0);
+      iter.next();
+    }
+    current.onGeometry(tops, view.contentHeight);
+  };
+
   const listener = EditorView.updateListener.of((u) => {
+    if (u.docChanged || u.geometryChanged) queueMicrotask(measure);
     if (!u.docChanged || applying) return;
     // Report each region's text as it now stands, so the host state follows.
     const set = u.state.field(regionField);
@@ -388,6 +410,7 @@ export function createMergeEditor(parent: HTMLElement, cfg: MergeEditorConfig): 
     }),
   });
   view.dispatch({ effects: setRegions.of(built.set) });
+  requestAnimationFrame(measure);
 
   return {
     view,
@@ -403,6 +426,7 @@ export function createMergeEditor(parent: HTMLElement, cfg: MergeEditorConfig): 
     },
     setSpacers(rows: Map<number, number>) {
       view.dispatch({ effects: setSpacers.of(rows) });
+      requestAnimationFrame(measure);
     },
     touch() {
       view.dispatch({ effects: refresh.of(null) });
