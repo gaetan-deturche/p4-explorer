@@ -65,8 +65,10 @@ const TOOLBAR_H = 24;
 class RegionValue extends RangeValue {
   startSide = -1;
   endSide = 1;
-  constructor(readonly spec: RegionSpec) {
+  readonly spec: RegionSpec;
+  constructor(spec: RegionSpec) {
     super();
+    this.spec = spec;
   }
 }
 
@@ -113,11 +115,12 @@ const versionField = StateField.define<number>({
 /** The toolbar shown above an unresolved conflict. Plain DOM: it is a decoration,
  *  never part of the document. */
 class ToolbarWidget extends WidgetType {
-  constructor(
-    readonly spec: RegionSpec,
-    readonly cfg: MergeEditorConfig,
-  ) {
+  readonly spec: RegionSpec;
+  readonly cfg: MergeEditorConfig;
+  constructor(spec: RegionSpec, cfg: MergeEditorConfig) {
     super();
+    this.spec = spec;
+    this.cfg = cfg;
   }
   eq(other: ToolbarWidget) {
     return (
@@ -157,8 +160,10 @@ class ToolbarWidget extends WidgetType {
 
 /** Blank space after a region, so the side panes can stay row-aligned. */
 class SpacerWidget extends WidgetType {
-  constructor(readonly rows: number) {
+  readonly rows: number;
+  constructor(rows: number) {
     super();
+    this.rows = rows;
   }
   eq(other: SpacerWidget) {
     return other.rows === this.rows;
@@ -180,16 +185,20 @@ function buildDecorations(state: EditorState, cfg: MergeEditorConfig): Decoratio
   }
   const ranges: { from: number; value: ReturnType<typeof Decoration.line> }[] = [];
 
-  // Band every line, assigning it to the last region that starts at or before it.
-  // Editing across a boundary can leave a line outside every mapped range, and a
-  // line with no band reads as though its colour was lost.
+  // Band every line by its OWNING region, falling back to the last region that
+  // started before it — editing across a boundary can leave a line inside no range,
+  // and a line with no band reads as though it lost its colour.
+  const owners = regionLines(
+    state.doc,
+    specs.map((s) => ({ from: s.from, to: s.to, region: s.spec.region })),
+  );
+  const byRegion = new Map(specs.map((s) => [s.spec.region, s.spec]));
   let at = 0;
   for (let n = 1; n <= state.doc.lines; n++) {
     const line = state.doc.line(n);
     while (at + 1 < specs.length && specs[at + 1].from <= line.from) at++;
-    const owner = specs[at];
-    if (!owner || owner.from > line.from) continue;
-    const kind = owner.spec.kind;
+    const owned = owners.get(n);
+    const kind = (owned !== undefined ? byRegion.get(owned) : specs[at]?.spec)?.kind;
     if (!kind) continue;
     ranges.push({
       from: line.from,
@@ -200,6 +209,7 @@ function buildDecorations(state: EditorState, cfg: MergeEditorConfig): Decoratio
     });
   }
 
+  let prevEnd = -1;
   for (const { from, to, spec } of specs) {
     // Where a region's block decorations hang. A region with text brackets its own
     // lines. An emptied one is a single position, and which side of the neighbouring
@@ -208,11 +218,16 @@ function buildDecorations(state: EditorState, cfg: MergeEditorConfig): Decoratio
     // void in its own place, leaving the surrounding lines where they are.
     const line = state.doc.lineAt(from);
     const empty = to <= from;
-    const atLineStart = line.from === from;
-    const head = empty && !atLineStart ? line.to : line.from;
-    const headSide = empty && !atLineStart ? 1 : -1;
+    // An empty region that OWNS its blank line hangs above that line; one that owns
+    // nothing (its text was deleted, so it shares a line with a neighbour) hangs
+    // below it, leaving a void in its own place instead of moving above the code.
+    const owns = regionRows(state.doc, from, to, prevEnd);
+    const below = empty && owns === 0;
+    const head = below ? line.to : line.from;
+    const headSide = below ? 1 : -1;
     const tail = empty ? head : state.doc.lineAt(to).to;
     const tailSide = empty ? headSide : 1;
+    prevEnd = Math.max(from, to);
 
     if (spec.conflict) {
       ranges.push({
@@ -349,7 +364,7 @@ export interface MergeEditor {
 }
 
 /** Assemble the document and the region ranges that track it. */
-function assemble(regions: RegionSpec[]): { doc: string; set: RangeSet<RegionValue> } {
+export function assemble(regions: RegionSpec[]): { doc: string; set: RangeSet<RegionValue> } {
   const parts: string[] = [];
   const ranges: { value: RegionValue; from: number; to: number }[] = [];
   let at = 0;
@@ -373,6 +388,45 @@ function assemble(regions: RegionSpec[]): { doc: string; set: RangeSet<RegionVal
   };
 }
 
+/** Rows a region owns in `doc`, EXCLUSIVELY: `prevTo` is where the previous region
+ *  ended, and no region claims a line another already covers.
+ *
+ *  A region with text owns every line it spans, including a trailing blank one — a
+ *  range ending at a line boundary ends with that newline. An empty region owns the
+ *  blank line it sits on only if the previous region did not already end there;
+ *  otherwise it owns nothing and needs a void instead. Without this exclusivity,
+ *  deleting a conflict's line left both it and the region above claiming the same
+ *  blank line: the conflict appeared to move up onto it, and neither got the spacer
+ *  that keeps the panes level. */
+export function regionRows(
+  doc: EditorState["doc"],
+  from: number,
+  to: number,
+  prevTo = -1,
+): number {
+  const line = doc.lineAt(from);
+  if (to <= from) return line.length === 0 && from > prevTo ? 1 : 0;
+  return doc.lineAt(to).number - line.number + 1;
+}
+
+/** Line number → owning region, by the same rule; what the bands are drawn from. */
+export function regionLines(
+  doc: EditorState["doc"],
+  ranges: { from: number; to: number; region: number }[],
+): Map<number, number> {
+  const owner = new Map<number, number>();
+  let prevTo = -1;
+  for (const r of ranges) {
+    const rows = regionRows(doc, r.from, r.to, prevTo);
+    const first = doc.lineAt(r.from).number;
+    for (let n = first; n < first + rows; n++) if (!owner.has(n)) owner.set(n, r.region);
+    prevTo = Math.max(r.from, r.to);
+  }
+  return owner;
+}
+
+export { regionField };
+
 export function createMergeEditor(parent: HTMLElement, cfg: MergeEditorConfig): MergeEditor {
   let current = cfg;
   let applying = false; // suppress onEdit while we rewrite the doc ourselves
@@ -393,6 +447,7 @@ export function createMergeEditor(parent: HTMLElement, cfg: MergeEditorConfig): 
     let bar = 0;
     const tops: number[] = [];
     const rows: number[] = [];
+    let prevTo = -1;
     const iter = view.state.field(regionField).iter();
     while (iter.value) {
       const spec = iter.value.spec;
@@ -401,17 +456,8 @@ export function createMergeEditor(parent: HTMLElement, cfg: MergeEditorConfig): 
       tops[spec.region] = el
         ? el.getBoundingClientRect().top - contentTop
         : view.lineBlockAt(iter.from).top;
-      // Rows the region owns. An empty range owns a row only when it sits on a
-      // blank line of its own (the placeholder of an untouched conflict); once its
-      // text is deleted it shares a line with a neighbour and owns nothing, and
-      // the side panes need a spacer to show their proposals.
-      const line = view.state.doc.lineAt(iter.from);
-      rows[spec.region] =
-        iter.from === to
-          ? line.from === iter.from && line.length === 0
-            ? 1
-            : 0
-          : view.state.doc.lineAt(to).number - line.number + 1;
+      rows[spec.region] = regionRows(view.state.doc, iter.from, to, prevTo);
+      prevTo = to;
       iter.next();
     }
     current.onGeometry(tops, view.contentHeight, rows);
