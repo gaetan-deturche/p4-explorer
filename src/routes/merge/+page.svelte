@@ -487,9 +487,9 @@
         <span class="chip add">+ kept</span><span class="chip del">− dropped</span><span
           class="chip vs">! conflict</span
         >
-        <span class="lgd">▶ ◀ origin</span>
       </span>
-      {#if conflicts.length > 1}
+      <!-- Navigation is conflict-only: the auto-merged changes need no visit. -->
+      {#if conflicts.length}
         <button onclick={() => goTo(current - 1)} title="Previous conflict">▲</button>
         <span class="dim">{current + 1}/{conflicts.length}</span>
         <button onclick={() => goTo(current + 1)} title="Next conflict">▼</button>
@@ -669,9 +669,6 @@
   }
   .chip.vs {
     color: #e0555a;
-  }
-  .lgd {
-    margin-left: 4px;
   }
   .err {
     padding: 10px;
