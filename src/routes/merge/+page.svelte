@@ -3,6 +3,7 @@
   import { invoke } from "@tauri-apps/api/core";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { langForFile, tokenizeLines, type TokenRun } from "$lib/syntax";
+  import { createMergeEditor, type MergeEditor, type RegionSpec } from "$lib/mergeedit";
   import type { MergeData, MergeRegion } from "$lib/p4";
 
   // Opened by the Rust `open_merge_window` command; the job itself is fetched by
@@ -14,32 +15,29 @@
   let data = $state<MergeData | null>(null);
   let error = $state("");
   let saving = $state(false);
-  /** Region → the result text for it. Set means settled; the side buttons only
-   *  seed it, so anything can be typed over afterwards. */
+  /** Region → its text in the result. Set means settled; the toolbar buttons only
+   *  seed it, and the editor reports every further keystroke back into it. */
   let edited = $state<Record<number, string>>({});
   /** Region → where its text came from, for the origin arrows. */
   let origin = $state<Record<number, string>>({});
-  let showBase = $state<Record<number, boolean>>({});
   let current = $state(0); // which conflict the prev/next buttons are on
-  /** line text → colored runs, from tokenizing all three sides once. */
+  /** line text → colored runs; the side panes are rendered, not editors. */
   let tokens = $state<Map<string, TokenRun[]>>(new Map());
+
+  let host: HTMLDivElement | undefined = $state();
+  let editor: MergeEditor | null = null;
 
   const regions = $derived(data?.regions ?? []);
   const conflicts = $derived(
     regions.map((r, i) => (r.kind === "conflict" ? i : -1)).filter((i) => i >= 0),
   );
   const unsettled = $derived(conflicts.filter((i) => edited[i] === undefined));
-  const resultLines = $derived(regions.flatMap((r, i) => linesFor(r, i)));
 
-  /** The result text for a region: what was typed, else the auto-merge. A
-   *  conflict with nothing taken or typed yet has no text at all. */
-  function resultText(r: MergeRegion, i: number): string | null {
+  /** The result text for a region: what was edited, else the auto-merge. An
+   *  unsettled conflict contributes nothing but still occupies one line. */
+  function resultText(r: MergeRegion, i: number): string {
     if (edited[i] !== undefined) return edited[i];
-    return r.kind === "conflict" ? null : r.lines.join("\n");
-  }
-  function linesFor(r: MergeRegion, i: number): string[] {
-    const t = resultText(r, i);
-    return t === null || t === "" ? [] : t.split("\n");
+    return r.kind === "conflict" ? "" : r.lines.join("\n");
   }
 
   /** What a side pane shows: its own text, or the base where it didn't change. */
@@ -60,6 +58,7 @@
   }
   function resultKind(r: MergeRegion, i: number): string {
     if (r.kind === "same" && edited[i] === undefined) return "";
+    if (r.kind === "conflict" && edited[i] === undefined) return "vs";
     return origin[i] === "base" ? "keep" : "add";
   }
   const MARK: Record<string, string> = { add: "+", del: "-", vs: "!", keep: "=" };
@@ -80,25 +79,44 @@
     return { left: r.kind === "theirs", right: r.kind === "ours", open: false };
   }
 
-  // First line number of each region, per pane: the panes are whole files, so
-  // each one's numbering runs continuously across regions.
+  // --- alignment ------------------------------------------------------------
+  // No soft wrap anywhere, so every line is exactly one row: a region can be made
+  // to occupy the same number of rows in all three panes by padding the shorter
+  // ones. Purely arithmetic — no measuring, nothing to drift.
+  const rowPlan = $derived.by(() =>
+    regions.map((r, i) => {
+      const res = Math.max(1, resultText(r, i).split("\n").length);
+      const t = side(r, "theirs").length;
+      const o = side(r, "ours").length;
+      const rows = Math.max(res, t, o);
+      return { rows, res, theirs: t, ours: o };
+    }),
+  );
+  /** Side pane line numbers run continuously through their own file. */
   const starts = $derived.by(() => {
     let t = 1,
-      o = 1,
-      m = 1;
-    return regions.map((r, i) => {
-      const at = { t, o, m };
+      o = 1;
+    return regions.map((r) => {
+      const at = { t, o };
       t += side(r, "theirs").length;
       o += side(r, "ours").length;
-      m += linesFor(r, i).length;
       return at;
     });
   });
 
-  /** Copy a side's text into the result, leaving it editable. */
+  const specs = $derived<RegionSpec[]>(
+    regions.map((r, i) => ({
+      region: i,
+      kind: resultKind(r, i),
+      conflict: r.kind === "conflict",
+      text: resultText(r, i),
+    })),
+  );
+
+  /** Copy a side's text into the result; it stays editable afterwards. */
   function take(i: number, what: "theirs" | "ours" | "both" | "base") {
     const r = regions[i];
-    if (r.kind !== "conflict") return;
+    if (!r || r.kind !== "conflict") return;
     const text =
       what === "both"
         ? [...r.theirs, ...r.ours].join("\n")
@@ -107,139 +125,32 @@
           : r[what].join("\n");
     edited = { ...edited, [i]: text };
     origin = { ...origin, [i]: what };
+    editor?.setRegions(nextSpecs({ ...edited, [i]: text }, { ...origin, [i]: what }));
   }
-  /** Drop a hand edit and go back to what the merge produced. */
-  function revert(i: number) {
+  /** Back to an undecided conflict / the merged text. */
+  function reset(i: number) {
     const nextE = { ...edited };
     const nextO = { ...origin };
     delete nextE[i];
     delete nextO[i];
     edited = nextE;
     origin = nextO;
+    editor?.setRegions(nextSpecs(nextE, nextO));
   }
-
-  // --- the editable result pane --------------------------------------------
-  // Svelte must NOT reconcile these rows: the browser rewrites them as the user
-  // types, which leaves any framework bookkeeping stale (duplicated rows,
-  // mis-read text, reverts that don't take). This action owns the subtree
-  // instead: it builds the rows, reads them back, and rebuilds only when the
-  // element is not being typed in.
-  type EditOpts = {
-    lines: string[];
-    kind: string;
-    from: number;
-    tokens: Map<string, TokenRun[]>;
-    onText: (text: string) => void;
-  };
-
-  function editable(node: HTMLElement, opts: EditOpts) {
-    let o = opts;
-
-    const build = () => {
-      node.replaceChildren();
-      o.lines.forEach((line, k) => node.appendChild(row(line, k)));
-    };
-    const row = (line: string, k: number) => {
-      const el = document.createElement("div");
-      el.className = "rw";
-      el.dataset.mk = MARK[o.kind] ?? "";
-      el.dataset.n = String(o.from + k);
-      const runs = o.tokens.get(line);
-      if (runs?.length) {
-        for (const t of runs) {
-          const s = document.createElement("span");
-          if (t.color) s.style.color = t.color;
-          s.textContent = t.content;
-          el.appendChild(s);
-        }
-      } else if (line) {
-        el.textContent = line;
-      }
-      return el;
-    };
-    /** Read the text by walking real DOM nodes only. innerText would be
-     *  shorter, but whether it includes CSS-generated content is
-     *  implementation-dependent — and the gutter IS generated content, so a
-     *  line number could end up written into the file. A walk cannot see it. */
-    const BLOCK = new Set(["DIV", "P", "PRE", "LI"]);
-    const inlineText = (el: Node): string => {
-      const kids = Array.from(el.childNodes);
-      let s = "";
-      kids.forEach((n, k) => {
-        if (n.nodeType === Node.TEXT_NODE) {
-          s += n.nodeValue ?? "";
-        } else if (n instanceof HTMLElement) {
-          if (n.tagName !== "BR") {
-            s += inlineText(n);
-          } else if (k < kids.length - 1) {
-            s += "\n";
-          }
-          // A <br> closing a block is the browser's filler for an empty line,
-          // inserted when the pane takes focus — counting it as a break would
-          // double every blank line.
-        }
-      });
-      return s;
-    };
-    const collect = (el: HTMLElement, out: string[]) => {
-      const blocks = Array.from(el.children).filter((c) => BLOCK.has(c.tagName));
-      if (!blocks.length) {
-        out.push(inlineText(el));
-        return;
-      }
-      for (const b of blocks) collect(b as HTMLElement, out);
-    };
-    const read = () => {
-      const out: string[] = [];
-      collect(node, out);
-      return out.join("\n").replace(/\r/g, "");
-    };
-    /** Keep numbers truthful while typing without touching the caret: only the
-     *  data attributes change, never the nodes the selection lives in. */
-    const renumber = () => {
-      let n = o.from;
-      for (const child of Array.from(node.children)) {
-        if (!(child instanceof HTMLElement)) continue;
-        child.dataset.mk = MARK[o.kind] ?? "";
-        child.dataset.n = String(n++);
-        child.classList.add("rw");
-      }
-    };
-
-    const onInput = () => {
-      renumber();
-      const text = read();
-      // The browser normalises this subtree on its own (filler breaks, block
-      // splitting). If the text is unchanged that was not an edit, and must not
-      // mark the region hand-edited.
-      if (text === o.lines.join("\n")) return;
-      o.onText(text);
-    };
-    const onPaste = (e: ClipboardEvent) => {
-      const text = e.clipboardData?.getData("text/plain");
-      if (text === undefined) return;
-      e.preventDefault(); // a rich paste would inject markup into the code
-      document.execCommand("insertText", false, text.replace(/\r/g, ""));
-    };
-    const onBlur = () => build(); // authoritative redraw: numbers + colours
-
-    node.addEventListener("input", onInput);
-    node.addEventListener("paste", onPaste);
-    node.addEventListener("blur", onBlur);
-    build();
-
-    return {
-      update(next: EditOpts) {
-        o = next;
-        // Never rebuild under the caret; blur will redraw from state.
-        if (document.activeElement !== node) build();
-      },
-      destroy() {
-        node.removeEventListener("input", onInput);
-        node.removeEventListener("paste", onPaste);
-        node.removeEventListener("blur", onBlur);
-      },
-    };
+  /** Specs for a given state — used when we rewrite the document ourselves. */
+  function nextSpecs(e: Record<string, string>, o: Record<string, string>): RegionSpec[] {
+    return regions.map((r, i) => {
+      const text = e[i] !== undefined ? e[i] : r.kind === "conflict" ? "" : r.lines.join("\n");
+      const kind =
+        r.kind === "same" && e[i] === undefined
+          ? ""
+          : r.kind === "conflict" && e[i] === undefined
+            ? "vs"
+            : o[i] === "base"
+              ? "keep"
+              : "add";
+      return { region: i, kind, conflict: r.kind === "conflict", text };
+    });
   }
 
   function goTo(n: number) {
@@ -251,10 +162,11 @@
   }
 
   async function save() {
-    if (!data || unsettled.length) return;
+    if (!data || unsettled.length || !editor) return;
     saving = true;
     try {
-      await invoke<string>("merge_save", { id, text: resultLines.join("\n") + "\n" });
+      const text = editor.view.state.doc.toString();
+      await invoke<string>("merge_save", { id, text: text.endsWith("\n") ? text : text + "\n" });
       await getCurrentWindow().close();
     } catch (e) {
       error = String(e);
@@ -271,19 +183,17 @@
     await getCurrentWindow().close();
   }
 
-  /** Colour lines once per distinct text — identical text tokenizes the same, so
-   *  one map serves the side panes AND the assembled result. */
+  /** Colour the side panes. The editor highlights itself, with the same palette. */
   async function recolor(d: MergeData) {
     const lang = langForFile(d.name);
     if (!lang) return;
     const dark = window.matchMedia("(prefers-color-scheme: dark)").matches;
-    const batches: string[][] = [[], [], [], []];
+    const batches: string[][] = [[], [], []];
     for (const r of d.regions) {
       batches[0].push(...(r.kind === "conflict" ? r.theirs : r.lines));
       batches[1].push(...(r.kind === "conflict" ? r.ours : r.lines));
       if (r.kind !== "same") batches[2].push(...r.base);
     }
-    batches[3] = resultLines; // includes anything hand-typed
     const map = new Map(tokens);
     for (const lines of batches) {
       if (!lines.some((l) => !map.has(l))) continue;
@@ -303,25 +213,58 @@
   onMount(async () => {
     try {
       data = await invoke<MergeData>("merge_data", { id });
-      // Nothing is auto-settled: conflicts must be dealt with deliberately. Open
-      // on the first one so the window lands on the work to be done.
-      if (data.conflicts > 0) setTimeout(() => goTo(0), 0);
       void recolor(data);
     } catch (e) {
       error = String(e);
     }
   });
+
+  // Mount the editor once the host element and the data are both there.
+  $effect(() => {
+    if (!host || !data || editor) return;
+    editor = createMergeEditor(host, {
+      regions: specs,
+      onEdit: (region, text) => {
+        edited = { ...edited, [region]: text };
+        if (origin[region] !== "manual") origin = { ...origin, [region]: "manual" };
+      },
+      onTake: take,
+      onReset: reset,
+      conflictNumber: (region) => conflicts.indexOf(region) + 1,
+      settled: (region) => edited[region] !== undefined,
+    });
+    if (conflicts.length) setTimeout(() => goTo(0), 0);
+  });
+
+  // Keep the editor's blank-row padding in step with the side panes.
+  $effect(() => {
+    if (!editor) return;
+    const rows = new Map<number, number>();
+    rowPlan.forEach((p, i) => rows.set(i, p.rows - p.res));
+    editor.setSpacers(rows);
+  });
+  // Toolbar labels depend on host state (settled, conflict numbering).
+  $effect(() => {
+    void unsettled.length;
+    editor?.touch();
+  });
+
+  $effect(() => () => editor?.destroy());
 </script>
 
-<!-- Read-only pane content: mark + line number + coloured code. -->
-{#snippet code(lines: string[], from: number, kind: string)}
+<!-- Read-only pane content: mark + line number + coloured code, then filler rows
+     so the region occupies the same height as in the other panes. -->
+{#snippet pane(lines: string[], from: number, kind: string, filler: number)}
   {#each lines as line, k}
     <div class="line k-{kind}"><span class="mk">{MARK[kind] ?? ""}</span><span class="ln"
-        >{from ? from + k : ""}</span
+        >{from + k}</span
       ><span class="src"
         >{#if tokens.get(line)}{#each tokens.get(line) ?? [] as run}<span
               style:color={run.color}>{run.content}</span>{/each}{:else}{line || " "}{/if}</span
       ></div>
+  {/each}
+  {#each Array.from({ length: filler }) as _, k (k)}
+    <div class="line filler">&nbsp;</div>
   {/each}
 {/snippet}
 
@@ -332,7 +275,7 @@
       <span class="dim">
         {data.conflicts} conflict{data.conflicts === 1 ? "" : "s"}{data.conflicts
           ? ` · ${unsettled.length} still to settle`
-          : ""} · {resultLines.length} lines
+          : ""}
       </span>
       <span class="grow"></span>
       <span class="legend dim">
@@ -367,104 +310,44 @@
   {:else if !data}
     <div class="dim pad">Loading…</div>
   {:else}
-    <!-- Headers live in the same grid as the content, so a scrollbar can never
-         push a column out of line with its title. The two narrow link columns
-         carry the arrows that say which side a region came from. -->
     <div class="scroll">
       <div class="grid mono">
         <div class="head">{data.theirsLabel}</div>
         <div class="head link"></div>
         <div class="head mid">
-          result — merged file, type anywhere<span class="dim"> (base: {data.baseLabel})</span>
+          result — merged file, editable<span class="dim"> (base: {data.baseLabel})</span>
         </div>
         <div class="head link"></div>
         <div class="head">{data.yoursLabel}</div>
 
+        <!-- The result is ONE editor spanning every region row; the side panes
+             are per-region cells padded to the same heights. -->
+        <div class="editorcell" bind:this={host}></div>
+
         {#each regions as r, i (i)}
           {@const conflict = r.kind === "conflict"}
           {@const flow = flows(r, i)}
-          {@const mine = linesFor(r, i)}
-          <!-- A conflict tints its whole row, all five cells, so the band reads
-               as one block instead of a few coloured lines. -->
-          <div class="cell" class:conflict>
+          {@const plan = rowPlan[i]}
+          <div class="cell theirs" class:conflict style="grid-row:{i + 2}">
             {#if conflict}<div class="chead side"></div>{/if}
-            {@render code(side(r, "theirs"), starts[i].t, sideKind(r, "theirs"))}
+            {@render pane(
+              side(r, "theirs"),
+              starts[i].t,
+              sideKind(r, "theirs"),
+              plan.rows - plan.theirs,
+            )}
           </div>
 
-          <div class="cell link" class:conflict class:on={flow.left}>
+          <div class="cell link l" class:conflict class:on={flow.left} style="grid-row:{i + 2}">
             {#if conflict}<div class="chead side"></div>{/if}
             {#if flow.left}
               <div class="arrow" title="This region's text came from the depot side">▶</div>
             {:else if flow.open}
-              <div class="arrow open" title="Undecided conflict">?</div>
+              <div class="arrow open" title="Undecided conflict" data-region={i}>?</div>
             {/if}
           </div>
 
-          <div class="cell mid" class:conflict>
-            {#if conflict}
-              <div class="chead" data-region={i}>
-                <span class="cnum">conflict {conflicts.indexOf(i) + 1}</span>
-                <button class:on={origin[i] === "theirs"} onclick={() => take(i, "theirs")}>
-                  ◀ depot
-                </button>
-                <button class:on={origin[i] === "ours"} onclick={() => take(i, "ours")}>
-                  workspace ▶
-                </button>
-                <button class:on={origin[i] === "both"} onclick={() => take(i, "both")}>
-                  both
-                </button>
-                <button class:on={origin[i] === "base"} onclick={() => take(i, "base")}>base</button>
-                {#if edited[i] !== undefined}
-                  <button onclick={() => revert(i)} title="Back to an undecided conflict">
-                    reset
-                  </button>
-                {/if}
-                <button
-                  class="peek"
-                  class:on={showBase[i]}
-                  title="Show the common ancestor for this conflict"
-                  onclick={() => (showBase = { ...showBase, [i]: !showBase[i] })}
-                >
-                  {showBase[i] ? "hide base" : "base?"}
-                </button>
-              </div>
-              {#if showBase[i] && r.kind === "conflict"}
-                <div class="baseblock">{@render code(r.base, 0, "keep")}</div>
-              {/if}
-            {:else if origin[i] === "manual"}
-              <div class="editbar thin">
-                <span class="cnum">hand-edited</span>
-                <button onclick={() => revert(i)} title="Back to the merged text">revert</button>
-              </div>
-            {/if}
-
-            <!-- Always typeable, no edit mode. The action owns these rows; the
-                 gutter is drawn by CSS in the padding, so nothing but code is
-                 ever inside the editable. -->
-            <div
-              class="redit k-{resultKind(r, i)}"
-              class:empty={!mine.length}
-              role="textbox"
-              tabindex="0"
-              aria-multiline="true"
-              aria-label="merged text"
-              contenteditable="true"
-              spellcheck="false"
-              data-ph={conflict ? "take a side above, or type the resolution" : ""}
-              use:editable={{
-                lines: mine,
-                kind: resultKind(r, i),
-                from: starts[i].m,
-                tokens,
-                onText: (text) => {
-                  edited = { ...edited, [i]: text };
-                  origin = { ...origin, [i]: "manual" };
-                },
-              }}
-            ></div>
-          </div>
-
-          <div class="cell link" class:conflict class:on={flow.right}>
+          <div class="cell link r" class:conflict class:on={flow.right} style="grid-row:{i + 2}">
             {#if conflict}<div class="chead side"></div>{/if}
             {#if flow.right}
               <div class="arrow" title="This region's text came from the workspace side">◀</div>
@@ -473,9 +356,9 @@
             {/if}
           </div>
 
-          <div class="cell" class:conflict>
+          <div class="cell ours" class:conflict style="grid-row:{i + 2}">
             {#if conflict}<div class="chead side"></div>{/if}
-            {@render code(side(r, "ours"), starts[i].o, sideKind(r, "ours"))}
+            {@render pane(side(r, "ours"), starts[i].o, sideKind(r, "ours"), plan.rows - plan.ours)}
           </div>
         {/each}
       </div>
@@ -494,6 +377,9 @@
     flex-direction: column;
     height: 100vh;
     font-size: 12px;
+    /* One row height everywhere — 12px * 1.45. The alignment maths and the
+       editor's spacer widgets both measure in this unit, so it must be absolute. */
+    --lh: 17.4px;
   }
   .mono {
     font-family: var(--mono, ui-monospace, Consolas, monospace);
@@ -579,24 +465,43 @@
   .head.link {
     padding: 0;
   }
+  /* Explicit columns: the editor spans every region row in column 3. */
+  .cell.theirs {
+    grid-column: 1;
+  }
+  .cell.link.l {
+    grid-column: 2;
+  }
+  .cell.link.r {
+    grid-column: 4;
+  }
+  .editorcell {
+    grid-column: 3;
+    grid-row: 2 / -1;
+    background: rgba(255, 255, 255, 0.02);
+    border-right: 1px solid var(--border, #333);
+    overflow: hidden;
+    min-width: 0;
+  }
+  .cell.ours {
+    grid-column: 5;
+  }
   .cell {
     border-right: 1px solid var(--border, #333);
     border-bottom: 1px solid rgba(255, 255, 255, 0.04);
     min-width: 0;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none; /* a visible bar would add height and skew the rows */
   }
-  .cell.mid {
-    background: rgba(255, 255, 255, 0.02);
+  .cell::-webkit-scrollbar {
+    display: none;
   }
-  /* The conflict band: the whole row, not just its lines. */
   .cell.conflict {
     background: rgba(224, 85, 90, 0.12);
     border-top: 1px solid rgba(224, 85, 90, 0.55);
     border-bottom: 1px solid rgba(224, 85, 90, 0.55);
   }
-  .cell.mid.conflict {
-    background: rgba(224, 85, 90, 0.09);
-  }
-  /* Link columns: the visual connection between a side and the result. */
   .cell.link {
     background: var(--bg-alt, #1f1f1f);
     text-align: center;
@@ -612,19 +517,19 @@
     color: #e0555a;
     font-weight: 600;
   }
-  .line,
-  .rw {
-    line-height: 1.45;
-  }
   .line {
     display: flex;
     align-items: flex-start;
+    line-height: 1.45;
     border-left: 3px solid transparent;
+    height: var(--lh);
   }
-  /* Wrap long lines inside their own pane instead of bleeding into the next. */
+  .line.filler {
+    border-left-color: transparent;
+  }
+  /* No wrapping: alignment depends on one line being exactly one row. */
   .src {
-    white-space: pre-wrap;
-    overflow-wrap: anywhere;
+    white-space: pre;
     min-width: 0;
     padding-right: 6px;
   }
@@ -673,98 +578,13 @@
   .k-keep .mk {
     color: var(--text-dim, #999);
   }
-  /* The editable result: rows are plain blocks (so Enter splits one, as in any
-     editor) and the gutter is drawn in the left padding. */
-  .redit {
-    padding-left: calc(4.2em + 8px);
-    padding-right: 6px;
-    border-left: 3px solid transparent;
-    outline: none;
-    cursor: text;
-    min-height: 1.45em;
-  }
-  /* An inset ring, not a background: the add/drop tint must survive focus. */
-  .redit:focus {
-    box-shadow: inset 0 0 0 1px rgba(217, 141, 58, 0.55);
-  }
-  .redit.empty::before {
-    content: attr(data-ph);
-    color: #e0555a;
-    font-style: italic;
-  }
-  :global(.rw) {
-    position: relative;
-    white-space: pre-wrap;
-    overflow-wrap: anywhere;
-    min-height: 1.45em;
-    line-height: 1.45;
-  }
-  /* Mark and number: one pseudo element each, so they colour independently and
-     sit at the same offsets as the read-only panes' .mk / .ln. */
-  :global(.rw::before),
-  :global(.rw::after) {
-    position: absolute;
-    white-space: pre;
-    user-select: none;
-  }
-  :global(.rw::before) {
-    content: attr(data-mk);
-    left: calc(-4.2em - 8px);
-    width: 1em;
-    text-align: center;
-  }
-  :global(.rw::after) {
-    content: attr(data-n);
-    left: calc(-3.2em - 8px);
-    width: 3.2em;
-    text-align: right;
-    color: var(--text-dim, #999);
-    opacity: 0.55;
-  }
-  :global(.k-add .rw::before) {
-    color: #7cc47c;
-  }
-  :global(.k-del .rw::before) {
-    color: #d9873a;
-  }
-  :global(.k-vs .rw::before) {
-    color: #e0555a;
-  }
-  :global(.k-keep .rw::before) {
-    color: var(--text-dim, #999);
-  }
-  .chead,
-  .editbar {
+  .chead {
     display: flex;
     align-items: center;
-    gap: 6px;
-    flex-wrap: nowrap;
     min-height: 24px;
     padding: 2px 6px;
     box-sizing: border-box;
-  }
-  .chead {
-    background: rgba(224, 85, 90, 0.16);
-  }
-  .chead.side {
     background: rgba(224, 85, 90, 0.1);
-    padding: 2px 0;
-  }
-  .editbar {
-    background: rgba(255, 255, 255, 0.06);
-  }
-  .editbar.thin {
-    min-height: 0;
-    padding: 1px 6px;
-  }
-  .cnum {
-    font-size: 10px;
-    font-weight: 600;
-    color: var(--text-dim, #999);
-    white-space: nowrap;
-  }
-  .baseblock {
-    opacity: 0.85;
   }
   button {
     background: var(--bg-alt, #1f1f1f);
@@ -779,13 +599,6 @@
   button:disabled {
     opacity: 0.5;
     cursor: default;
-  }
-  button.on {
-    border-color: var(--accent, #d98d3a);
-    color: var(--accent, #d98d3a);
-  }
-  .peek {
-    margin-left: auto;
   }
   .primary {
     border-color: var(--accent, #d98d3a);
