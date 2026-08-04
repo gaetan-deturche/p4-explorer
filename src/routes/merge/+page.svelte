@@ -50,36 +50,39 @@
     return r.kind === which ? r.lines : r.base;
   }
 
-  // --- provenance: every line says where it came from ------------------------
-  // Marks mirror a diff: "+" this side's own change, "-" the text this side is
-  // still on that the other side replaced, "!" a line in conflict.
-  function sideMark(r: MergeRegion, which: Side): string {
+  // --- add / remove, the same meaning in every pane -------------------------
+  // "add" = text the merge keeps, "del" = base text it drops, "!" = contested.
+  // Which SIDE a change came from is shown by the arrows, not by the colour.
+  function sideKind(r: MergeRegion, which: Side): string {
     if (r.kind === "same") return "";
-    if (r.kind === "conflict") return "!";
-    if (r.kind === "both") return "+";
-    return r.kind === which ? "+" : "-";
+    if (r.kind === "conflict") return "vs";
+    if (r.kind === "both") return "add";
+    return r.kind === which ? "add" : "del";
   }
-  function sideTone(r: MergeRegion, which: Side): string {
+  function resultKind(r: MergeRegion, i: number): string {
     if (r.kind === "same") return "";
-    if (r.kind === "conflict") return "conflict";
-    if (r.kind === "both") return "both";
-    return r.kind === which ? which : "gone";
-  }
-  /** The result line's tone IS its origin: depot, workspace, both, base, manual. */
-  function resultTone(r: MergeRegion, i: number): string {
-    if (r.kind === "same") return "";
-    if (r.kind !== "conflict") return r.kind;
+    if (r.kind !== "conflict") return "add";
     const p = picks[i];
     if (!p) return "";
-    return p === "custom" ? "manual" : p;
+    return p === "base" ? "keep" : "add";
   }
-  const TONE_NAME: Record<string, string> = {
-    theirs: "from depot",
-    ours: "from workspace",
-    both: "same on both sides",
-    base: "base kept",
-    manual: "hand-edited",
-  };
+  const MARK: Record<string, string> = { add: "+", del: "-", vs: "!", keep: "=" };
+
+  /** Which side(s) feed the result here — drawn as arrows in the link columns. */
+  function flows(r: MergeRegion, i: number): { left: boolean; right: boolean; open: boolean } {
+    if (r.kind === "same") return { left: false, right: false, open: false };
+    if (r.kind === "both") return { left: true, right: true, open: false };
+    if (r.kind !== "conflict") {
+      return { left: r.kind === "theirs", right: r.kind === "ours", open: false };
+    }
+    const p = picks[i];
+    if (!p) return { left: false, right: false, open: true }; // undecided
+    return {
+      left: p === "theirs" || p === "both",
+      right: p === "ours" || p === "both",
+      open: false,
+    };
+  }
 
   // First line number of each region, per pane: the panes are whole files, so
   // each one's numbering runs continuously across regions.
@@ -172,9 +175,9 @@
 
 <!-- `from` = this pane's first line number; 0 for text that is in no file (the
      base peek), which keeps an empty gutter so code stays aligned. -->
-{#snippet code(lines: string[], from: number, mark: string, tone: string)}
+{#snippet code(lines: string[], from: number, kind: string)}
   {#each lines as line, k}
-    <div class="line t-{tone}"><span class="mk">{mark}</span><span class="ln"
+    <div class="line k-{kind}"><span class="mk">{MARK[kind] ?? ""}</span><span class="ln"
         >{from ? from + k : ""}</span
       ><span class="src"
         >{#if tokens.get(line)}{#each tokens.get(line) ?? [] as run}<span
@@ -193,10 +196,11 @@
           : ""} · {resultLines.length} lines
       </span>
       <span class="grow"></span>
-      <span class="legend">
-        <span class="chip theirs">depot</span><span class="chip ours">workspace</span><span
-          class="chip conflict">conflict</span
+      <span class="legend dim">
+        <span class="chip add">+ kept</span><span class="chip del">− dropped</span><span
+          class="chip vs">! conflict</span
         >
+        <span class="lgd">▶ ◀ origin</span>
       </span>
       {#if conflicts.length > 1}
         <button onclick={() => goTo(current - 1)} title="Previous conflict">▲</button>
@@ -225,22 +229,34 @@
     <div class="dim pad">Loading…</div>
   {:else}
     <!-- Headers live in the same grid as the content, so a scrollbar can never
-         push a column out of line with its title. -->
+         push a column out of line with its title. The two narrow link columns
+         carry the arrows that say which side a region came from. -->
     <div class="scroll">
       <div class="grid mono">
-        <div class="head theirs">{data.theirsLabel}</div>
+        <div class="head">{data.theirsLabel}</div>
+        <div class="head link"></div>
         <div class="head mid">
           result — merged file<span class="dim"> (base: {data.baseLabel})</span>
         </div>
-        <div class="head ours">{data.yoursLabel}</div>
+        <div class="head link"></div>
+        <div class="head">{data.yoursLabel}</div>
 
         {#each regions as r, i (i)}
           {@const conflict = r.kind === "conflict"}
+          {@const flow = flows(r, i)}
           <div class="cell">
-            <!-- Empty strip opposite the middle pane's buttons: the three panes'
-                 code then starts at the same height. -->
             {#if conflict}<div class="chead side"></div>{/if}
-            {@render code(side(r, "theirs"), starts[i].t, sideMark(r, "theirs"), sideTone(r, "theirs"))}
+            {@render code(side(r, "theirs"), starts[i].t, sideKind(r, "theirs"))}
+          </div>
+
+          <!-- origin arrow: depot → result -->
+          <div class="cell link" class:on={flow.left}>
+            {#if conflict}<div class="chead side"></div>{/if}
+            {#if flow.left}
+              <div class="arrow" title="This region comes from the depot side">▶</div>
+            {:else if flow.open}
+              <div class="arrow open" title="Undecided conflict">?</div>
+            {/if}
           </div>
 
           <div class="cell mid">
@@ -269,7 +285,7 @@
               </div>
             {/if}
             {#if conflict && showBase[i] && r.kind === "conflict"}
-              <div class="baseblock">{@render code(r.base, 0, "=", "base")}</div>
+              <div class="baseblock">{@render code(r.base, 0, "keep")}</div>
             {/if}
             {#if conflict && editing === i}
               <textarea
@@ -281,22 +297,23 @@
             {:else if conflict && !picks[i]}
               <div class="line pending">— take a side, or edit —</div>
             {:else}
-              {#if r.kind !== "same"}
-                {@const tone = resultTone(r, i)}
-                {#if tone}<div class="origin t-{tone}">{TONE_NAME[tone] ?? tone}</div>{/if}
-              {/if}
-              {@render code(
-                linesFor(r, i),
-                starts[i].m,
-                r.kind === "same" ? "" : "+",
-                resultTone(r, i),
-              )}
+              {@render code(linesFor(r, i), starts[i].m, resultKind(r, i))}
+            {/if}
+          </div>
+
+          <!-- origin arrow: workspace → result -->
+          <div class="cell link" class:on={flow.right}>
+            {#if conflict}<div class="chead side"></div>{/if}
+            {#if flow.right}
+              <div class="arrow" title="This region comes from the workspace side">◀</div>
+            {:else if flow.open}
+              <div class="arrow open" title="Undecided conflict">?</div>
             {/if}
           </div>
 
           <div class="cell">
             {#if conflict}<div class="chead side"></div>{/if}
-            {@render code(side(r, "ours"), starts[i].o, sideMark(r, "ours"), sideTone(r, "ours"))}
+            {@render code(side(r, "ours"), starts[i].o, sideKind(r, "ours"))}
           </div>
         {/each}
       </div>
@@ -342,24 +359,26 @@
   }
   .legend {
     display: flex;
+    align-items: center;
     gap: 4px;
+    font-size: 10px;
   }
   .chip {
-    font-size: 10px;
     padding: 1px 6px;
     border-radius: 999px;
     border: 1px solid currentColor;
   }
-  .chip.theirs,
-  .head.theirs {
-    color: #7aa7d9;
-  }
-  .chip.ours,
-  .head.ours {
+  .chip.add {
     color: #7cc47c;
   }
-  .chip.conflict {
+  .chip.del {
     color: #d76a6a;
+  }
+  .chip.vs {
+    color: #b48ce0;
+  }
+  .lgd {
+    margin-left: 4px;
   }
   .err {
     padding: 10px;
@@ -373,7 +392,8 @@
   }
   .grid {
     display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    /* pane | link | result | link | pane */
+    grid-template-columns: minmax(0, 1fr) 1.4rem minmax(0, 1fr) 1.4rem minmax(0, 1fr);
     align-items: stretch;
   }
   .head {
@@ -383,6 +403,7 @@
     padding: 5px 8px;
     font-size: 11px;
     font-weight: 600;
+    color: var(--text-dim, #999);
     background: var(--bg-alt, #1f1f1f);
     border-bottom: 1px solid var(--border, #333);
     border-right: 1px solid var(--border, #333);
@@ -393,6 +414,9 @@
   .head.mid {
     color: var(--text, #ddd);
   }
+  .head.link {
+    padding: 0;
+  }
   .cell {
     border-right: 1px solid var(--border, #333);
     border-bottom: 1px solid rgba(255, 255, 255, 0.04);
@@ -400,6 +424,22 @@
   }
   .cell.mid {
     background: rgba(255, 255, 255, 0.02);
+  }
+  /* Link columns: the visual connection between a side and the result. */
+  .cell.link {
+    background: var(--bg-alt, #1f1f1f);
+    text-align: center;
+  }
+  .cell.link.on {
+    background: rgba(124, 196, 124, 0.12);
+  }
+  .arrow {
+    color: #7cc47c;
+    line-height: 1.45;
+  }
+  .arrow.open {
+    color: #b48ce0;
+    font-weight: 600;
   }
   .line {
     display: flex;
@@ -418,7 +458,6 @@
     flex: none;
     width: 1em;
     text-align: center;
-    opacity: 0.8;
     user-select: none;
   }
   .ln {
@@ -430,61 +469,38 @@
     opacity: 0.55;
     user-select: none;
   }
-  /* Provenance, matched to the side panes by colour: blue = depot, green =
-     workspace, red = conflict, dim/red = the text a side is losing. */
-  .t-theirs {
-    background: rgba(106, 154, 215, 0.14);
-    border-left-color: #5b8ec4;
-  }
-  .t-ours {
-    background: rgba(108, 195, 108, 0.14);
+  /* Colour says add / remove, exactly as in a diff — never which side. */
+  .k-add {
+    background: rgba(108, 195, 108, 0.15);
     border-left-color: #5faf5f;
   }
-  .t-both {
-    background: rgba(180, 180, 180, 0.1);
-    border-left-color: #8a8a8a;
+  .k-add .mk {
+    color: #7cc47c;
   }
-  .t-conflict {
-    background: rgba(215, 106, 106, 0.16);
+  .k-del {
+    background: rgba(215, 106, 106, 0.13);
     border-left-color: #d76a6a;
+    opacity: 0.75;
   }
-  .t-gone {
-    background: rgba(215, 106, 106, 0.06);
-    border-left-color: rgba(215, 106, 106, 0.4);
-    opacity: 0.5;
+  .k-del .mk {
+    color: #d76a6a;
   }
-  .t-base {
+  .k-vs {
+    background: rgba(180, 140, 224, 0.16);
+    border-left-color: #b48ce0;
+  }
+  .k-vs .mk {
+    color: #b48ce0;
+  }
+  .k-keep {
     background: rgba(180, 180, 180, 0.08);
     border-left-color: #6d6d6d;
   }
-  .t-manual {
-    background: rgba(217, 141, 58, 0.14);
-    border-left-color: var(--accent, #d98d3a);
-  }
-  .mk {
-    color: inherit;
-  }
-  .t-theirs .mk {
-    color: #7aa7d9;
-  }
-  .t-ours .mk {
-    color: #7cc47c;
-  }
-  .t-conflict .mk,
-  .t-gone .mk {
-    color: #d76a6a;
-  }
-  /* One label per changed region in the result pane, naming the origin. */
-  .origin {
-    font-size: 9px;
-    text-transform: uppercase;
-    letter-spacing: 0.4px;
-    padding: 0 8px 0 6px;
-    opacity: 0.75;
-    border-left: 3px solid transparent;
+  .k-keep .mk {
+    color: var(--text-dim, #999);
   }
   .line.pending {
-    color: var(--danger, #d76a6a);
+    color: #b48ce0;
     font-style: italic;
     padding-left: 8px;
   }
@@ -496,11 +512,12 @@
     min-height: 24px;
     padding: 2px 6px;
     box-sizing: border-box;
-    background: rgba(215, 106, 106, 0.18);
-    border-top: 1px solid rgba(215, 106, 106, 0.5);
+    background: rgba(180, 140, 224, 0.16);
+    border-top: 1px solid rgba(180, 140, 224, 0.5);
   }
   .chead.side {
-    background: rgba(215, 106, 106, 0.1);
+    background: rgba(180, 140, 224, 0.09);
+    padding: 2px 0;
   }
   .cnum {
     font-size: 10px;
