@@ -14,6 +14,7 @@
     offlineCached,
     onOfflineDiff,
     onOpenOfflineDiff,
+    needsResolve,
     onLocalFiles,
     onLocalFilesCached,
     onShelvedFiles,
@@ -40,6 +41,7 @@
     offlineCached: boolean; // false = never scanned (vs a cached empty result)
     onOfflineDiff: (depotFile: string) => Promise<string>; // forced local-vs-server diff
     onOpenOfflineDiff: (depotFile: string) => void; // open the offline diff externally
+    needsResolve: (depotFile: string) => boolean; // p4 is holding a resolve on it
     contextChange: string; // the changelist whose context menu is open (highlight it)
     onLocalFiles: (change: string) => Promise<P4Record[]>; // opened (workspace) files
     // cached opened/shelved files (instant); undefined = never fetched (loading)
@@ -527,6 +529,9 @@
     </button>
     <span class="act act-{f.action}">{f.action ?? ""}</span>
     <span class="fpath"><span class="pfile">{sp.name}</span><span class="pdir dim">{sp.dir}</span></span>
+    {#if kind === "local" && needsResolve(f.depotFile)}
+      <span class="unres">needs resolve</span>
+    {/if}
     <span class="ftype dim">{f.type ?? ""}</span>
   </div>
   {#if fd?.open}
@@ -732,6 +737,15 @@
   .act-desync {
     color: var(--text-dim);
     font-style: italic;
+  }
+  .unres {
+    flex: none;
+    font-size: 10px;
+    color: var(--danger, #d76a6a);
+    border: 1px solid currentColor;
+    border-radius: 999px;
+    padding: 0 6px;
+    margin-left: 6px;
   }
   .fpath {
     display: flex;

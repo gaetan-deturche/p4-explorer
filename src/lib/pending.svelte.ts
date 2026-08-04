@@ -22,6 +22,9 @@ let h: Hooks | null = null;
 let swarmBase = "";
 let version = $state(0); // bumps on every (re)load so views refetch file lists
 let reviews = $state<Record<string, ReviewInfo | null>>({}); // change → Swarm review status
+// Depot paths p4 is holding a resolve on. `p4 opened` says nothing about resolve
+// state, so a conflicted file is indistinguishable from a plain edit without this.
+let unresolved = $state<Set<string>>(new Set());
 
 // The pending list is DERIVED from the store — the single source the UI reads
 // (see the `rows`/`loading` getters). `load()` only writes the p4 result to the
@@ -246,6 +249,7 @@ export const pending = {
     const conn = h.conn();
     if (!h.connected() || !conn.client) {
       reviews = {};
+      unresolved = new Set();
       version++; // re-run the derived getters (clears the list on disconnect)
       return;
     }
@@ -257,6 +261,24 @@ export const pending = {
     storeSet("p4:pending", client, JSON.stringify(r)); // ONE write → rows re-derive
     version++; // fresh list in; also signals open CLs to refetch their file lists
     pending.loadReviews(); // fire-and-forget: populate Swarm review badges
+    pending.loadUnresolved();
+  },
+
+  /** Which opened files still need resolving (server-side filtered, so cheap). */
+  async loadUnresolved() {
+    if (!h || !h.connected() || !h.conn().client) return;
+    const conn = h.conn();
+    try {
+      const files = await p4.resolveNeeded(conn, "");
+      if (h.conn().client !== conn.client) return; // workspace switched mid-fetch
+      unresolved = new Set(files);
+    } catch {
+      unresolved = new Set(); // no badge rather than a stale one
+    }
+  },
+  /** True when p4 is holding a resolve on this depot file. */
+  needsResolve(depotFile: string): boolean {
+    return unresolved.has(depotFile);
   },
 
   /** Fetch the Swarm review status for every numbered changelist (the review is

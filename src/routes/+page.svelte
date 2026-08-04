@@ -668,6 +668,7 @@
           offlineCached={pending.offlineCached}
           onOfflineDiff={pending.offlineDiff}
           onOpenOfflineDiff={pending.openLocalDiff}
+          needsResolve={pending.needsResolve}
           contextChange={pendingCtx?.cl.change ?? ""}
           onLocalFiles={pending.localFiles}
           onLocalFilesCached={pending.localFilesCached}
