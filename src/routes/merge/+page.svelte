@@ -15,16 +15,22 @@
   let error = $state("");
   let saving = $state(false);
   /** Region → the result text for it. Set means settled; the side buttons only
-   *  seed it, so anything can be edited afterwards. */
+   *  seed it, so anything can be typed over afterwards. */
   let edited = $state<Record<number, string>>({});
   /** Region → where its text came from, for the origin arrows. */
   let origin = $state<Record<number, string>>({});
-  /** Which auto-merged region is open for editing (conflicts are always open). */
-  let focused = $state<number | null>(null);
   let showBase = $state<Record<number, boolean>>({});
   let current = $state(0); // which conflict the prev/next buttons are on
   /** line text → colored runs, from tokenizing all three sides once. */
   let tokens = $state<Map<string, TokenRun[]>>(new Map());
+
+  // The region being typed in. While it is live its lines are rendered from
+  // `frozen` — a plain array, deliberately NOT reactive — so nothing re-renders
+  // under the caret while the browser owns that subtree.
+  let live = $state<number | null>(null);
+  // A plain box, never $state and never reassigned: reading it must not create a
+  // dependency, or the subtree the caret sits in would re-render as state moves.
+  const frozen: { lines: string[] } = { lines: [] };
 
   const regions = $derived(data?.regions ?? []);
   const conflicts = $derived(
@@ -33,7 +39,7 @@
   const unsettled = $derived(conflicts.filter((i) => edited[i] === undefined));
   const resultLines = $derived(regions.flatMap((r, i) => linesFor(r, i)));
 
-  /** The result text for a region: what was edited, else the auto-merge. A
+  /** The result text for a region: what was typed, else the auto-merge. A
    *  conflict with nothing taken or typed yet has no text at all. */
   function resultText(r: MergeRegion, i: number): string | null {
     if (edited[i] !== undefined) return edited[i];
@@ -107,23 +113,23 @@
         : what === "base"
           ? r.base.join("\n")
           : r[what].join("\n");
+    live = null; // let the region re-render from the new text
     edited = { ...edited, [i]: text };
     origin = { ...origin, [i]: what };
-    focused = i;
   }
 
-  /** Free-hand edit of any region, conflict or not. */
-  function type(i: number, value: string) {
-    edited = { ...edited, [i]: value };
+  /** Typing in a region: the DOM is the source of truth until focus leaves. */
+  function onType(i: number, el: HTMLElement) {
+    edited = { ...edited, [i]: el.innerText.replace(/\r/g, "").replace(/\n$/, "") };
     origin = { ...origin, [i]: "manual" };
   }
-  /** Open an auto-merged region for editing, seeded with its own text. */
-  function openEdit(r: MergeRegion, i: number) {
-    if (edited[i] === undefined) {
-      const t = resultText(r, i);
-      if (t !== null) edited = { ...edited, [i]: t };
-    }
-    focused = i;
+  function onEnter(r: MergeRegion, i: number) {
+    frozen.lines = linesFor(r, i);
+    live = i;
+  }
+  async function onLeave() {
+    live = null;
+    if (data) await recolor(data); // colour whatever was just typed
   }
   /** Drop a hand edit and go back to what the merge produced. */
   function revert(i: number) {
@@ -131,12 +137,9 @@
     const nextO = { ...origin };
     delete nextE[i];
     delete nextO[i];
+    live = null;
     edited = nextE;
     origin = nextO;
-    focused = null;
-  }
-  function rows(text: string): number {
-    return Math.min(30, Math.max(2, text.split("\n").length + 1));
   }
 
   function goTo(n: number) {
@@ -168,20 +171,23 @@
     await getCurrentWindow().close();
   }
 
-  /** Colour every line once, from all three sides — identical text tokenizes the
-   *  same, so one map serves the side panes AND the assembled result. */
-  async function highlight(d: MergeData) {
+  /** Colour lines once per distinct text — identical text tokenizes the same, so
+   *  one map serves the side panes AND the assembled result. */
+  async function recolor(d: MergeData) {
     const lang = langForFile(d.name);
     if (!lang) return;
     const dark = !window.matchMedia?.("(prefers-color-scheme: light)").matches;
-    const sides: string[][] = [[], [], []];
+    const batches: string[][] = [[], [], [], []];
     for (const r of d.regions) {
-      sides[0].push(...(r.kind === "conflict" ? r.theirs : r.lines));
-      sides[1].push(...(r.kind === "conflict" ? r.ours : r.lines));
-      if (r.kind !== "same") sides[2].push(...r.base);
+      batches[0].push(...(r.kind === "conflict" ? r.theirs : r.lines));
+      batches[1].push(...(r.kind === "conflict" ? r.ours : r.lines));
+      if (r.kind !== "same") batches[2].push(...r.base);
     }
-    const map = new Map<string, TokenRun[]>();
-    for (const lines of sides) {
+    batches[3] = resultLines; // includes anything hand-typed
+    const map = new Map(tokens);
+    for (const lines of batches) {
+      const fresh = lines.filter((l) => !map.has(l));
+      if (!fresh.length) continue;
       const runs = await tokenizeLines(lines.join("\n"), lang, dark);
       if (!runs) continue;
       lines.forEach((l, i) => {
@@ -197,15 +203,14 @@
       // Nothing is auto-settled: conflicts must be dealt with deliberately. Open
       // on the first one so the window lands on the work to be done.
       if (data.conflicts > 0) setTimeout(() => goTo(0), 0);
-      void highlight(data);
+      void recolor(data);
     } catch (e) {
       error = String(e);
     }
   });
 </script>
 
-<!-- `from` = this pane's first line number; 0 for text that is in no file (the
-     base peek), which keeps an empty gutter so code stays aligned. -->
+<!-- Read-only pane content: mark + line number + coloured code. -->
 {#snippet code(lines: string[], from: number, kind: string)}
   {#each lines as line, k}
     <div class="line k-{kind}"><span class="mk">{MARK[kind] ?? ""}</span><span class="ln"
@@ -215,6 +220,14 @@
               style:color={run.color}>{run.content}</span>{/each}{:else}{line || " "}{/if}</span
       ></div>
   {/each}
+{/snippet}
+
+<!-- Just the code of one line, coloured — used inside the editable pane, where
+     the gutter must stay OUT of the text the browser edits. -->
+{#snippet codeOnly(line: string)}
+  {#if tokens.get(line)}{#each tokens.get(line) ?? [] as run}<span style:color={run.color}
+        >{run.content}</span
+      >{/each}{:else}{line || " "}{/if}
 {/snippet}
 
 <div class="wrap">
@@ -267,7 +280,7 @@
         <div class="head">{data.theirsLabel}</div>
         <div class="head link"></div>
         <div class="head mid">
-          result — merged file, editable<span class="dim"> (base: {data.baseLabel})</span>
+          result — merged file, type anywhere<span class="dim"> (base: {data.baseLabel})</span>
         </div>
         <div class="head link"></div>
         <div class="head">{data.yoursLabel}</div>
@@ -275,6 +288,7 @@
         {#each regions as r, i (i)}
           {@const conflict = r.kind === "conflict"}
           {@const flow = flows(r, i)}
+          {@const mine = linesFor(r, i)}
           <!-- A conflict tints its whole row, all five cells, so the band reads
                as one block instead of a few coloured lines. -->
           <div class="cell" class:conflict>
@@ -305,6 +319,9 @@
                   both
                 </button>
                 <button class:on={origin[i] === "base"} onclick={() => take(i, "base")}>base</button>
+                {#if origin[i] === "manual"}
+                  <button onclick={() => revert(i)} title="Back to the merged text">revert</button>
+                {/if}
                 <button
                   class="peek"
                   class:on={showBase[i]}
@@ -317,58 +334,47 @@
               {#if showBase[i] && r.kind === "conflict"}
                 <div class="baseblock">{@render code(r.base, 0, "keep")}</div>
               {/if}
-              <!-- Always a real editor: take a side to copy it in, then edit
-                   freely, or just type the resolution straight in. -->
-              <textarea
-                class="mono edit"
-                class:empty={edited[i] === undefined}
-                spellcheck="false"
-                placeholder="take a side above, or type the resolution here"
-                rows={rows(edited[i] ?? "")}
-                value={edited[i] ?? ""}
-                oninput={(e) => type(i, e.currentTarget.value)}
-              ></textarea>
-            {:else if focused === i && edited[i] !== undefined}
-              <div class="editbar">
-                <span class="cnum">{origin[i] === "manual" ? "hand-edited" : "editing"}</span>
+            {:else if origin[i] === "manual"}
+              <div class="editbar thin">
+                <span class="cnum">hand-edited</span>
                 <button onclick={() => revert(i)} title="Back to the merged text">revert</button>
-                <button class="primary" onclick={() => (focused = null)}>done</button>
-              </div>
-              <textarea
-                class="mono edit"
-                spellcheck="false"
-                rows={rows(edited[i] ?? "")}
-                value={edited[i] ?? ""}
-                oninput={(e) => type(i, e.currentTarget.value)}
-              ></textarea>
-            {:else}
-              <div
-                class="editable"
-                role="button"
-                tabindex="0"
-                title="Click to edit this part of the result"
-                onclick={() => openEdit(r, i)}
-                onkeydown={(e) => {
-                  if (e.key === "Enter" || e.key === " ") {
-                    e.preventDefault();
-                    openEdit(r, i);
-                  }
-                }}
-              >
-                {#if edited[i] !== undefined}
-                  <div class="editbar thin">
-                    <span class="cnum">hand-edited</span>
-                    <button
-                      onclick={(e) => {
-                        e.stopPropagation();
-                        revert(i);
-                      }}>revert</button
-                    >
-                  </div>
-                {/if}
-                {@render code(linesFor(r, i), starts[i].m, resultKind(r, i))}
               </div>
             {/if}
+
+            <!-- The result pane is always typeable: no edit mode, no reflow. The
+                 gutter sits outside the editable element so line numbers can
+                 never end up in the file; while a region is `live` its lines
+                 come from `frozen`, which no state change can re-render. -->
+            <div class="rows">
+              <div class="rgut" aria-hidden="true">
+                {#each mine as _line, k}
+                  <div class="line"><span class="mk">{MARK[resultKind(r, i)] ?? ""}</span><span
+                      class="ln">{starts[i].m + k}</span
+                    ></div>
+                {/each}
+                {#if !mine.length}<div class="line"><span class="mk">!</span><span class="ln"
+                    ></span></div>{/if}
+              </div>
+              <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+              <div
+                class="redit k-{resultKind(r, i)}"
+                class:empty={!mine.length}
+                role="textbox"
+                tabindex="0"
+                aria-multiline="true"
+                aria-label="merged text"
+                contenteditable="plaintext-only"
+                spellcheck="false"
+                data-ph={conflict ? "take a side above, or type the resolution" : ""}
+                onfocusin={() => onEnter(r, i)}
+                onfocusout={onLeave}
+                oninput={(e) => onType(i, e.currentTarget)}
+              >
+                {#each live === i ? frozen.lines : mine as line}
+                  <div class="cl">{@render codeOnly(line)}</div>
+                {/each}
+              </div>
+            </div>
           </div>
 
           <div class="cell link" class:conflict class:on={flow.right}>
@@ -519,18 +525,24 @@
     color: #e0555a;
     font-weight: 600;
   }
+  .line,
+  .cl {
+    line-height: 1.45;
+  }
   .line {
     display: flex;
     align-items: flex-start;
-    line-height: 1.45;
     border-left: 3px solid transparent;
   }
   /* Wrap long lines inside their own pane instead of bleeding into the next. */
-  .src {
+  .src,
+  .cl {
     white-space: pre-wrap;
     overflow-wrap: anywhere;
-    padding-right: 6px;
     min-width: 0;
+  }
+  .src {
+    padding-right: 6px;
   }
   .mk {
     flex: none;
@@ -577,13 +589,32 @@
   .k-keep .mk {
     color: var(--text-dim, #999);
   }
-  .editable {
-    cursor: text;
-    min-height: 1.45em;
+  /* The editable result: gutter beside the text, never inside it. */
+  .rows {
+    display: flex;
+    align-items: flex-start;
   }
-  .editable:hover {
-    outline: 1px dashed rgba(255, 255, 255, 0.12);
-    outline-offset: -1px;
+  .rgut {
+    flex: none;
+  }
+  .rgut .line {
+    border-left: 0;
+  }
+  .redit {
+    flex: 1;
+    min-width: 0;
+    padding-right: 6px;
+    border-left: 3px solid transparent;
+    outline: none;
+    cursor: text;
+  }
+  .redit:focus {
+    background: rgba(255, 255, 255, 0.04);
+  }
+  .redit.empty::before {
+    content: attr(data-ph);
+    color: #e0555a;
+    font-style: italic;
   }
   .chead,
   .editbar {
@@ -642,25 +673,5 @@
   .primary {
     border-color: var(--accent, #d98d3a);
     color: var(--accent, #d98d3a);
-  }
-  textarea.edit {
-    display: block;
-    width: 100%;
-    box-sizing: border-box;
-    background: rgba(0, 0, 0, 0.25);
-    color: inherit;
-    border: 0;
-    border-left: 3px solid #5faf5f;
-    padding: 0 8px;
-    font-size: 12px;
-    line-height: 1.45;
-    resize: vertical;
-  }
-  textarea.edit.empty {
-    border-left-color: #e0555a;
-  }
-  textarea.edit:focus {
-    outline: 1px solid var(--accent, #d98d3a);
-    outline-offset: -1px;
   }
 </style>
