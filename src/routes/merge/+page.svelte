@@ -618,17 +618,28 @@
     overflow-wrap: anywhere;
     min-height: 1.45em;
   }
-  /* Number + mark drawn beside the row's first visual line, out of the text. */
-  .rw::before {
-    content: attr(data-mk) " " attr(data-n);
+  /* Mark and number are separate pseudo elements, both drawn in the padding
+     beside the row's first visual line: one colour each, exactly like the marks
+     and numbers of the read-only panes. */
+  .rw::before,
+  .rw::after {
     position: absolute;
-    left: -4.4em;
-    width: 4em;
-    text-align: right;
     white-space: pre;
-    opacity: 0.55;
-    color: var(--text-dim, #999);
     user-select: none;
+  }
+  .rw::before {
+    content: attr(data-mk);
+    left: -4.4em;
+    width: 1em;
+    text-align: center;
+  }
+  .rw::after {
+    content: attr(data-n);
+    left: -3.4em;
+    width: 3.2em;
+    text-align: right;
+    color: var(--text-dim, #999);
+    opacity: 0.55;
   }
   .k-add .rw::before {
     color: #7cc47c;
@@ -638,6 +649,9 @@
   }
   .k-vs .rw::before {
     color: #e0555a;
+  }
+  .k-keep .rw::before {
+    color: var(--text-dim, #999);
   }
   .redit.empty::before {
     content: attr(data-ph);
