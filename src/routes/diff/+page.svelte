@@ -37,6 +37,7 @@
     sameCaret,
     selectAll,
     selectedText,
+    setRegionLines,
     undo,
     wordLeft,
     wordRange,
@@ -82,7 +83,14 @@
   let current = $state(0);
   let typing = false;
 
-  const changes = $derived(blocks.map((b, i) => (b.kind === "same" ? -1 : i)).filter((i) => i >= 0));
+  /** Do the two sides of block `i` currently agree? */
+  function agrees(i: number): boolean {
+    const b = blocks[i];
+    const right = ds?.doc.regions[i]?.lines ?? [];
+    return !!b && right.length === b.left.length && right.every((l, k) => l === b.left[k]);
+  }
+  const settled = $derived(blocks.map((_, i) => agrees(i)));
+  const changes = $derived(blocks.map((_, i) => (settled[i] ? -1 : i)).filter((i) => i >= 0));
 
   /** Group the aligned rows into runs — the regions of the document. */
   function toBlocks(rows: DiffRow[]): Block[] {
@@ -105,10 +113,10 @@
   }
 
   /** Colour by add / drop, the same scale as the resolve window. */
-  function leftKind(b: Block): string {
-    return b.kind === "same" ? "" : "del";
+  function leftKind(i: number): string {
+    return settled[i] ? "" : "del";
   }
-  const kinds = $derived(blocks.map((b) => (b.kind === "same" ? "" : "add")));
+  const kinds = $derived(blocks.map((_, i) => (settled[i] ? "" : "add")));
 
   // Alignment: a block takes as many rows as its taller side.
   const rows = $derived(
@@ -303,6 +311,18 @@
     }
   }
 
+  /** Discard the local change in one block: take the other side's lines. */
+  function revertBlock(i: number) {
+    if (!ds || !editable) return;
+    const b = blocks[i];
+    if (!b) return;
+    hist = push(hist, ds, false);
+    typing = false;
+    ds = setRegionLines(ds, i, b.left);
+    anchor = null;
+    dirty = true;
+  }
+
   async function save() {
     if (!ds || !editable || saving) return;
     saving = true;
@@ -424,6 +444,7 @@
     <div class="scroll">
       <div class="grid mono">
         <div class="head">{leftLabel}</div>
+        <div class="head gut"></div>
         <div class="head mid">
           {rightLabel}{#if editable}<span class="dim"> — editable</span>{/if}
         </div>
@@ -436,8 +457,29 @@
               data-change={b.kind === "same" ? undefined : i}
               style="top:{tops[i]}px; height:{rows[i] * LH}px"
             >
-              {@render pane(b.left, starts[i].l, leftKind(b))}
+              {@render pane(b.left, starts[i].l, leftKind(i))}
             </div>
+          {/each}
+        </div>
+
+        <!-- One button per remaining change: revert that block to the other side. -->
+        <div class="col gut" style="height:{total}px">
+          {#each blocks as _b, i (i)}
+            {#if !settled[i]}
+              <div class="revwrap" style="top:{tops[i]}px">
+                {#if editable}
+                  <!-- Points the way the text moves: from the reference side into
+                       the local file. -->
+                  <button
+                    class="rev"
+                    title="Revert this block — take {leftLabel} into the local file"
+                    onclick={() => revertBlock(i)}>▶</button
+                  >
+                {:else}
+                  <span class="dim ro" title="Read-only diff">•</span>
+                {/if}
+              </div>
+            {/if}
           {/each}
         </div>
 
@@ -525,7 +567,7 @@
   }
   .grid {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1fr) 1.6rem minmax(0, 1fr);
     align-items: start;
   }
   .head {
@@ -551,6 +593,38 @@
     border-right: 1px solid var(--border, #333);
     overflow: hidden;
     min-width: 0;
+  }
+  .col.gut {
+    background: var(--bg-alt, #1f1f1f);
+    text-align: center;
+  }
+  .head.gut {
+    padding: 5px 0;
+  }
+  .revwrap {
+    position: absolute;
+    left: 0;
+    right: 0;
+    height: 17.4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .rev {
+    padding: 0 3px;
+    height: 14px;
+    line-height: 12px;
+    font-size: 10px;
+    opacity: 0.65;
+  }
+  .rev:hover {
+    opacity: 1;
+    border-color: var(--accent, #d98d3a);
+    color: var(--accent, #d98d3a);
+  }
+  .ro {
+    font-size: 10px;
+    opacity: 0.5;
   }
   .resultcol {
     background: rgba(255, 255, 255, 0.02);
