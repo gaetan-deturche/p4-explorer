@@ -163,11 +163,22 @@
      *  line number could end up written into the file. A walk cannot see it. */
     const BLOCK = new Set(["DIV", "P", "PRE", "LI"]);
     const inlineText = (el: Node): string => {
+      const kids = Array.from(el.childNodes);
       let s = "";
-      for (const n of Array.from(el.childNodes)) {
-        if (n.nodeType === Node.TEXT_NODE) s += n.nodeValue ?? "";
-        else if (n instanceof HTMLElement) s += n.tagName === "BR" ? "\n" : inlineText(n);
-      }
+      kids.forEach((n, k) => {
+        if (n.nodeType === Node.TEXT_NODE) {
+          s += n.nodeValue ?? "";
+        } else if (n instanceof HTMLElement) {
+          if (n.tagName !== "BR") {
+            s += inlineText(n);
+          } else if (k < kids.length - 1) {
+            s += "\n";
+          }
+          // A <br> closing a block is the browser's filler for an empty line,
+          // inserted when the pane takes focus — counting it as a break would
+          // double every blank line.
+        }
+      });
       return s;
     };
     const collect = (el: HTMLElement, out: string[]) => {
@@ -197,7 +208,12 @@
 
     const onInput = () => {
       renumber();
-      o.onText(read());
+      const text = read();
+      // The browser normalises this subtree on its own (filler breaks, block
+      // splitting). If the text is unchanged that was not an edit, and must not
+      // mark the region hand-edited.
+      if (text === o.lines.join("\n")) return;
+      o.onText(text);
     };
     const onPaste = (e: ClipboardEvent) => {
       const text = e.clipboardData?.getData("text/plain");
