@@ -8,8 +8,8 @@
   export interface Mark {
     /** 0..1 position in the document. */
     pct: number;
-    /** Tick colour: conflict | change | done. */
-    kind: "conflict" | "change" | "done";
+    /** Tick colour, matching the panes: add | del | mod | conflict | done. */
+    kind: "add" | "del" | "mod" | "conflict" | "done";
     title: string;
     /** Passed back on click so the host can scroll to the right thing. */
     index: number;
@@ -93,12 +93,19 @@
     left: 0;
     right: 0;
   }
-  /* Same scale as the panes: red needs a decision, green is settled. */
+  /* The same scale as the panes: green is kept, orange is dropped, red needs a
+     decision. A block changed on both sides shows both halves. */
+  .tick.add {
+    background: #5faf5f;
+  }
+  .tick.del {
+    background: #d9873a;
+  }
+  .tick.mod {
+    background: linear-gradient(to right, #d9873a 0 50%, #5faf5f 50% 100%);
+  }
   .tick.conflict {
     background: #e0555a;
-  }
-  .tick.change {
-    background: #d9873a;
   }
   .tick.done {
     background: #5faf5f;

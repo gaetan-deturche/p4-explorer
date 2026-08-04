@@ -190,12 +190,22 @@
     blocks
       .map((b, i) => ({ b, i }))
       .filter(({ i }) => !settled[i])
-      .map(({ i }) => ({
-        pct: total ? tops[i] / total : 0,
-        kind: "change" as const,
-        title: `change at line ${starts[i].r}`,
-        index: i,
-      })),
+      .map(({ b, i }) => {
+        const right = ds?.doc.regions[i]?.lines ?? [];
+        // Same reading as the panes: the local side gained it, lost it, or both.
+        const kind = !b.left.length
+          ? ("add" as const)
+          : !right.length
+            ? ("del" as const)
+            : ("mod" as const);
+        const what = kind === "add" ? "added" : kind === "del" ? "removed" : "changed";
+        return {
+          pct: total ? tops[i] / total : 0,
+          kind,
+          title: `${what} at line ${starts[i].r}`,
+          index: i,
+        };
+      }),
   );
   function jumpTo(i: number) {
     const at = changes.indexOf(i);
