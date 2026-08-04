@@ -519,18 +519,13 @@
     background: rgba(217, 141, 58, 0.28);
     pointer-events: none;
   }
+  /* Solid, never blinking: a blinking caret is hard to follow while it moves. */
   .caret {
     position: absolute;
     width: 2px;
     height: var(--lh);
     background: var(--accent, #d98d3a);
-    animation: blink 1.1s steps(1) infinite;
     pointer-events: none;
-  }
-  @keyframes blink {
-    50% {
-      opacity: 0;
-    }
   }
   /* Invisible, but present and focusable: composition needs a real control. */
   .sink {
