@@ -211,13 +211,25 @@
     // Real Swarm review status (the #review description marker is unreliable —
     // Swarm links by change and doesn't rewrite the pending CL's description).
     const hasReview = !!pending.reviews[cl.change];
-    const items: { label: string; action: () => void }[] = [];
+    type MenuItem = {
+      label: string;
+      action?: () => void;
+      disabled?: boolean;
+      submenu?: MenuItem[];
+      sep?: boolean;
+    };
+    const items: MenuItem[] = [];
+    /** Start a new group: only ever between two real entries. */
+    const group = () => {
+      if (items.length && !items[items.length - 1].sep) items.push({ label: "", sep: true });
+    };
     if (own) {
       items.push({
         label: isDefault ? "Submit default changelist…" : `Submit @${cl.change}…`,
         action: () => pending.submit(cl.change),
       });
     }
+    group();
     if (own && !isDefault) {
       items.push({
         label: "Rename…",
@@ -234,7 +246,9 @@
     if (own && !isDefault) {
       items.push({ label: "Delete shelf", action: () => pending.deleteShelf(cl.change) });
     }
+    group();
     items.push({ label: "Generate patch…", action: () => generatePatch(cl.change, []) });
+    if (items[items.length - 1]?.sep) items.pop();
     return items;
   }
 
@@ -289,11 +303,17 @@
     targets.push({ label: "New changelist…", action: () => (newClFile = file.depotFile) });
     const patchLabel = files.length > 1 ? `Generate patch (${files.length} files)…` : "Generate patch…";
     const sel = files.length ? files : [file.depotFile];
+    // Grouped by what an entry does — look at it, copy it, produce something from
+    // it, change the file, move it — so a destructive action never sits directly
+    // under one that only reads.
     return [
       { label: "View diff", action: () => pending.openLocalDiff(file.depotFile) },
       { label: openInLabel, action: () => openLocalInEditor(file.depotFile) },
+      { label: "", sep: true },
       copyMenu(file.depotFile, file.clientFile),
+      { label: "", sep: true },
       { label: patchLabel, action: () => generatePatch("", sel) },
+      { label: "", sep: true },
       // p4 tells us if there is nothing to resolve, so this stays unconditional
       // rather than costing an fstat per context-menu open.
       { label: "Resolve…", action: () => merges.resolveFile(file.depotFile) },
@@ -306,6 +326,7 @@
         label: "Make offline (keep local edits)…",
         action: () => pending.revertKeep(file.depotFile),
       },
+      { label: "", sep: true },
       { label: "Move to changelist", submenu: targets },
     ];
   }
@@ -845,8 +866,10 @@
                   ? openLocalInEditor(p)
                   : openSpecInEditor(browse.source === "depot" ? p : browse.toQuery(p)),
             },
+            { label: "", sep: true },
           ]),
       copyMenu(p),
+      { label: "", sep: true },
       { label: `Sync ${what}`, action: () => sync.syncPath(tgts) },
       // The inverse of sync: drop the local copy, keep the depot untouched.
       { label: `Unsync ${what}…`, action: () => sync.unsyncPath(tgts) },

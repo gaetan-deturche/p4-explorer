@@ -4,6 +4,8 @@
     action?: () => void;
     disabled?: boolean;
     submenu?: MenuItem[];
+    /** A divider between groups; needs no label. */
+    sep?: boolean;
   };
 
   let {
@@ -45,8 +47,10 @@
 ></button>
 
 <div class="menu" style="left:{x}px; top:{y}px">
-  {#each items as it, i (it.label)}
-    {#if it.submenu}
+  {#each items as it, i (it.label + i)}
+    {#if it.sep}
+      <div class="sep" role="separator"></div>
+    {:else if it.submenu}
       <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div class="mi" onpointerenter={() => (openSub = i)} onpointerleave={() => (openSub = null)}>
         <button class="item sub" disabled={it.disabled}>
@@ -74,6 +78,11 @@
     border: none;
     background: transparent;
     padding: 0;
+  }
+  .sep {
+    height: 1px;
+    margin: 4px 6px;
+    background: var(--border, #333);
   }
   .menu {
     position: fixed;
