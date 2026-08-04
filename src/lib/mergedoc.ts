@@ -34,6 +34,18 @@ export interface DocState {
   caret: Caret;
 }
 
+/** What the result pane asks the host to do. Keeping intent separate from the
+ *  model means the component never mutates anything itself. */
+export type MergeAction =
+  | { t: "insert"; text: string }
+  | { t: "enter" }
+  | { t: "backspace" }
+  | { t: "delete" }
+  | { t: "move"; dir: "left" | "right" | "up" | "down" | "home" | "end" }
+  | { t: "caret"; caret: Caret }
+  | { t: "undo" }
+  | { t: "redo" };
+
 /** The merged file, as it would be saved. */
 export function docText(doc: MergeDoc): string {
   return doc.regions.flatMap((r) => r.lines).join("\n");
