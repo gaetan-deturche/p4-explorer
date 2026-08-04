@@ -192,31 +192,34 @@ function buildDecorations(state: EditorState, cfg: MergeEditorConfig): Decoratio
   }
 
   for (const { from, to, spec } of specs) {
+    // Where a region's block decorations hang. A region with text brackets its own
+    // lines. An emptied one is a single position, and which side of the neighbouring
+    // line it sits on decides everything: anchoring it at the line's START would
+    // hoist the conflict ABOVE the code before it, when what belongs there is a
+    // void in its own place, leaving the surrounding lines where they are.
+    const line = state.doc.lineAt(from);
+    const empty = to <= from;
+    const atLineStart = line.from === from;
+    const head = empty && !atLineStart ? line.to : line.from;
+    const headSide = empty && !atLineStart ? 1 : -1;
+    const tail = empty ? head : state.doc.lineAt(to).to;
+    const tailSide = empty ? headSide : 1;
+
     if (spec.conflict) {
       ranges.push({
-        from: state.doc.lineAt(from).from,
+        from: head,
         value: Decoration.widget({
           widget: new ToolbarWidget(spec, cfg),
           block: true,
-          side: -1,
+          side: headSide,
         }),
       });
     }
     const spacer = state.field(spacerField).get(spec.region) ?? 0;
     if (spacer > 0) {
-      // Where the blank rows go. For a region with text: after its last line. For
-      // an emptied one, `to` sits inside the line it now SHARES with the next
-      // region, and lineAt(to).to would put the rows after that line — inside the
-      // next region, which is why the conflict's own box never grew. Such a region
-      // takes its rows at its start instead, right below its toolbar.
-      const empty = to <= from;
       ranges.push({
-        from: empty ? state.doc.lineAt(from).from : state.doc.lineAt(to).to,
-        value: Decoration.widget({
-          widget: new SpacerWidget(spacer),
-          block: true,
-          side: empty ? -1 : 1,
-        }),
+        from: tail,
+        value: Decoration.widget({ widget: new SpacerWidget(spacer), block: true, side: tailSide }),
       });
     }
   }
