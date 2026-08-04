@@ -204,12 +204,18 @@ function buildDecorations(state: EditorState, cfg: MergeEditorConfig): Decoratio
     }
     const spacer = state.field(spacerField).get(spec.region) ?? 0;
     if (spacer > 0) {
+      // Where the blank rows go. For a region with text: after its last line. For
+      // an emptied one, `to` sits inside the line it now SHARES with the next
+      // region, and lineAt(to).to would put the rows after that line — inside the
+      // next region, which is why the conflict's own box never grew. Such a region
+      // takes its rows at its start instead, right below its toolbar.
+      const empty = to <= from;
       ranges.push({
-        from: state.doc.lineAt(to).to,
+        from: empty ? state.doc.lineAt(from).from : state.doc.lineAt(to).to,
         value: Decoration.widget({
           widget: new SpacerWidget(spacer),
           block: true,
-          side: 1,
+          side: empty ? -1 : 1,
         }),
       });
     }
