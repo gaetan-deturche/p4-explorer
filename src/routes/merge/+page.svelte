@@ -32,7 +32,6 @@
   let measuredTotal = $state(0);
   /** Lines each region actually owns in the editor. */
   let measuredRows = $state<number[]>([]);
-  let spacersSent = $state<number[]>([]);
 
   const regions = $derived(data?.regions ?? []);
   const conflicts = $derived(
@@ -292,7 +291,6 @@
       rows.set(i, Math.max(0, Math.max(p.theirs, p.ours) - own));
     });
     ed.setSpacers(rows);
-    spacersSent = regions.map((_, i) => rows.get(i) ?? 0);
   });
   // Toolbar labels depend on host state (settled, conflict numbering).
   $effect(() => {
@@ -327,10 +325,6 @@
           : ""}
       </span>
       <span class="grow"></span>
-      <!-- TEMPORARY: the actual inputs to the spacer decision -->
-      <span class="dbg mono">
-        own[{measuredRows.join(",")}] sp[{spacersSent.join(",")}] c{conflicts.join(",")}
-      </span>
       <span class="legend dim">
         <span class="chip add">+ kept</span><span class="chip del">− dropped</span><span
           class="chip vs">! conflict</span
@@ -507,13 +501,6 @@
   }
   .lgd {
     margin-left: 4px;
-  }
-  .dbg {
-    font-size: 10px;
-    color: #d98d3a;
-    max-width: 46rem;
-    overflow: hidden;
-    white-space: nowrap;
   }
   .err {
     padding: 10px;
