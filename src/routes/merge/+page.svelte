@@ -372,10 +372,10 @@
     color: #7cc47c;
   }
   .chip.del {
-    color: #9a9a9a;
+    color: #d9873a;
   }
   .chip.vs {
-    color: #d76a6a;
+    color: #e0555a;
   }
   .lgd {
     margin-left: 4px;
@@ -438,7 +438,7 @@
     line-height: 1.45;
   }
   .arrow.open {
-    color: #d76a6a;
+    color: #e0555a;
     font-weight: 600;
   }
   .line {
@@ -478,19 +478,19 @@
     color: #7cc47c;
   }
   .k-del {
-    background: rgba(150, 150, 150, 0.1);
-    border-left-color: #7a7a7a;
-    opacity: 0.65;
+    background: rgba(217, 135, 58, 0.14);
+    border-left-color: #d9873a;
+    opacity: 0.8;
   }
   .k-del .mk {
-    color: #9a9a9a;
+    color: #d9873a;
   }
   .k-vs {
-    background: rgba(215, 106, 106, 0.18);
-    border-left-color: #d76a6a;
+    background: rgba(224, 85, 90, 0.2);
+    border-left-color: #e0555a;
   }
   .k-vs .mk {
-    color: #d76a6a;
+    color: #e0555a;
   }
   .k-keep {
     background: rgba(180, 180, 180, 0.08);
@@ -500,7 +500,7 @@
     color: var(--text-dim, #999);
   }
   .line.pending {
-    color: #d76a6a;
+    color: #e0555a;
     font-style: italic;
     padding-left: 8px;
   }
@@ -512,11 +512,11 @@
     min-height: 24px;
     padding: 2px 6px;
     box-sizing: border-box;
-    background: rgba(215, 106, 106, 0.18);
-    border-top: 1px solid rgba(215, 106, 106, 0.5);
+    background: rgba(224, 85, 90, 0.2);
+    border-top: 1px solid rgba(224, 85, 90, 0.55);
   }
   .chead.side {
-    background: rgba(215, 106, 106, 0.1);
+    background: rgba(224, 85, 90, 0.11);
     padding: 2px 0;
   }
   .cnum {
