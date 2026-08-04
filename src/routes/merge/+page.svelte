@@ -26,8 +26,10 @@
 
   let host: HTMLDivElement | undefined = $state();
   let editor: MergeEditor | null = null;
-  /** Exact px height for each region, measured in the editor. */
-  let measured = $state<number[]>([]);
+  /** Where each region starts in the editor, and the editor's total height —
+   *  measured, so the panes cannot disagree with it. */
+  let measuredTops = $state<number[]>([]);
+  let measuredTotal = $state(0);
 
   const regions = $derived(data?.regions ?? []);
   const conflicts = $derived(
@@ -94,11 +96,30 @@
       return { rows, res, theirs: t, ours: o };
     }),
   );
-  /** A region's cell height: the editor's measurement once it has reported, the
-   *  row arithmetic before that (first paint). */
-  function cellH(i: number, rows: number, conflict: boolean): string {
-    const m = measured[i];
-    return m && m > 0 ? `${m}px` : `calc(${rows} * var(--lh) + ${conflict ? 24 : 0}px)`;
+  const LH = 17.4; // one row; must match the editor's line height
+  const TOOLBAR = 24;
+  /** Region tops: measured when the editor has reported, else the row arithmetic
+   *  so the first paint is already close. */
+  const tops = $derived.by(() => {
+    if (measuredTops.length === regions.length) return measuredTops;
+    let y = 0;
+    return regions.map((r, i) => {
+      const at = y;
+      y += rowPlan[i].rows * LH + (r.kind === "conflict" ? TOOLBAR : 0);
+      return at;
+    });
+  });
+  const total = $derived(
+    measuredTotal ||
+      regions.reduce(
+        (sum, r, i) => sum + rowPlan[i].rows * LH + (r.kind === "conflict" ? TOOLBAR : 0),
+        0,
+      ),
+  );
+  /** A region's box height: up to where the next one starts. */
+  function span(i: number): number {
+    const next = i + 1 < tops.length ? tops[i + 1] : total;
+    return Math.max(0, next - tops[i]);
   }
 
   /** Side pane line numbers run continuously through their own file. */
@@ -241,10 +262,9 @@
       onReset: reset,
       conflictNumber: (region) => conflicts.indexOf(region) + 1,
       settled: (region) => edited[region] !== undefined,
-      onGeometry: (tops, total) => {
-        // A region's height is the distance to the next one's start; the last
-        // reaches the end of the content.
-        measured = tops.map((top, k) => (k + 1 < tops.length ? tops[k + 1] : total) - top);
+      onGeometry: (t2, total) => {
+        measuredTops = t2;
+        measuredTotal = total;
       },
     });
     if (conflicts.length) setTimeout(() => goTo(0), 0);
@@ -266,9 +286,9 @@
   $effect(() => () => editor?.destroy());
 </script>
 
-<!-- Read-only pane content: mark + line number + coloured code, then filler rows
-     so the region occupies the same height as in the other panes. -->
-{#snippet pane(lines: string[], from: number, kind: string, filler: number)}
+<!-- Read-only pane content: mark + line number + coloured code. The region box
+     is sized to the editor's, so no filler rows are needed. -->
+{#snippet pane(lines: string[], from: number, kind: string)}
   {#each lines as line, k}
     <div class="line k-{kind}"><span class="mk">{MARK[kind] ?? ""}</span><span class="ln"
         >{from + k}</span
@@ -276,9 +296,6 @@
         >{#if tokens.get(line)}{#each tokens.get(line) ?? [] as run}<span
               style:color={run.color}>{run.content}</span>{/each}{:else}{line || " "}{/if}</span
       ></div>
-  {/each}
-  {#each Array.from({ length: filler }) as _, k (k)}
-    <div class="line filler">&nbsp;</div>
   {/each}
 {/snippet}
 
@@ -334,55 +351,74 @@
         <div class="head link"></div>
         <div class="head">{data.yoursLabel}</div>
 
-        <!-- The result is ONE editor spanning every region row; the side panes
-             are per-region cells padded to the same heights. -->
-        <div class="editorcell" bind:this={host} style="grid-row:2 / span {regions.length}"></div>
+        <!-- Each pane is one column as tall as the editor's content, with every
+             region absolutely placed at the y the editor reports for it. Nothing
+             is content-sized, so no height can drift from the editor's. -->
+        <div class="col" style="height:{total}px">
+          {#each regions as r, i (i)}
+            <div
+              class="rgn"
+              class:conflict={r.kind === "conflict"}
+              style="top:{tops[i]}px; height:{span(i)}px"
+            >
+              {#if r.kind === "conflict"}<div class="chead side"></div>{/if}
+              {@render pane(side(r, "theirs"), starts[i].t, sideKind(r, "theirs"))}
+            </div>
+          {/each}
+        </div>
 
-        {#each regions as r, i (i)}
-          {@const conflict = r.kind === "conflict"}
-          {@const flow = flows(r, i)}
-          {@const plan = rowPlan[i]}
-          <div class="cell theirs" class:conflict
-            style="grid-row:{i + 2}; height:{cellH(i, plan.rows, conflict)}"
-          >
-            {#if conflict}<div class="chead side"></div>{/if}
-            {@render pane(
-              side(r, "theirs"),
-              starts[i].t,
-              sideKind(r, "theirs"),
-              plan.rows - plan.theirs,
-            )}
-          </div>
+        <div class="col link" style="height:{total}px">
+          {#each regions as r, i (i)}
+            {@const flow = flows(r, i)}
+            <div
+              class="rgn"
+              class:conflict={r.kind === "conflict"}
+              class:on={flow.left}
+              style="top:{tops[i]}px; height:{span(i)}px"
+            >
+              {#if r.kind === "conflict"}<div class="chead side"></div>{/if}
+              {#if flow.left}
+                <div class="arrow" title="This region's text came from the depot side">▶</div>
+              {:else if flow.open}
+                <div class="arrow open" title="Undecided conflict" data-region={i}>?</div>
+              {/if}
+            </div>
+          {/each}
+        </div>
 
-          <div class="cell link l" class:conflict class:on={flow.left}
-            style="grid-row:{i + 2}; height:{cellH(i, plan.rows, conflict)}"
-          >
-            {#if conflict}<div class="chead side"></div>{/if}
-            {#if flow.left}
-              <div class="arrow" title="This region's text came from the depot side">▶</div>
-            {:else if flow.open}
-              <div class="arrow open" title="Undecided conflict" data-region={i}>?</div>
-            {/if}
-          </div>
+        <div class="editorcell" bind:this={host}></div>
 
-          <div class="cell link r" class:conflict class:on={flow.right}
-            style="grid-row:{i + 2}; height:{cellH(i, plan.rows, conflict)}"
-          >
-            {#if conflict}<div class="chead side"></div>{/if}
-            {#if flow.right}
-              <div class="arrow" title="This region's text came from the workspace side">◀</div>
-            {:else if flow.open}
-              <div class="arrow open" title="Undecided conflict">?</div>
-            {/if}
-          </div>
+        <div class="col link" style="height:{total}px">
+          {#each regions as r, i (i)}
+            {@const flow = flows(r, i)}
+            <div
+              class="rgn"
+              class:conflict={r.kind === "conflict"}
+              class:on={flow.right}
+              style="top:{tops[i]}px; height:{span(i)}px"
+            >
+              {#if r.kind === "conflict"}<div class="chead side"></div>{/if}
+              {#if flow.right}
+                <div class="arrow" title="This region's text came from the workspace side">◀</div>
+              {:else if flow.open}
+                <div class="arrow open" title="Undecided conflict">?</div>
+              {/if}
+            </div>
+          {/each}
+        </div>
 
-          <div class="cell ours" class:conflict
-            style="grid-row:{i + 2}; height:{cellH(i, plan.rows, conflict)}"
-          >
-            {#if conflict}<div class="chead side"></div>{/if}
-            {@render pane(side(r, "ours"), starts[i].o, sideKind(r, "ours"), plan.rows - plan.ours)}
-          </div>
-        {/each}
+        <div class="col" style="height:{total}px">
+          {#each regions as r, i (i)}
+            <div
+              class="rgn"
+              class:conflict={r.kind === "conflict"}
+              style="top:{tops[i]}px; height:{span(i)}px"
+            >
+              {#if r.kind === "conflict"}<div class="chead side"></div>{/if}
+              {@render pane(side(r, "ours"), starts[i].o, sideKind(r, "ours"))}
+            </div>
+          {/each}
+        </div>
       </div>
     </div>
   {/if}
@@ -487,47 +523,37 @@
   .head.link {
     padding: 0;
   }
-  /* Explicit columns: the editor spans every region row in column 3. */
-  .cell.theirs {
-    grid-column: 1;
+  /* One column per pane; regions inside are absolutely placed at the y the
+     editor measured for them, so alignment cannot drift. */
+  .col {
+    position: relative;
+    border-right: 1px solid var(--border, #333);
+    overflow: hidden;
+    min-width: 0;
   }
-  .cell.link.l {
-    grid-column: 2;
-  }
-  .cell.link.r {
-    grid-column: 4;
+  .col.link {
+    background: var(--bg-alt, #1f1f1f);
+    text-align: center;
   }
   .editorcell {
-    grid-column: 3;
     background: rgba(255, 255, 255, 0.02);
     border-right: 1px solid var(--border, #333);
     overflow: hidden;
     min-width: 0;
   }
-  .cell.ours {
-    grid-column: 5;
+  .rgn {
+    position: absolute;
+    left: 0;
+    right: 0;
+    overflow: hidden;
   }
-  .cell {
-    border-right: 1px solid var(--border, #333);
-    border-bottom: 1px solid rgba(255, 255, 255, 0.04);
-    min-width: 0;
-    overflow-x: auto;
-    overflow-y: hidden;
-    scrollbar-width: none; /* a visible bar would add height and skew the rows */
-  }
-  .cell::-webkit-scrollbar {
-    display: none;
-  }
-  .cell.conflict {
+  .rgn.conflict {
     background: rgba(224, 85, 90, 0.12);
-    border-top: 1px solid rgba(224, 85, 90, 0.55);
-    border-bottom: 1px solid rgba(224, 85, 90, 0.55);
+    box-shadow:
+      inset 0 1px 0 rgba(224, 85, 90, 0.55),
+      inset 0 -1px 0 rgba(224, 85, 90, 0.55);
   }
-  .cell.link {
-    background: var(--bg-alt, #1f1f1f);
-    text-align: center;
-  }
-  .cell.link.on {
+  .rgn.on {
     background: rgba(124, 196, 124, 0.12);
   }
   .arrow {
@@ -544,9 +570,6 @@
     line-height: 1.45;
     border-left: 3px solid transparent;
     height: var(--lh);
-  }
-  .line.filler {
-    border-left-color: transparent;
   }
   /* No wrapping: alignment depends on one line being exactly one row. */
   .src {
