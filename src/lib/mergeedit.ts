@@ -162,30 +162,35 @@ class SpacerWidget extends WidgetType {
 }
 
 function buildDecorations(state: EditorState, cfg: MergeEditorConfig): DecorationSet {
-  const deco: ReturnType<typeof Decoration.line>[] = [];
-  const ranges: { from: number; value: ReturnType<typeof Decoration.line> }[] = [];
-  const set = state.field(regionField);
-  const iter = set.iter();
+  const specs: { from: number; to: number; spec: RegionSpec }[] = [];
+  const iter = state.field(regionField).iter();
   while (iter.value) {
-    const spec = iter.value.spec;
-    const from = iter.from;
-    const to = Math.max(iter.from, iter.to);
-    // Band + mark on every line of the region.
-    if (spec.kind) {
-      const first = state.doc.lineAt(from).number;
-      const last = state.doc.lineAt(to).number;
-      for (let n = first; n <= last; n++) {
-        const line = state.doc.line(n);
-        if (to > from && line.from >= to && n > first) break;
-        ranges.push({
-          from: line.from,
-          value: Decoration.line({
-            class: `cm-band cm-band-${spec.kind}`,
-            attributes: { "data-mk": MARK[spec.kind] ?? "" },
-          }),
-        });
-      }
-    }
+    specs.push({ from: iter.from, to: Math.max(iter.from, iter.to), spec: iter.value.spec });
+    iter.next();
+  }
+  const ranges: { from: number; value: ReturnType<typeof Decoration.line> }[] = [];
+
+  // Band every line, assigning it to the last region that starts at or before it.
+  // Editing across a boundary can leave a line outside every mapped range, and a
+  // line with no band reads as though its colour was lost.
+  let at = 0;
+  for (let n = 1; n <= state.doc.lines; n++) {
+    const line = state.doc.line(n);
+    while (at + 1 < specs.length && specs[at + 1].from <= line.from) at++;
+    const owner = specs[at];
+    if (!owner || owner.from > line.from) continue;
+    const kind = owner.spec.kind;
+    if (!kind) continue;
+    ranges.push({
+      from: line.from,
+      value: Decoration.line({
+        class: `cm-band cm-band-${kind}`,
+        attributes: { "data-mk": MARK[kind] ?? "" },
+      }),
+    });
+  }
+
+  for (const { from, to, spec } of specs) {
     if (spec.conflict) {
       ranges.push({
         from: state.doc.lineAt(from).from,
@@ -207,9 +212,8 @@ function buildDecorations(state: EditorState, cfg: MergeEditorConfig): Decoratio
         }),
       });
     }
-    iter.next();
   }
-  void deco;
+
   ranges.sort((a, b) => a.from - b.from);
   return Decoration.set(
     ranges.map((r) => r.value.range(r.from)),

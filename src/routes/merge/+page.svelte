@@ -309,13 +309,6 @@
           : ""}
       </span>
       <span class="grow"></span>
-      <!-- TEMPORARY: geometry readout while the pane alignment is being nailed down -->
-      <span class="dbg mono">
-        m{measuredTops.length}/{regions.length} tot{Math.round(total)} · {tops
-          .slice(0, 8)
-          .map((v, k) => `${k}:${Math.round(v)}${regions[k]?.kind === "conflict" ? "!" : ""}`)
-          .join(" ")}
-      </span>
       <span class="legend dim">
         <span class="chip add">+ kept</span><span class="chip del">− dropped</span><span
           class="chip vs">! conflict</span
@@ -492,13 +485,6 @@
   }
   .lgd {
     margin-left: 4px;
-  }
-  .dbg {
-    font-size: 10px;
-    color: #d98d3a;
-    max-width: 40rem;
-    overflow: hidden;
-    white-space: nowrap;
   }
   .err {
     padding: 10px;
