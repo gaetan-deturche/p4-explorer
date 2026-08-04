@@ -354,7 +354,11 @@ const theme = EditorView.theme(
 
 export interface MergeEditor {
   view: EditorView;
-  /** Rebuild the document from specs (used when a side is taken, or on reset). */
+  /** Replace ONE region's text, editing only its range. Used when a side is taken
+   *  or a conflict is reset: rewriting the whole document instead would collapse
+   *  into a single undo step covering everything. */
+  setRegionText(region: number, text: string): void;
+  /** Rebuild the document from specs. A wholesale replacement — avoid for edits. */
   setRegions(regions: RegionSpec[]): void;
   /** Blank rows to leave after each region, keyed by region index. */
   setSpacers(rows: Map<number, number>): void;
@@ -504,6 +508,20 @@ export function createMergeEditor(parent: HTMLElement, cfg: MergeEditorConfig): 
 
   return {
     view,
+    setRegionText(region: number, text: string) {
+      const iter = view.state.field(regionField).iter();
+      while (iter.value) {
+        if (iter.value.spec.region === region) {
+          const to = Math.max(iter.from, iter.to);
+          // The region's own range absorbs the insertion (startSide/endSide), so
+          // its boundaries follow the new text without a rebuild.
+          view.dispatch({ changes: { from: iter.from, to, insert: text } });
+          requestAnimationFrame(measure);
+          return;
+        }
+        iter.next();
+      }
+    },
     setRegions(regions: RegionSpec[]) {
       current = { ...current, regions };
       const next = assemble(regions);

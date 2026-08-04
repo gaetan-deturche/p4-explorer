@@ -157,7 +157,7 @@
           : r[what].join("\n");
     edited = { ...edited, [i]: text };
     origin = { ...origin, [i]: what };
-    editor?.setRegions(nextSpecs({ ...edited, [i]: text }, { ...origin, [i]: what }));
+    editor?.setRegionText(i, text);
   }
   /** Back to an undecided conflict / the merged text. */
   function reset(i: number) {
@@ -167,24 +167,10 @@
     delete nextO[i];
     edited = nextE;
     origin = nextO;
-    editor?.setRegions(nextSpecs(nextE, nextO));
+    // Back to what the merge produced: empty for a conflict, the auto-merge otherwise.
+    const r = regions[i];
+    editor?.setRegionText(i, r && r.kind !== "conflict" ? r.lines.join("\n") : "");
   }
-  /** Specs for a given state — used when we rewrite the document ourselves. */
-  function nextSpecs(e: Record<string, string>, o: Record<string, string>): RegionSpec[] {
-    return regions.map((r, i) => {
-      const text = e[i] !== undefined ? e[i] : r.kind === "conflict" ? "" : r.lines.join("\n");
-      const kind =
-        r.kind === "same" && e[i] === undefined
-          ? ""
-          : r.kind === "conflict" && e[i] === undefined
-            ? "vs"
-            : o[i] === "base"
-              ? "keep"
-              : "add";
-      return { region: i, kind, conflict: r.kind === "conflict", text };
-    });
-  }
-
   function goTo(n: number) {
     if (!conflicts.length) return;
     current = ((n % conflicts.length) + conflicts.length) % conflicts.length;
