@@ -508,7 +508,7 @@
           {/each}
         </div>
 
-        <div class="mid">
+        <div class="resultcol">
           <MergeResult
             docState={ds}
             {anchor}
@@ -664,7 +664,7 @@
     background: var(--bg-alt, #1f1f1f);
     text-align: center;
   }
-  .mid {
+  .resultcol {
     background: rgba(255, 255, 255, 0.02);
     border-right: 1px solid var(--border, #333);
     overflow: hidden;
