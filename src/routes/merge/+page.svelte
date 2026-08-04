@@ -243,7 +243,7 @@
 {#snippet codeOnly(line: string)}
   {#if tokens.get(line)}{#each tokens.get(line) ?? [] as run}<span style:color={run.color}
         >{run.content}</span
-      >{/each}{:else}{line || " "}{/if}
+      >{/each}{:else}{line}{/if}
 {/snippet}
 
 <div class="wrap">
@@ -616,6 +616,7 @@
     position: relative;
     white-space: pre-wrap;
     overflow-wrap: anywhere;
+    min-height: 1.45em;
   }
   /* Number + mark drawn beside the row's first visual line, out of the text. */
   .rw::before {
