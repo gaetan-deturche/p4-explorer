@@ -10,6 +10,7 @@
   const id = new URLSearchParams(window.location.search).get("id") ?? "";
 
   type Pick = "theirs" | "ours" | "both" | "base" | "custom";
+  type Side = "theirs" | "ours";
 
   let data = $state<MergeData | null>(null);
   let error = $state("");
@@ -43,15 +44,42 @@
   }
 
   /** What a side pane shows: its own text, or the base where it didn't change. */
-  function side(r: MergeRegion, which: "theirs" | "ours"): string[] {
+  function side(r: MergeRegion, which: Side): string[] {
     if (r.kind === "same" || r.kind === "both") return r.lines;
     if (r.kind === "conflict") return r[which];
     return r.kind === which ? r.lines : r.base;
   }
-  /** A side pane is the origin of this region's change. */
-  function isSource(r: MergeRegion, which: "theirs" | "ours"): boolean {
-    return r.kind === which || r.kind === "both";
+
+  // --- provenance: every line says where it came from ------------------------
+  // Marks mirror a diff: "+" this side's own change, "-" the text this side is
+  // still on that the other side replaced, "!" a line in conflict.
+  function sideMark(r: MergeRegion, which: Side): string {
+    if (r.kind === "same") return "";
+    if (r.kind === "conflict") return "!";
+    if (r.kind === "both") return "+";
+    return r.kind === which ? "+" : "-";
   }
+  function sideTone(r: MergeRegion, which: Side): string {
+    if (r.kind === "same") return "";
+    if (r.kind === "conflict") return "conflict";
+    if (r.kind === "both") return "both";
+    return r.kind === which ? which : "gone";
+  }
+  /** The result line's tone IS its origin: depot, workspace, both, base, manual. */
+  function resultTone(r: MergeRegion, i: number): string {
+    if (r.kind === "same") return "";
+    if (r.kind !== "conflict") return r.kind;
+    const p = picks[i];
+    if (!p) return "";
+    return p === "custom" ? "manual" : p;
+  }
+  const TONE_NAME: Record<string, string> = {
+    theirs: "from depot",
+    ours: "from workspace",
+    both: "same on both sides",
+    base: "base kept",
+    manual: "hand-edited",
+  };
 
   // First line number of each region, per pane: the panes are whole files, so
   // each one's numbering runs continuously across regions.
@@ -142,11 +170,13 @@
   });
 </script>
 
-<!-- `from` = this pane's first line number; 0 for text that isn't part of any
-     file (the base peek), which keeps an empty gutter so code stays aligned. -->
-{#snippet code(lines: string[], from: number)}
+<!-- `from` = this pane's first line number; 0 for text that is in no file (the
+     base peek), which keeps an empty gutter so code stays aligned. -->
+{#snippet code(lines: string[], from: number, mark: string, tone: string)}
   {#each lines as line, k}
-    <div class="line"><span class="ln">{from ? from + k : ""}</span><span class="src"
+    <div class="line t-{tone}"><span class="mk">{mark}</span><span class="ln"
+        >{from ? from + k : ""}</span
+      ><span class="src"
         >{#if tokens.get(line)}{#each tokens.get(line) ?? [] as run}<span
               style:color={run.color}>{run.content}</span>{/each}{:else}{line || " "}{/if}</span
       ></div>
@@ -163,6 +193,11 @@
           : ""} · {resultLines.length} lines
       </span>
       <span class="grow"></span>
+      <span class="legend">
+        <span class="chip theirs">depot</span><span class="chip ours">workspace</span><span
+          class="chip conflict">conflict</span
+        >
+      </span>
       {#if conflicts.length > 1}
         <button onclick={() => goTo(current - 1)} title="Previous conflict">▲</button>
         <span class="dim">{current + 1}/{conflicts.length}</span>
@@ -193,64 +228,75 @@
          push a column out of line with its title. -->
     <div class="scroll">
       <div class="grid mono">
-        <div class="head">{data.theirsLabel}</div>
+        <div class="head theirs">{data.theirsLabel}</div>
         <div class="head mid">
           result — merged file<span class="dim"> (base: {data.baseLabel})</span>
         </div>
-        <div class="head">{data.yoursLabel}</div>
+        <div class="head ours">{data.yoursLabel}</div>
 
         {#each regions as r, i (i)}
-          {#if r.kind === "conflict"}
-            <!-- Spanning bar: keeps the three panes' code lines level with each
-                 other instead of offset by the height of these buttons. -->
-            <div class="cbar" data-region={i}>
-              <span class="cnum">conflict {conflicts.indexOf(i) + 1}</span>
-              <button class:on={picks[i] === "theirs"} onclick={() => set(i, "theirs")}>
-                ◀ take depot
-              </button>
-              <button class:on={picks[i] === "ours"} onclick={() => set(i, "ours")}>
-                take workspace ▶
-              </button>
-              <button class:on={picks[i] === "both"} onclick={() => set(i, "both")}>both</button>
-              <button class:on={picks[i] === "base"} onclick={() => set(i, "base")}>base</button>
-              <button class:on={picks[i] === "custom"} onclick={() => set(i, "custom")}>
-                edit…
-              </button>
-              <button
-                class="peek"
-                class:on={showBase[i]}
-                title="Show the common ancestor for this conflict"
-                onclick={() => (showBase = { ...showBase, [i]: !showBase[i] })}
-              >
-                {showBase[i] ? "hide base" : "show base"}
-              </button>
-            </div>
-          {/if}
-
-          <div class="cell {r.kind}" class:src={isSource(r, "theirs")}>
-            {@render code(side(r, "theirs"), starts[i].t)}
+          {@const conflict = r.kind === "conflict"}
+          <div class="cell">
+            <!-- Empty strip opposite the middle pane's buttons: the three panes'
+                 code then starts at the same height. -->
+            {#if conflict}<div class="chead side"></div>{/if}
+            {@render code(side(r, "theirs"), starts[i].t, sideMark(r, "theirs"), sideTone(r, "theirs"))}
           </div>
 
-          <div class="cell mid {r.kind}">
-            {#if r.kind === "conflict" && showBase[i]}
-              <div class="baseblock">{@render code(r.base, 0)}</div>
+          <div class="cell mid">
+            {#if conflict}
+              <div class="chead" data-region={i}>
+                <span class="cnum">conflict {conflicts.indexOf(i) + 1}</span>
+                <button class:on={picks[i] === "theirs"} onclick={() => set(i, "theirs")}>
+                  ◀ depot
+                </button>
+                <button class:on={picks[i] === "ours"} onclick={() => set(i, "ours")}>
+                  workspace ▶
+                </button>
+                <button class:on={picks[i] === "both"} onclick={() => set(i, "both")}>both</button>
+                <button class:on={picks[i] === "base"} onclick={() => set(i, "base")}>base</button>
+                <button class:on={picks[i] === "custom"} onclick={() => set(i, "custom")}>
+                  edit…
+                </button>
+                <button
+                  class="peek"
+                  class:on={showBase[i]}
+                  title="Show the common ancestor for this conflict"
+                  onclick={() => (showBase = { ...showBase, [i]: !showBase[i] })}
+                >
+                  {showBase[i] ? "hide base" : "base"}
+                </button>
+              </div>
             {/if}
-            {#if r.kind === "conflict" && editing === i}
+            {#if conflict && showBase[i] && r.kind === "conflict"}
+              <div class="baseblock">{@render code(r.base, 0, "=", "base")}</div>
+            {/if}
+            {#if conflict && editing === i}
               <textarea
                 class="mono"
                 rows={Math.min(24, (custom[i] ?? "").split("\n").length + 1)}
                 value={custom[i] ?? ""}
                 oninput={(e) => (custom = { ...custom, [i]: e.currentTarget.value })}
               ></textarea>
-            {:else if r.kind === "conflict" && !picks[i]}
+            {:else if conflict && !picks[i]}
               <div class="line pending">— take a side, or edit —</div>
             {:else}
-              {@render code(linesFor(r, i), starts[i].m)}
+              {#if r.kind !== "same"}
+                {@const tone = resultTone(r, i)}
+                {#if tone}<div class="origin t-{tone}">{TONE_NAME[tone] ?? tone}</div>{/if}
+              {/if}
+              {@render code(
+                linesFor(r, i),
+                starts[i].m,
+                r.kind === "same" ? "" : "+",
+                resultTone(r, i),
+              )}
             {/if}
           </div>
 
-          <div class="cell {r.kind}" class:src={isSource(r, "ours")}>
-            {@render code(side(r, "ours"), starts[i].o)}
+          <div class="cell">
+            {#if conflict}<div class="chead side"></div>{/if}
+            {@render code(side(r, "ours"), starts[i].o, sideMark(r, "ours"), sideTone(r, "ours"))}
           </div>
         {/each}
       </div>
@@ -294,6 +340,27 @@
   .name {
     font-weight: 600;
   }
+  .legend {
+    display: flex;
+    gap: 4px;
+  }
+  .chip {
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 999px;
+    border: 1px solid currentColor;
+  }
+  .chip.theirs,
+  .head.theirs {
+    color: #7aa7d9;
+  }
+  .chip.ours,
+  .head.ours {
+    color: #7cc47c;
+  }
+  .chip.conflict {
+    color: #d76a6a;
+  }
   .err {
     padding: 10px;
     color: var(--warn, #d9a33a);
@@ -316,7 +383,6 @@
     padding: 5px 8px;
     font-size: 11px;
     font-weight: 600;
-    color: var(--text-dim, #999);
     background: var(--bg-alt, #1f1f1f);
     border-bottom: 1px solid var(--border, #333);
     border-right: 1px solid var(--border, #333);
@@ -332,29 +398,14 @@
     border-bottom: 1px solid rgba(255, 255, 255, 0.04);
     min-width: 0;
   }
-  /* The middle pane is the result: keep it the visual subject. */
   .cell.mid {
     background: rgba(255, 255, 255, 0.02);
-  }
-  .cell.theirs.src {
-    background: rgba(106, 154, 215, 0.1);
-  }
-  .cell.ours.src {
-    background: rgba(108, 195, 108, 0.1);
-  }
-  .cell.both.src {
-    background: rgba(180, 180, 180, 0.07);
-  }
-  .cell.conflict {
-    background: rgba(215, 106, 106, 0.1);
-  }
-  .cell.mid.conflict {
-    background: rgba(215, 106, 106, 0.06);
   }
   .line {
     display: flex;
     align-items: flex-start;
     line-height: 1.45;
+    border-left: 3px solid transparent;
   }
   /* Wrap long lines inside their own pane instead of bleeding into the next. */
   .src {
@@ -362,6 +413,13 @@
     overflow-wrap: anywhere;
     padding-right: 6px;
     min-width: 0;
+  }
+  .mk {
+    flex: none;
+    width: 1em;
+    text-align: center;
+    opacity: 0.8;
+    user-select: none;
   }
   .ln {
     flex: none;
@@ -372,29 +430,86 @@
     opacity: 0.55;
     user-select: none;
   }
+  /* Provenance, matched to the side panes by colour: blue = depot, green =
+     workspace, red = conflict, dim/red = the text a side is losing. */
+  .t-theirs {
+    background: rgba(106, 154, 215, 0.14);
+    border-left-color: #5b8ec4;
+  }
+  .t-ours {
+    background: rgba(108, 195, 108, 0.14);
+    border-left-color: #5faf5f;
+  }
+  .t-both {
+    background: rgba(180, 180, 180, 0.1);
+    border-left-color: #8a8a8a;
+  }
+  .t-conflict {
+    background: rgba(215, 106, 106, 0.16);
+    border-left-color: #d76a6a;
+  }
+  .t-gone {
+    background: rgba(215, 106, 106, 0.06);
+    border-left-color: rgba(215, 106, 106, 0.4);
+    opacity: 0.5;
+  }
+  .t-base {
+    background: rgba(180, 180, 180, 0.08);
+    border-left-color: #6d6d6d;
+  }
+  .t-manual {
+    background: rgba(217, 141, 58, 0.14);
+    border-left-color: var(--accent, #d98d3a);
+  }
+  .mk {
+    color: inherit;
+  }
+  .t-theirs .mk {
+    color: #7aa7d9;
+  }
+  .t-ours .mk {
+    color: #7cc47c;
+  }
+  .t-conflict .mk,
+  .t-gone .mk {
+    color: #d76a6a;
+  }
+  /* One label per changed region in the result pane, naming the origin. */
+  .origin {
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    padding: 0 8px 0 6px;
+    opacity: 0.75;
+    border-left: 3px solid transparent;
+  }
   .line.pending {
     color: var(--danger, #d76a6a);
     font-style: italic;
     padding-left: 8px;
   }
-  .cbar {
-    grid-column: 1 / -1;
+  .chead {
     display: flex;
     align-items: center;
     gap: 6px;
-    flex-wrap: wrap;
-    padding: 3px 8px;
+    flex-wrap: nowrap;
+    min-height: 24px;
+    padding: 2px 6px;
+    box-sizing: border-box;
     background: rgba(215, 106, 106, 0.18);
     border-top: 1px solid rgba(215, 106, 106, 0.5);
+  }
+  .chead.side {
+    background: rgba(215, 106, 106, 0.1);
   }
   .cnum {
     font-size: 10px;
     font-weight: 600;
     color: var(--text-dim, #999);
+    white-space: nowrap;
   }
   .baseblock {
-    border-left: 2px solid var(--border, #333);
-    opacity: 0.7;
+    opacity: 0.85;
   }
   button {
     background: var(--bg-alt, #1f1f1f);
@@ -404,6 +519,7 @@
     padding: 2px 8px;
     font-size: 11px;
     cursor: pointer;
+    white-space: nowrap;
   }
   button:disabled {
     opacity: 0.5;
