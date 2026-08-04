@@ -30,6 +30,8 @@
    *  measured, so the panes cannot disagree with it. */
   let measuredTops = $state<number[]>([]);
   let measuredTotal = $state(0);
+  /** Lines each region actually owns in the editor. */
+  let measuredRows = $state<number[]>([]);
 
   const regions = $derived(data?.regions ?? []);
   const conflicts = $derived(
@@ -262,9 +264,10 @@
       onReset: reset,
       conflictNumber: (region) => conflicts.indexOf(region) + 1,
       settled: (region) => edited[region] !== undefined,
-      onGeometry: (t2, total) => {
+      onGeometry: (t2, total, rows) => {
         measuredTops = t2;
         measuredTotal = total;
+        measuredRows = rows;
       },
     });
     if (conflicts.length) setTimeout(() => goTo(0), 0);
@@ -274,7 +277,12 @@
   $effect(() => {
     if (!editor) return;
     const rows = new Map<number, number>();
-    rowPlan.forEach((p, i) => rows.set(i, p.rows - p.res));
+    rowPlan.forEach((p, i) => {
+      // Measured line counts when we have them: a region whose text was deleted
+      // owns no line, and its side panes still need room for their own.
+      const own = measuredRows.length === regions.length ? measuredRows[i] : p.res;
+      rows.set(i, Math.max(0, Math.max(p.theirs, p.ours) - own));
+    });
     editor.setSpacers(rows);
   });
   // Toolbar labels depend on host state (settled, conflict numbering).

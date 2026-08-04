@@ -44,9 +44,10 @@ export interface MergeEditorConfig {
   conflictNumber: (region: number) => number;
   settled: (region: number) => boolean;
   /** Where each region actually starts in the editor, in px from the content top,
-   *  plus the total content height. The side panes size themselves from this, so
-   *  no assumption about line heights or widget sizes can drift. */
-  onGeometry?: (tops: number[], total: number) => void;
+   *  the total content height, and how many lines each region owns. The side panes
+   *  size themselves from this, so no assumption about line heights or widget
+   *  sizes can drift, and the spacer maths uses real line counts. */
+  onGeometry?: (tops: number[], total: number, rows: number[]) => void;
 }
 
 const MARK: Record<string, string> = { add: "+", del: "-", vs: "!", keep: "=" };
@@ -373,16 +374,26 @@ export function createMergeEditor(parent: HTMLElement, cfg: MergeEditorConfig): 
     const bars = Array.from(view.contentDOM.querySelectorAll(".cm-chead"));
     let bar = 0;
     const tops: number[] = [];
+    const rows: number[] = [];
+    let prevTo = -1;
     const iter = view.state.field(regionField).iter();
     while (iter.value) {
       const spec = iter.value.spec;
+      const to = Math.max(iter.from, iter.to);
       const el = spec.conflict ? bars[bar++] : undefined;
       tops[spec.region] = el
         ? el.getBoundingClientRect().top - contentTop
         : view.lineBlockAt(iter.from).top;
+      // A region emptied by editing shares its line with a neighbour, so it owns
+      // no row of its own — the side panes need a spacer to show their text.
+      const shared = iter.from === to && iter.from === prevTo;
+      rows[spec.region] = shared
+        ? 0
+        : view.state.doc.lineAt(to).number - view.state.doc.lineAt(iter.from).number + 1;
+      prevTo = to;
       iter.next();
     }
-    current.onGeometry(tops, view.contentHeight);
+    current.onGeometry(tops, view.contentHeight, rows);
   };
 
   const listener = EditorView.updateListener.of((u) => {
