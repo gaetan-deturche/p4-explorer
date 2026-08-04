@@ -350,6 +350,13 @@
         return { pct, kind, title: `${what} — from ${from}`, index: i };
       }),
   );
+  /** Alt+Up / Alt+Down step through the changes from anywhere in the window. */
+  function onWindowKey(e: KeyboardEvent) {
+    if (!e.altKey || e.ctrlKey || e.metaKey) return;
+    if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
+    e.preventDefault();
+    goTo(current + (e.key === "ArrowDown" ? 1 : -1));
+  }
   /** Scroll a region into view; conflicts also move the prev/next counter. */
   function jumpTo(i: number) {
     const at = conflicts.indexOf(i);
@@ -473,6 +480,8 @@
   {/if}
 {/snippet}
 
+<svelte:window onkeydown={onWindowKey} />
+
 <div class="wrap">
   <div class="bar">
     {#if data}
@@ -490,9 +499,9 @@
       </span>
       <!-- Navigation is conflict-only: the auto-merged changes need no visit. -->
       {#if conflicts.length}
-        <button onclick={() => goTo(current - 1)} title="Previous conflict">▲</button>
+        <button onclick={() => goTo(current - 1)} title="Previous conflict (alt+up)">▲</button>
         <span class="dim">{current + 1}/{conflicts.length}</span>
-        <button onclick={() => goTo(current + 1)} title="Next conflict">▼</button>
+        <button onclick={() => goTo(current + 1)} title="Next conflict (alt+down)">▼</button>
       {/if}
       <button onclick={cancel} disabled={saving}>Cancel</button>
       <button

@@ -257,6 +257,10 @@
 
   function onKey(e: KeyboardEvent) {
     if (composing) return;
+    // Alt combinations belong to the window (change navigation); let them bubble.
+    // Typed characters arrive through `input`, not keydown, so nothing is lost —
+    // including AltGr, which reports as ctrl+alt.
+    if (e.altKey && !e.ctrlKey) return;
     const ctrl = e.ctrlKey || e.metaKey;
     if (ctrl && e.key.toLowerCase() === "z") {
       e.preventDefault();

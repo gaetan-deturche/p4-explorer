@@ -207,6 +207,13 @@
         };
       }),
   );
+  /** Alt+Up / Alt+Down step through the changes from anywhere in the window. */
+  function onWindowKey(e: KeyboardEvent) {
+    if (!e.altKey || e.ctrlKey || e.metaKey) return;
+    if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
+    e.preventDefault();
+    goTo(current + (e.key === "ArrowDown" ? 1 : -1));
+  }
   function jumpTo(i: number) {
     const at = changes.indexOf(i);
     if (at >= 0) goTo(at);
@@ -444,6 +451,8 @@
 
 {#snippet noToolbar(_region: number)}{/snippet}
 
+<svelte:window onkeydown={onWindowKey} />
+
 <div class="wrap">
   <div class="bar">
     <span class="name mono">{title}</span>
@@ -459,9 +468,9 @@
       <span class="chip add">+ local</span><span class="chip del">− other side</span>
     </span>
     {#if changes.length > 1}
-      <button onclick={() => goTo(current - 1)} title="Previous change">▲</button>
+      <button onclick={() => goTo(current - 1)} title="Previous change (alt+up)">▲</button>
       <span class="dim">{current + 1}/{changes.length}</span>
-      <button onclick={() => goTo(current + 1)} title="Next change">▼</button>
+      <button onclick={() => goTo(current + 1)} title="Next change (alt+down)">▼</button>
     {/if}
     <button onclick={close}>{dirty ? "Close without saving" : "Close"}</button>
     {#if editable}
