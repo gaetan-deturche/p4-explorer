@@ -280,7 +280,9 @@
     rowPlan.forEach((p, i) => {
       // Measured line counts when we have them: a region whose text was deleted
       // owns no line, and its side panes still need room for their own.
-      const own = measuredRows.length === regions.length ? measuredRows[i] : p.res;
+      // A sparse entry (a region the editor did not report) must not poison the
+      // arithmetic with NaN — fall back to the text's own line count.
+      const own = measuredRows[i] ?? p.res;
       rows.set(i, Math.max(0, Math.max(p.theirs, p.ours) - own));
     });
     editor.setSpacers(rows);

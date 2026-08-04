@@ -375,7 +375,6 @@ export function createMergeEditor(parent: HTMLElement, cfg: MergeEditorConfig): 
     let bar = 0;
     const tops: number[] = [];
     const rows: number[] = [];
-    let prevTo = -1;
     const iter = view.state.field(regionField).iter();
     while (iter.value) {
       const spec = iter.value.spec;
@@ -384,13 +383,17 @@ export function createMergeEditor(parent: HTMLElement, cfg: MergeEditorConfig): 
       tops[spec.region] = el
         ? el.getBoundingClientRect().top - contentTop
         : view.lineBlockAt(iter.from).top;
-      // A region emptied by editing shares its line with a neighbour, so it owns
-      // no row of its own — the side panes need a spacer to show their text.
-      const shared = iter.from === to && iter.from === prevTo;
-      rows[spec.region] = shared
-        ? 0
-        : view.state.doc.lineAt(to).number - view.state.doc.lineAt(iter.from).number + 1;
-      prevTo = to;
+      // Rows the region owns. An empty range owns a row only when it sits on a
+      // blank line of its own (the placeholder of an untouched conflict); once its
+      // text is deleted it shares a line with a neighbour and owns nothing, and
+      // the side panes need a spacer to show their proposals.
+      const line = view.state.doc.lineAt(iter.from);
+      rows[spec.region] =
+        iter.from === to
+          ? line.from === iter.from && line.length === 0
+            ? 1
+            : 0
+          : view.state.doc.lineAt(to).number - line.number + 1;
       iter.next();
     }
     current.onGeometry(tops, view.contentHeight, rows);
