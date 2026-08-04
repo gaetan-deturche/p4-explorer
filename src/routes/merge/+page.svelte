@@ -616,6 +616,7 @@
   }
   .src {
     white-space: pre;
+    tab-size: 4; /* must match TAB_WIDTH */
     min-width: 0;
     padding-right: 6px;
   }

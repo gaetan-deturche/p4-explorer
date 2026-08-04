@@ -65,6 +65,32 @@ function at(doc: MergeDoc, region: number): DocRegion | undefined {
   return doc.regions.find((r) => r.region === region);
 }
 
+/** Rendered width of a tab, in columns. Must match the panes' CSS tab-size. */
+export const TAB_WIDTH = 4;
+
+/** Visual column of a character index: a tab advances to the next tab stop, so
+ *  `col` (characters) and the caret's x (columns) are not the same number on any
+ *  indented line. */
+export function visualColumn(line: string, col: number, tab = TAB_WIDTH): number {
+  let x = 0;
+  for (let i = 0; i < Math.min(col, line.length); i++) {
+    x = line[i] === "\t" ? x + (tab - (x % tab)) : x + 1;
+  }
+  return x + Math.max(0, col - line.length); // past the end: plain columns
+}
+
+/** The character index nearest a visual column — the inverse, for mouse clicks. */
+export function columnFromVisual(line: string, vx: number, tab = TAB_WIDTH): number {
+  let x = 0;
+  for (let i = 0; i < line.length; i++) {
+    const next = line[i] === "\t" ? x + (tab - (x % tab)) : x + 1;
+    if (vx <= x + (next - x) / 2) return i;
+    if (vx < next) return i + 1;
+    x = next;
+  }
+  return line.length;
+}
+
 /** Clamp a caret onto real text. A region with no lines takes (0, 0). */
 export function clampCaret(doc: MergeDoc, caret: Caret): Caret {
   const r = at(doc, caret.region) ?? doc.regions[0];

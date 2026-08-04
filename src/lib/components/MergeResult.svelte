@@ -7,7 +7,7 @@
   //! the caret, and we take the finished text from it. Nothing the browser does to
   //! that textarea can touch the document.
   import { tick, type Snippet } from "svelte";
-  import type { Caret, DocState, MergeAction } from "$lib/mergedoc";
+  import { columnFromVisual, visualColumn, type Caret, type DocState, type MergeAction } from "$lib/mergedoc";
   import type { TokenRun } from "$lib/syntax";
 
   // NOT named `state`: that shadows the $state rune, and `$state` would then read
@@ -67,7 +67,8 @@
     const r = docState.doc.regions[i];
     const top =
       tops[i] + (r.conflict ? toolbarHeight : 0) + Math.min(docState.caret.line, r.lines.length) * lineHeight;
-    return { top, col: docState.caret.col };
+    const line = r.lines[docState.caret.line] ?? "";
+    return { top, col: visualColumn(line, docState.caret.col) };
   });
 
   /** Keep the caret visible without yanking the view around. */
@@ -106,7 +107,8 @@
     const gut = pane.querySelector(".code") as HTMLElement | null;
     const charW = charWidth();
     const left = gut ? gut.getBoundingClientRect().left : box.left;
-    const col = Math.max(0, Math.round((e.clientX - left) / charW));
+    const vx = Math.max(0, Math.round((e.clientX - left) / charW));
+    const col = columnFromVisual(r.lines[line] ?? "", vx);
     void row;
     act({ t: "caret", caret: { region: r.region, line, col } });
     focus();
@@ -307,6 +309,7 @@
   }
   .code {
     white-space: pre;
+    tab-size: 4; /* must match TAB_WIDTH */
     min-width: 0;
     padding-right: 6px;
   }
