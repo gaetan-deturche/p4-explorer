@@ -118,10 +118,29 @@
     origin = { ...origin, [i]: what };
   }
 
+  /** The text of an editable region, gutters excluded: each row is one line,
+   *  and gutter spans are dropped from a clone so a line number can never
+   *  reach the file even if the browser duplicated one splitting a row. */
+  function readLines(el: HTMLElement): string[] {
+    const rows = Array.from(el.children).filter((c): c is HTMLElement => c instanceof HTMLElement);
+    if (!rows.length) return el.innerText.replace(/\r/g, "").split("\n");
+    return rows.map((row) => {
+      const clone = row.cloneNode(true) as HTMLElement;
+      clone.querySelectorAll(".gut").forEach((g) => g.remove());
+      return (clone.textContent ?? "").replace(/\r/g, "");
+    });
+  }
   /** Typing in a region: the DOM is the source of truth until focus leaves. */
   function onType(i: number, el: HTMLElement) {
-    edited = { ...edited, [i]: el.innerText.replace(/\r/g, "").replace(/\n$/, "") };
+    edited = { ...edited, [i]: readLines(el).join("\n") };
     origin = { ...origin, [i]: "manual" };
+  }
+  /** Paste plain text only — a rich paste would inject markup into the code. */
+  function pasteAsText(e: ClipboardEvent) {
+    const text = e.clipboardData?.getData("text/plain");
+    if (text === undefined) return;
+    e.preventDefault();
+    document.execCommand("insertText", false, text.replace(/\r/g, ""));
   }
   function onEnter(r: MergeRegion, i: number) {
     frozen.lines = linesFor(r, i);
@@ -345,35 +364,29 @@
                  gutter sits outside the editable element so line numbers can
                  never end up in the file; while a region is `live` its lines
                  come from `frozen`, which no state change can re-render. -->
-            <div class="rows">
-              <div class="rgut" aria-hidden="true">
-                {#each mine as _line, k}
-                  <div class="line"><span class="mk">{MARK[resultKind(r, i)] ?? ""}</span><span
-                      class="ln">{starts[i].m + k}</span
-                    ></div>
-                {/each}
-                {#if !mine.length}<div class="line"><span class="mk">!</span><span class="ln"
-                    ></span></div>{/if}
-              </div>
-              <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-              <div
-                class="redit k-{resultKind(r, i)}"
-                class:empty={!mine.length}
-                role="textbox"
-                tabindex="0"
-                aria-multiline="true"
-                aria-label="merged text"
-                contenteditable="plaintext-only"
-                spellcheck="false"
-                data-ph={conflict ? "take a side above, or type the resolution" : ""}
-                onfocusin={() => onEnter(r, i)}
-                onfocusout={onLeave}
-                oninput={(e) => onType(i, e.currentTarget)}
-              >
-                {#each live === i ? frozen.lines : mine as line}
-                  <div class="cl">{@render codeOnly(line)}</div>
-                {/each}
-              </div>
+            <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+            <div
+              class="redit k-{resultKind(r, i)}"
+              class:empty={!mine.length}
+              role="textbox"
+              tabindex="0"
+              aria-multiline="true"
+              aria-label="merged text"
+              contenteditable="true"
+              spellcheck="false"
+              data-ph={conflict ? "take a side above, or type the resolution" : ""}
+              onfocusin={() => onEnter(r, i)}
+              onfocusout={onLeave}
+              oninput={(e) => onType(i, e.currentTarget)}
+              onpaste={pasteAsText}
+            >
+              {#each live === i ? frozen.lines : mine as line, k}
+                <div class="rw"><span class="gut" contenteditable="false"
+                    ><span class="mk">{MARK[resultKind(r, i)] ?? ""}</span><span class="ln"
+                      >{starts[i].m + k}</span
+                    ></span
+                  ><span class="code">{@render codeOnly(line)}</span></div>
+              {/each}
             </div>
           </div>
 
@@ -526,7 +539,7 @@
     font-weight: 600;
   }
   .line,
-  .cl {
+  .rw {
     line-height: 1.45;
   }
   .line {
@@ -535,8 +548,7 @@
     border-left: 3px solid transparent;
   }
   /* Wrap long lines inside their own pane instead of bleeding into the next. */
-  .src,
-  .cl {
+  .src {
     white-space: pre-wrap;
     overflow-wrap: anywhere;
     min-width: 0;
@@ -589,27 +601,33 @@
   .k-keep .mk {
     color: var(--text-dim, #999);
   }
-  /* The editable result: gutter beside the text, never inside it. */
-  .rows {
-    display: flex;
-    align-items: flex-start;
-  }
-  .rgut {
-    flex: none;
-  }
-  .rgut .line {
-    border-left: 0;
-  }
+  /* The editable result. The gutter sits inside each row, so a number stays
+     beside its own wrapped line, but is contenteditable="false": out of the text
+     and atomic to the caret. */
   .redit {
-    flex: 1;
-    min-width: 0;
-    padding-right: 6px;
     border-left: 3px solid transparent;
     outline: none;
     cursor: text;
   }
+  /* An inset ring, not a background: the add/drop tint must survive focus. */
   .redit:focus {
-    background: rgba(255, 255, 255, 0.04);
+    box-shadow: inset 0 0 0 1px rgba(217, 141, 58, 0.55);
+  }
+  .rw {
+    display: flex;
+    align-items: flex-start;
+  }
+  .gut {
+    flex: none;
+    display: flex;
+    user-select: none;
+  }
+  .code {
+    flex: 1;
+    min-width: 0;
+    padding-right: 6px;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
   }
   .redit.empty::before {
     content: attr(data-ph);
