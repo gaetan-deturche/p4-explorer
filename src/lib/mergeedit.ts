@@ -429,7 +429,7 @@ export function regionLines(
   return owner;
 }
 
-export { regionField };
+export { regionField, trackRegions, setRegions };
 
 export function createMergeEditor(parent: HTMLElement, cfg: MergeEditorConfig): MergeEditor {
   let current = cfg;
