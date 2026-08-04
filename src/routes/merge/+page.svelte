@@ -25,13 +25,14 @@
   let tokens = $state<Map<string, TokenRun[]>>(new Map());
 
   let host: HTMLDivElement | undefined = $state();
-  let editor: MergeEditor | null = null;
+  let editor = $state<MergeEditor | null>(null);
   /** Where each region starts in the editor, and the editor's total height —
    *  measured, so the panes cannot disagree with it. */
   let measuredTops = $state<number[]>([]);
   let measuredTotal = $state(0);
   /** Lines each region actually owns in the editor. */
   let measuredRows = $state<number[]>([]);
+  let spacersSent = $state<number[]>([]);
 
   const regions = $derived(data?.regions ?? []);
   const conflicts = $derived(
@@ -275,22 +276,29 @@
 
   // Keep the editor's blank-row padding in step with the side panes.
   $effect(() => {
-    if (!editor) return;
+    // Read every dependency BEFORE any early return, or this effect registers
+    // none of them and never runs again.
+    const plan = rowPlan;
+    const own0 = measuredRows;
+    const ed = editor;
+    if (!ed) return;
     const rows = new Map<number, number>();
-    rowPlan.forEach((p, i) => {
+    plan.forEach((p, i) => {
       // Measured line counts when we have them: a region whose text was deleted
       // owns no line, and its side panes still need room for their own.
       // A sparse entry (a region the editor did not report) must not poison the
       // arithmetic with NaN — fall back to the text's own line count.
-      const own = measuredRows[i] ?? p.res;
+      const own = own0[i] ?? p.res;
       rows.set(i, Math.max(0, Math.max(p.theirs, p.ours) - own));
     });
-    editor.setSpacers(rows);
+    ed.setSpacers(rows);
+    spacersSent = regions.map((_, i) => rows.get(i) ?? 0);
   });
   // Toolbar labels depend on host state (settled, conflict numbering).
   $effect(() => {
     void unsettled.length;
-    editor?.touch();
+    const ed = editor;
+    ed?.touch();
   });
 
   $effect(() => () => editor?.destroy());
@@ -319,6 +327,10 @@
           : ""}
       </span>
       <span class="grow"></span>
+      <!-- TEMPORARY: the actual inputs to the spacer decision -->
+      <span class="dbg mono">
+        own[{measuredRows.join(",")}] sp[{spacersSent.join(",")}] c{conflicts.join(",")}
+      </span>
       <span class="legend dim">
         <span class="chip add">+ kept</span><span class="chip del">− dropped</span><span
           class="chip vs">! conflict</span
@@ -495,6 +507,13 @@
   }
   .lgd {
     margin-left: 4px;
+  }
+  .dbg {
+    font-size: 10px;
+    color: #d98d3a;
+    max-width: 46rem;
+    overflow: hidden;
+    white-space: nowrap;
   }
   .err {
     padding: 10px;
