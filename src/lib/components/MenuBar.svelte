@@ -11,6 +11,7 @@
     onExit,
     onRefresh,
     onSync,
+    onApplyPatch,
     onNewWorkspace,
     onToggleView,
     onAbout,
@@ -25,6 +26,7 @@
     onExit: () => void;
     onRefresh: () => void;
     onSync: () => void;
+    onApplyPatch: () => void;
     onNewWorkspace: () => void;
     onToggleView: (key: keyof Views) => void;
     onAbout: () => void;
@@ -59,6 +61,8 @@
         { label: "", sep: true },
         { label: "Refresh", action: onRefresh, disabled: busy },
         { label: "Sync workspace…", action: onSync, disabled: busy },
+        { label: "", sep: true },
+        { label: "Apply patch…", action: onApplyPatch, disabled: busy },
       ],
     },
     {

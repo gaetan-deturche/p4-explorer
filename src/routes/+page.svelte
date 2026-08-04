@@ -5,6 +5,7 @@
   import { localPathFor } from "$lib/cache";
   import { updates } from "$lib/updates.svelte";
   import { sync, type SyncTarget } from "$lib/sync.svelte";
+  import { patches } from "$lib/patch.svelte";
   import { pending } from "$lib/pending.svelte";
   import { history } from "$lib/history.svelte";
   import { browse } from "$lib/browse.svelte";
@@ -33,6 +34,7 @@
   import SyncProgressDialog from "$lib/components/SyncProgressDialog.svelte";
   import SyncErrorDialog from "$lib/components/SyncErrorDialog.svelte";
   import UpdateDialog from "$lib/components/UpdateDialog.svelte";
+  import ApplyPatchDialog from "$lib/components/ApplyPatchDialog.svelte";
   import DepotTree from "$lib/components/DepotTree.svelte";
   import HistoryTable from "$lib/components/HistoryTable.svelte";
   import PendingList from "$lib/components/PendingList.svelte";
@@ -438,6 +440,15 @@
       askConfirm,
       refresh: () => browse.refresh(),
     });
+    patches.init({
+      conn: () => conn,
+      connected: () => connection.connected,
+      setNotice,
+      setError,
+      refresh: () => browse.refresh(),
+      loadPending: () => pending.load(),
+      scanOffline: () => pending.scanOffline(),
+    });
     sync.init({
       conn: () => conn,
       connected: () => connection.connected,
@@ -491,6 +502,7 @@
     onExit={exitApp}
     onRefresh={() => browse.refresh()}
     onSync={() => sync.globalSync()}
+    onApplyPatch={() => patches.pickAndPreview()}
     onNewWorkspace={() => (newWorkspaceOpen = true)}
     onToggleView={toggleView}
     onAbout={showAbout}
@@ -981,6 +993,17 @@
     message={updates.state.message}
     onInstall={() => updates.install()}
     onDismiss={() => updates.dismiss()}
+  />
+{/if}
+
+{#if patches.open}
+  <ApplyPatchDialog
+    path={patches.path}
+    phase={patches.phase}
+    files={patches.files}
+    busy={patches.busy}
+    onApply={(mode, partial) => patches.apply(mode, partial)}
+    onClose={() => patches.close()}
   />
 {/if}
 

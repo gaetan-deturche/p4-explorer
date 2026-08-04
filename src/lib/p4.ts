@@ -45,6 +45,26 @@ export interface LocalDir {
   files: string[];
 }
 
+/** Where one hunk of a patch landed, or why it didn't. */
+export interface PatchHunkReport {
+  index: number;
+  status: "clean" | "fuzz" | "already" | "conflict";
+  line: number;
+  offset: number; // lines away from the position recorded in the patch
+}
+
+/** Per-file outcome of previewing or applying a patch. */
+export interface PatchFileReport {
+  depot: string;
+  local: string;
+  status: "clean" | "fuzz" | "already" | "partial" | "conflict" | "missing" | "notext";
+  hunks: PatchHunkReport[];
+  applied: number;
+  conflicts: number;
+  message: string;
+  rejPath: string;
+}
+
 /** A changelist's Swarm review status (id 0 = requested, not yet created). */
 export interface ReviewInfo {
   id: number;
@@ -184,6 +204,20 @@ export const p4 = {
     g<string>("p4_diff_local_forced", { conn, depotFile }),
   exportPatch: (conn: P4Conn, change: string, files: string[], defaultName: string) =>
     g<string | null>("export_patch", { conn, change, files, defaultName }),
+  /** Native picker for a .patch/.diff to apply; null if cancelled. */
+  pickPatchFile: () => g<string | null>("pick_patch_file"),
+  /** Dry-run a patch against this workspace — reports only, writes nothing. */
+  previewPatch: (conn: P4Conn, patchPath: string) =>
+    g<PatchFileReport[]>("preview_patch", { conn, patchPath }),
+  /** Apply a patch. mode "edit" opens each target in `change` first; "offline"
+   *  writes to disk only. `partial` takes the hunks that fit, rejecting the rest. */
+  applyPatch: (
+    conn: P4Conn,
+    patchPath: string,
+    mode: "edit" | "offline",
+    change: string,
+    partial: boolean,
+  ) => g<PatchFileReport[]>("apply_patch", { conn, patchPath, mode, change, partial }),
   openDiffLocal: (conn: P4Conn, depotFile: string) => g<void>("open_diff_local", { conn, depotFile }),
   /** p4 print a revision spec to a temp file; returns the temp path. */
   printToTemp: (conn: P4Conn, spec: string) => g<string>("print_to_temp", { conn, spec }),
