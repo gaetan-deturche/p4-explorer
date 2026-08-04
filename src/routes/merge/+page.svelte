@@ -3,7 +3,28 @@
   import { invoke } from "@tauri-apps/api/core";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { langForFile, tokenizeLines, type TokenRun } from "$lib/syntax";
-  import { createMergeEditor, type MergeEditor, type RegionSpec } from "$lib/mergeedit";
+  import MergeResult from "$lib/components/MergeResult.svelte";
+  import {
+    clampCaret,
+    deleteBackward,
+    deleteForward,
+    docText,
+    emptyHistory,
+    insertLineBreak,
+    insertText,
+    moveLeft,
+    moveLineEnd,
+    moveLineStart,
+    moveRight,
+    moveVertical,
+    push,
+    redo,
+    setRegionLines,
+    undo,
+    type DocState,
+    type History,
+    type MergeAction,
+  } from "$lib/mergedoc";
   import type { MergeData, MergeRegion } from "$lib/p4";
 
   // Opened by the Rust `open_merge_window` command; the job itself is fetched by
@@ -12,39 +33,26 @@
 
   type Side = "theirs" | "ours";
 
+  const LH = 17.4; // one row: 12px * 1.45, the unit every pane measures in
+  const TOOLBAR = 24;
+
   let data = $state<MergeData | null>(null);
   let error = $state("");
   let saving = $state(false);
-  /** Region → its text in the result. Set means settled; the toolbar buttons only
-   *  seed it, and the editor reports every further keystroke back into it. */
-  let edited = $state<Record<number, string>>({});
-  /** Region → where its text came from, for the origin arrows. */
+  /** The result document: regions that own their lines. */
+  let ds = $state<DocState | null>(null);
+  let hist = $state<History>(emptyHistory());
+  /** Region → where its text came from; also marks a conflict as settled. */
   let origin = $state<Record<number, string>>({});
   let current = $state(0); // which conflict the prev/next buttons are on
-  /** line text → colored runs; the side panes are rendered, not editors. */
   let tokens = $state<Map<string, TokenRun[]>>(new Map());
-
-  let host: HTMLDivElement | undefined = $state();
-  let editor = $state<MergeEditor | null>(null);
-  /** Where each region starts in the editor, and the editor's total height —
-   *  measured, so the panes cannot disagree with it. */
-  let measuredTops = $state<number[]>([]);
-  let measuredTotal = $state(0);
-  /** Lines each region actually owns in the editor. */
-  let measuredRows = $state<number[]>([]);
+  let typing = false; // coalesce consecutive typing into one undo step
 
   const regions = $derived(data?.regions ?? []);
   const conflicts = $derived(
     regions.map((r, i) => (r.kind === "conflict" ? i : -1)).filter((i) => i >= 0),
   );
-  const unsettled = $derived(conflicts.filter((i) => edited[i] === undefined));
-
-  /** The result text for a region: what was edited, else the auto-merge. An
-   *  unsettled conflict contributes nothing but still occupies one line. */
-  function resultText(r: MergeRegion, i: number): string {
-    if (edited[i] !== undefined) return edited[i];
-    return r.kind === "conflict" ? "" : r.lines.join("\n");
-  }
+  const unsettled = $derived(conflicts.filter((i) => origin[i] === undefined));
 
   /** What a side pane shows: its own text, or the base where it didn't change. */
   function side(r: MergeRegion, which: Side): string[] {
@@ -54,30 +62,26 @@
   }
 
   // --- add / drop, the same meaning in every pane ---------------------------
-  // "add" = text the merge keeps, "del" = base text it drops, "!" = contested.
-  // Which SIDE a change came from is shown by the arrows, not by the colour.
   function sideKind(r: MergeRegion, which: Side): string {
     if (r.kind === "same") return "";
     if (r.kind === "conflict") return "vs";
     if (r.kind === "both") return "add";
     return r.kind === which ? "add" : "del";
   }
-  function resultKind(r: MergeRegion, i: number): string {
-    if (r.kind === "same" && edited[i] === undefined) return "";
-    if (r.kind === "conflict" && edited[i] === undefined) return "vs";
-    return origin[i] === "base" ? "keep" : "add";
-  }
+  const kinds = $derived(
+    regions.map((r, i) => {
+      if (r.kind === "conflict") return origin[i] === undefined ? "vs" : origin[i] === "base" ? "keep" : "add";
+      if (r.kind === "same" && origin[i] === undefined) return "";
+      return origin[i] === "base" ? "keep" : "add";
+    }),
+  );
   const MARK: Record<string, string> = { add: "+", del: "-", vs: "!", keep: "=" };
 
-  /** Which side(s) feed the result here — drawn as arrows in the link columns. */
+  /** Which side(s) feed a region — the arrows in the link columns. */
   function flows(r: MergeRegion, i: number): { left: boolean; right: boolean; open: boolean } {
     const o = origin[i];
     if (o) {
-      return {
-        left: o === "theirs" || o === "both",
-        right: o === "ours" || o === "both",
-        open: false,
-      };
+      return { left: o === "theirs" || o === "both", right: o === "ours" || o === "both", open: false };
     }
     if (r.kind === "conflict") return { left: false, right: false, open: true };
     if (r.kind === "same") return { left: false, right: false, open: false };
@@ -86,91 +90,139 @@
   }
 
   // --- alignment ------------------------------------------------------------
-  // No soft wrap anywhere, so every line is exactly one row: a region can be made
-  // to occupy the same number of rows in all three panes by padding the shorter
-  // ones. Purely arithmetic — no measuring, nothing to drift.
-  const rowPlan = $derived.by(() =>
-    regions.map((r, i) => {
-      const res = Math.max(1, resultText(r, i).split("\n").length);
-      const t = side(r, "theirs").length;
-      const o = side(r, "ours").length;
-      const rows = Math.max(res, t, o);
-      return { rows, res, theirs: t, ours: o };
-    }),
+  // One row per line in every pane, so a region simply occupies as many rows as
+  // its tallest side. Pure arithmetic, shared by all three panes: nothing to
+  // measure, so nothing can drift.
+  const rows = $derived(
+    regions.map((r, i) =>
+      Math.max(ds?.doc.regions[i]?.lines.length ?? 0, side(r, "theirs").length, side(r, "ours").length),
+    ),
   );
-  const LH = 17.4; // one row; must match the editor's line height
-  const TOOLBAR = 24;
-  /** Region tops: measured when the editor has reported, else the row arithmetic
-   *  so the first paint is already close. */
   const tops = $derived.by(() => {
-    if (measuredTops.length === regions.length) return measuredTops;
     let y = 0;
     return regions.map((r, i) => {
       const at = y;
-      y += rowPlan[i].rows * LH + (r.kind === "conflict" ? TOOLBAR : 0);
+      y += rows[i] * LH + (r.kind === "conflict" ? TOOLBAR : 0);
       return at;
     });
   });
   const total = $derived(
-    measuredTotal ||
-      regions.reduce(
-        (sum, r, i) => sum + rowPlan[i].rows * LH + (r.kind === "conflict" ? TOOLBAR : 0),
-        0,
-      ),
+    regions.reduce((sum, r, i) => sum + rows[i] * LH + (r.kind === "conflict" ? TOOLBAR : 0), 0),
   );
-  /** A region's box height: up to where the next one starts. */
-  function span(i: number): number {
-    const next = i + 1 < tops.length ? tops[i + 1] : total;
-    return Math.max(0, next - tops[i]);
-  }
-
-  /** Side pane line numbers run continuously through their own file. */
+  /** First line number of each region, per pane (each pane is its own file). */
   const starts = $derived.by(() => {
     let t = 1,
-      o = 1;
-    return regions.map((r) => {
-      const at = { t, o };
+      o = 1,
+      m = 1;
+    return regions.map((r, i) => {
+      const at = { t, o, m };
       t += side(r, "theirs").length;
       o += side(r, "ours").length;
+      m += ds?.doc.regions[i]?.lines.length ?? 0;
       return at;
     });
   });
 
-  const specs = $derived<RegionSpec[]>(
-    regions.map((r, i) => ({
-      region: i,
-      kind: resultKind(r, i),
-      conflict: r.kind === "conflict",
-      text: resultText(r, i),
-    })),
-  );
+  // --- editing --------------------------------------------------------------
+  /** Apply an intent from the result pane to the model, recording undo. */
+  function apply(a: MergeAction) {
+    if (!ds) return;
+    const before = ds;
+    switch (a.t) {
+      case "insert":
+        hist = push(hist, before, typing);
+        typing = true;
+        ds = insertText(before, a.text);
+        touched(before.caret.region);
+        break;
+      case "enter":
+        hist = push(hist, before, false);
+        typing = false;
+        ds = insertLineBreak(before);
+        touched(before.caret.region);
+        break;
+      case "backspace":
+        hist = push(hist, before, false);
+        typing = false;
+        ds = deleteBackward(before);
+        touched(before.caret.region);
+        break;
+      case "delete":
+        hist = push(hist, before, false);
+        typing = false;
+        ds = deleteForward(before);
+        touched(before.caret.region);
+        break;
+      case "move": {
+        typing = false;
+        const c = before.caret;
+        const next =
+          a.dir === "left"
+            ? moveLeft(before.doc, c)
+            : a.dir === "right"
+              ? moveRight(before.doc, c)
+              : a.dir === "up"
+                ? moveVertical(before.doc, c, -1)
+                : a.dir === "down"
+                  ? moveVertical(before.doc, c, 1)
+                  : a.dir === "home"
+                    ? moveLineStart(before.doc, c)
+                    : moveLineEnd(before.doc, c);
+        ds = { doc: before.doc, caret: next };
+        break;
+      }
+      case "caret":
+        typing = false;
+        ds = { doc: before.doc, caret: clampCaret(before.doc, a.caret) };
+        break;
+      case "undo": {
+        typing = false;
+        const u = undo(hist, before);
+        if (u) {
+          ds = u.state;
+          hist = u.history;
+        }
+        break;
+      }
+      case "redo": {
+        typing = false;
+        const r = redo(hist, before);
+        if (r) {
+          ds = r.state;
+          hist = r.history;
+        }
+        break;
+      }
+    }
+  }
+  /** Any edit inside a region settles it and marks it hand-edited. */
+  function touched(region: number) {
+    if (origin[region] !== "manual") origin = { ...origin, [region]: "manual" };
+  }
 
-  /** Copy a side's text into the result; it stays editable afterwards. */
+  /** Copy a side's text into a conflict; it stays editable afterwards. */
   function take(i: number, what: "theirs" | "ours" | "both" | "base") {
+    if (!ds) return;
     const r = regions[i];
     if (!r || r.kind !== "conflict") return;
-    const text =
-      what === "both"
-        ? [...r.theirs, ...r.ours].join("\n")
-        : what === "base"
-          ? r.base.join("\n")
-          : r[what].join("\n");
-    edited = { ...edited, [i]: text };
+    const lines =
+      what === "both" ? [...r.theirs, ...r.ours] : what === "base" ? r.base : r[what];
+    hist = push(hist, ds, false);
+    typing = false;
+    ds = setRegionLines(ds, i, lines);
     origin = { ...origin, [i]: what };
-    editor?.setRegionText(i, text);
   }
-  /** Back to an undecided conflict / the merged text. */
+  /** Back to an undecided conflict. */
   function reset(i: number) {
-    const nextE = { ...edited };
-    const nextO = { ...origin };
-    delete nextE[i];
-    delete nextO[i];
-    edited = nextE;
-    origin = nextO;
-    // Back to what the merge produced: empty for a conflict, the auto-merge otherwise.
-    const r = regions[i];
-    editor?.setRegionText(i, r && r.kind !== "conflict" ? r.lines.join("\n") : "");
+    if (!ds) return;
+    hist = push(hist, ds, false);
+    typing = false;
+    ds = setRegionLines(ds, i, []);
+    const next = { ...origin };
+    delete next[i];
+    origin = next;
   }
+
   function goTo(n: number) {
     if (!conflicts.length) return;
     current = ((n % conflicts.length) + conflicts.length) % conflicts.length;
@@ -180,10 +232,10 @@
   }
 
   async function save() {
-    if (!data || unsettled.length || !editor) return;
+    if (!data || !ds || unsettled.length) return;
     saving = true;
     try {
-      const text = editor.view.state.doc.toString();
+      const text = docText(ds.doc);
       await invoke<string>("merge_save", { id, text: text.endsWith("\n") ? text : text + "\n" });
       await getCurrentWindow().close();
     } catch (e) {
@@ -201,17 +253,18 @@
     await getCurrentWindow().close();
   }
 
-  /** Colour the side panes. The editor highlights itself, with the same palette. */
+  /** Colour every distinct line once; all three panes share the map. */
   async function recolor(d: MergeData) {
     const lang = langForFile(d.name);
     if (!lang) return;
     const dark = window.matchMedia("(prefers-color-scheme: dark)").matches;
-    const batches: string[][] = [[], [], []];
+    const batches: string[][] = [[], [], [], []];
     for (const r of d.regions) {
       batches[0].push(...(r.kind === "conflict" ? r.theirs : r.lines));
       batches[1].push(...(r.kind === "conflict" ? r.ours : r.lines));
       if (r.kind !== "same") batches[2].push(...r.base);
     }
+    batches[3] = ds ? ds.doc.regions.flatMap((r) => r.lines) : [];
     const map = new Map(tokens);
     for (const lines of batches) {
       if (!lines.some((l) => !map.has(l))) continue;
@@ -231,65 +284,27 @@
   onMount(async () => {
     try {
       data = await invoke<MergeData>("merge_data", { id });
+      // The result starts as the auto-merge; conflicts start empty and unsettled.
+      ds = {
+        doc: {
+          regions: data.regions.map((r, i) => ({
+            region: i,
+            kind: r.kind === "conflict" ? "vs" : r.kind === "same" ? "" : "add",
+            conflict: r.kind === "conflict",
+            lines: r.kind === "conflict" ? [] : r.lines.slice(),
+          })),
+        },
+        caret: { region: 0, line: 0, col: 0 },
+      };
       void recolor(data);
+      if (data.conflicts > 0) setTimeout(() => goTo(0), 0);
     } catch (e) {
       error = String(e);
     }
   });
-
-  // Mount the editor once the host element and the data are both there.
-  $effect(() => {
-    if (!host || !data || editor) return;
-    editor = createMergeEditor(host, {
-      regions: specs,
-      onEdit: (region, text) => {
-        edited = { ...edited, [region]: text };
-        if (origin[region] !== "manual") origin = { ...origin, [region]: "manual" };
-      },
-      onTake: take,
-      onReset: reset,
-      conflictNumber: (region) => conflicts.indexOf(region) + 1,
-      settled: (region) => edited[region] !== undefined,
-      onGeometry: (t2, total, rows) => {
-        measuredTops = t2;
-        measuredTotal = total;
-        measuredRows = rows;
-      },
-    });
-    if (conflicts.length) setTimeout(() => goTo(0), 0);
-  });
-
-  // Keep the editor's blank-row padding in step with the side panes.
-  $effect(() => {
-    // Read every dependency BEFORE any early return, or this effect registers
-    // none of them and never runs again.
-    const plan = rowPlan;
-    const own0 = measuredRows;
-    const ed = editor;
-    if (!ed) return;
-    const rows = new Map<number, number>();
-    plan.forEach((p, i) => {
-      // Measured line counts when we have them: a region whose text was deleted
-      // owns no line, and its side panes still need room for their own.
-      // A sparse entry (a region the editor did not report) must not poison the
-      // arithmetic with NaN — fall back to the text's own line count.
-      const own = own0[i] ?? p.res;
-      rows.set(i, Math.max(0, Math.max(p.theirs, p.ours) - own));
-    });
-    ed.setSpacers(rows);
-  });
-  // Toolbar labels depend on host state (settled, conflict numbering).
-  $effect(() => {
-    void unsettled.length;
-    const ed = editor;
-    ed?.touch();
-  });
-
-  $effect(() => () => editor?.destroy());
 </script>
 
-<!-- Read-only pane content: mark + line number + coloured code. The region box
-     is sized to the editor's, so no filler rows are needed. -->
+<!-- Read-only pane content: mark, line number, coloured code. -->
 {#snippet pane(lines: string[], from: number, kind: string)}
   {#each lines as line, k}
     <div class="line k-{kind}"><span class="mk">{MARK[kind] ?? ""}</span><span class="ln"
@@ -299,6 +314,22 @@
               style:color={run.color}>{run.content}</span>{/each}{:else}{line || " "}{/if}</span
       ></div>
   {/each}
+{/snippet}
+
+<!-- The buttons over a conflict, rendered inside the result pane's own strip. -->
+{#snippet toolbar(region: number)}
+  <span class="cnum">conflict {conflicts.indexOf(region) + 1}</span>
+  <button class:on={origin[region] === "theirs"} onclick={() => take(region, "theirs")}>
+    ◀ depot
+  </button>
+  <button class:on={origin[region] === "ours"} onclick={() => take(region, "ours")}>
+    workspace ▶
+  </button>
+  <button class:on={origin[region] === "both"} onclick={() => take(region, "both")}>both</button>
+  <button class:on={origin[region] === "base"} onclick={() => take(region, "base")}>base</button>
+  {#if origin[region] !== undefined}
+    <button onclick={() => reset(region)} title="Back to an undecided conflict">reset</button>
+  {/if}
 {/snippet}
 
 <div class="wrap">
@@ -340,7 +371,7 @@
 
   {#if error}
     <div class="err mono">{error}</div>
-  {:else if !data}
+  {:else if !data || !ds}
     <div class="dim pad">Loading…</div>
   {:else}
     <div class="scroll">
@@ -353,17 +384,15 @@
         <div class="head link"></div>
         <div class="head">{data.yoursLabel}</div>
 
-        <!-- Each pane is one column as tall as the editor's content, with every
-             region absolutely placed at the y the editor reports for it. Nothing
-             is content-sized, so no height can drift from the editor's. -->
+        <!-- Every pane places its regions at the same y, from the same row counts. -->
         <div class="col" style="height:{total}px">
           {#each regions as r, i (i)}
             <div
               class="rgn"
               class:conflict={r.kind === "conflict"}
-              style="top:{tops[i]}px; height:{span(i)}px"
+              style="top:{tops[i]}px; height:{rows[i] * LH + (r.kind === 'conflict' ? TOOLBAR : 0)}px"
             >
-              {#if r.kind === "conflict"}<div class="chead side"></div>{/if}
+              {#if r.kind === "conflict"}<div class="strip"></div>{/if}
               {@render pane(side(r, "theirs"), starts[i].t, sideKind(r, "theirs"))}
             </div>
           {/each}
@@ -376,9 +405,9 @@
               class="rgn"
               class:conflict={r.kind === "conflict"}
               class:on={flow.left}
-              style="top:{tops[i]}px; height:{span(i)}px"
+              style="top:{tops[i]}px; height:{rows[i] * LH + (r.kind === 'conflict' ? TOOLBAR : 0)}px"
             >
-              {#if r.kind === "conflict"}<div class="chead side"></div>{/if}
+              {#if r.kind === "conflict"}<div class="strip"></div>{/if}
               {#if flow.left}
                 <div class="arrow" title="This region's text came from the depot side">▶</div>
               {:else if flow.open}
@@ -388,7 +417,19 @@
           {/each}
         </div>
 
-        <div class="editorcell" bind:this={host}></div>
+        <div class="mid">
+          <MergeResult
+            docState={ds}
+            {rows}
+            starts={starts.map((s) => s.m)}
+            {kinds}
+            {tokens}
+            lineHeight={LH}
+            toolbarHeight={TOOLBAR}
+            {toolbar}
+            onAction={apply}
+          />
+        </div>
 
         <div class="col link" style="height:{total}px">
           {#each regions as r, i (i)}
@@ -397,9 +438,9 @@
               class="rgn"
               class:conflict={r.kind === "conflict"}
               class:on={flow.right}
-              style="top:{tops[i]}px; height:{span(i)}px"
+              style="top:{tops[i]}px; height:{rows[i] * LH + (r.kind === 'conflict' ? TOOLBAR : 0)}px"
             >
-              {#if r.kind === "conflict"}<div class="chead side"></div>{/if}
+              {#if r.kind === "conflict"}<div class="strip"></div>{/if}
               {#if flow.right}
                 <div class="arrow" title="This region's text came from the workspace side">◀</div>
               {:else if flow.open}
@@ -414,9 +455,9 @@
             <div
               class="rgn"
               class:conflict={r.kind === "conflict"}
-              style="top:{tops[i]}px; height:{span(i)}px"
+              style="top:{tops[i]}px; height:{rows[i] * LH + (r.kind === 'conflict' ? TOOLBAR : 0)}px"
             >
-              {#if r.kind === "conflict"}<div class="chead side"></div>{/if}
+              {#if r.kind === "conflict"}<div class="strip"></div>{/if}
               {@render pane(side(r, "ours"), starts[i].o, sideKind(r, "ours"))}
             </div>
           {/each}
@@ -437,9 +478,6 @@
     flex-direction: column;
     height: 100vh;
     font-size: 12px;
-    /* One row height everywhere — 12px * 1.45. The alignment maths and the
-       editor's spacer widgets both measure in this unit, so it must be absolute. */
-    --lh: 17.4px;
   }
   .mono {
     font-family: var(--mono, ui-monospace, Consolas, monospace);
@@ -500,9 +538,8 @@
   }
   .grid {
     display: grid;
-    /* pane | link | result | link | pane */
     grid-template-columns: minmax(0, 1fr) 1.4rem minmax(0, 1fr) 1.4rem minmax(0, 1fr);
-    align-items: stretch;
+    align-items: start;
   }
   .head {
     position: sticky;
@@ -525,8 +562,6 @@
   .head.link {
     padding: 0;
   }
-  /* One column per pane; regions inside are absolutely placed at the y the
-     editor measured for them, so alignment cannot drift. */
   .col {
     position: relative;
     border-right: 1px solid var(--border, #333);
@@ -537,7 +572,7 @@
     background: var(--bg-alt, #1f1f1f);
     text-align: center;
   }
-  .editorcell {
+  .mid {
     background: rgba(255, 255, 255, 0.02);
     border-right: 1px solid var(--border, #333);
     overflow: hidden;
@@ -558,6 +593,11 @@
   .rgn.on {
     background: rgba(124, 196, 124, 0.12);
   }
+  /* Reserves the height of the result pane's conflict toolbar. */
+  .strip {
+    height: 24px;
+    background: rgba(224, 85, 90, 0.1);
+  }
   .arrow {
     color: #7cc47c;
     line-height: 1.45;
@@ -570,10 +610,10 @@
     display: flex;
     align-items: flex-start;
     line-height: 1.45;
+    height: 17.4px;
     border-left: 3px solid transparent;
-    height: var(--lh);
+    box-sizing: border-box;
   }
-  /* No wrapping: alignment depends on one line being exactly one row. */
   .src {
     white-space: pre;
     min-width: 0;
@@ -594,7 +634,6 @@
     opacity: 0.55;
     user-select: none;
   }
-  /* Colour says add / drop, exactly as in a diff — never which side. */
   .k-add {
     background: rgba(108, 195, 108, 0.15);
     border-left-color: #5faf5f;
@@ -605,7 +644,6 @@
   .k-del {
     background: rgba(217, 135, 58, 0.14);
     border-left-color: #d9873a;
-    opacity: 0.8;
   }
   .k-del .mk {
     color: #d9873a;
@@ -624,27 +662,36 @@
   .k-keep .mk {
     color: var(--text-dim, #999);
   }
-  .chead {
-    display: flex;
-    align-items: center;
-    height: 24px;
-    padding: 2px 6px;
-    box-sizing: border-box;
-    background: rgba(224, 85, 90, 0.1);
+  .cnum {
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--text-dim, #999);
+    white-space: nowrap;
   }
   button {
     background: var(--bg-alt, #1f1f1f);
     color: inherit;
     border: 1px solid var(--border, #333);
     border-radius: 4px;
-    padding: 2px 8px;
+    padding: 0 7px;
+    height: 18px;
+    line-height: 16px;
     font-size: 11px;
     cursor: pointer;
     white-space: nowrap;
   }
+  .bar button {
+    height: auto;
+    padding: 2px 8px;
+    line-height: normal;
+  }
   button:disabled {
     opacity: 0.5;
     cursor: default;
+  }
+  button.on {
+    border-color: var(--accent, #d98d3a);
+    color: var(--accent, #d98d3a);
   }
   .primary {
     border-color: var(--accent, #d98d3a);
