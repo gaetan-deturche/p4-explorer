@@ -1,5 +1,6 @@
 pub mod commands; // pub: the uediscover dev bin exercises unreal_remote directly
 mod index;
+mod merge3;
 mod p4;
 
 use tauri::Manager;
@@ -29,6 +30,14 @@ pub fn run() {
             commands::pick_patch_file,
             commands::preview_patch,
             commands::apply_patch,
+            commands::merge_start_patch,
+            commands::merge_start_resolve,
+            commands::merge_data,
+            commands::merge_save,
+            commands::merge_cancel,
+            commands::merge_external,
+            commands::open_merge_window,
+            commands::resolve_needed,
             commands::pick_folder,
             commands::p4_dirs,
             commands::p4_files,

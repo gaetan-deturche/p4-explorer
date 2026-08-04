@@ -6,6 +6,7 @@
   import { updates } from "$lib/updates.svelte";
   import { sync, type SyncTarget } from "$lib/sync.svelte";
   import { patches } from "$lib/patch.svelte";
+  import { merges, afterMerge } from "$lib/merge.svelte";
   import { pending } from "$lib/pending.svelte";
   import { history } from "$lib/history.svelte";
   import { browse } from "$lib/browse.svelte";
@@ -293,6 +294,9 @@
       { label: openInLabel, action: () => openLocalInEditor(file.depotFile) },
       copyMenu(file.depotFile, file.clientFile),
       { label: patchLabel, action: () => generatePatch("", sel) },
+      // p4 tells us if there is nothing to resolve, so this stays unconditional
+      // rather than costing an fstat per context-menu open.
+      { label: "Resolve…", action: () => merges.resolveFile(file.depotFile) },
       {
         label: sel.length > 1 ? `Revert (${sel.length} files)…` : "Revert file…",
         action: () => pending.revertMixed(sel),
@@ -440,6 +444,21 @@
       askConfirm,
       refresh: () => browse.refresh(),
     });
+    merges.init({
+      conn: () => conn,
+      connected: () => connection.connected,
+      setNotice,
+      setError,
+      refresh: () => browse.refresh(),
+      loadPending: () => pending.load(),
+    });
+    // A resolve window is its own webview; this is how the main one finds out.
+    void import("@tauri-apps/api/event").then(({ listen }) =>
+      listen("merge-done", () => {
+        setNotice("Merge saved.", 4000);
+        void afterMerge();
+      }),
+    );
     patches.init({
       conn: () => conn,
       connected: () => connection.connected,
@@ -770,6 +789,7 @@
     items={sync.errors.items}
     busyFile={sync.busyFile}
     onFixFile={(f, force) => sync.fixFile(f, force)}
+    onResolveFile={(f) => merges.resolveFile(f)}
     onIgnoreFile={(f) => sync.ignoreFile(f)}
     onRetryAll={() => sync.fixAll(false)}
     onForceAll={() => sync.fixAll(true)}
@@ -1003,6 +1023,7 @@
     files={patches.files}
     busy={patches.busy}
     onApply={(mode, partial) => patches.apply(mode, partial)}
+    onResolveHunk={(depot, hunk) => merges.resolvePatchHunk(patches.path, depot, hunk)}
     onClose={() => patches.close()}
   />
 {/if}

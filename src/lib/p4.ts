@@ -65,6 +65,27 @@ export interface PatchFileReport {
   rejPath: string;
 }
 
+/** One stretch of a three-way merge. `same` needs no decision; `conflict` does. */
+export type MergeRegion =
+  | { kind: "same"; lines: string[] }
+  | { kind: "ours"; base: string[]; lines: string[] }
+  | { kind: "theirs"; base: string[]; lines: string[] }
+  | { kind: "both"; base: string[]; lines: string[] }
+  | { kind: "conflict"; base: string[]; ours: string[]; theirs: string[] };
+
+/** A prepared three-way merge, as the resolve window receives it. */
+export interface MergeData {
+  id: string;
+  kind: "resolve" | "patch";
+  name: string;
+  target: string;
+  baseLabel: string;
+  theirsLabel: string;
+  yoursLabel: string;
+  regions: MergeRegion[];
+  conflicts: number;
+}
+
 /** A changelist's Swarm review status (id 0 = requested, not yet created). */
 export interface ReviewInfo {
   id: number;
@@ -204,6 +225,16 @@ export const p4 = {
     g<string>("p4_diff_local_forced", { conn, depotFile }),
   exportPatch: (conn: P4Conn, change: string, files: string[], defaultName: string) =>
     g<string | null>("export_patch", { conn, change, files, defaultName }),
+  /** Depot files under `path` that p4 says still need resolving. */
+  resolveNeeded: (conn: P4Conn, path = "") => g<string[]>("resolve_needed", { conn, path }),
+  /** Prepare a three-way merge for a p4 resolve conflict; returns the merge id. */
+  mergeStartResolve: (conn: P4Conn, depotFile: string) =>
+    g<string>("merge_start_resolve", { conn, depotFile }),
+  /** Prepare a three-way merge for one rejected patch hunk. */
+  mergeStartPatch: (conn: P4Conn, patchPath: string, depotFile: string, hunkIndex: number) =>
+    g<string>("merge_start_patch", { conn, patchPath, depotFile, hunkIndex }),
+  /** Hand a prepared merge to P4MERGE and wait for it; "cancelled" if unsaved. */
+  mergeExternal: (id: string) => g<string>("merge_external", { id }),
   /** Native picker for a .patch/.diff to apply; null if cancelled. */
   pickPatchFile: () => g<string | null>("pick_patch_file"),
   /** Dry-run a patch against this workspace — reports only, writes nothing. */

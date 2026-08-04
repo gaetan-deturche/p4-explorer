@@ -16,11 +16,13 @@ import { cacheGetSync, cacheSet } from "$lib/store.svelte";
 
 const CHOICE_KEY = "editor"; // store scope `nav`: the chosen editor id
 const DIFF_KEY = "difftool"; // store scope `nav`: "inapp" | "external"
+const MERGE_KEY = "mergetool"; // same, for the three-way resolve window
 
 let editors = $state<EditorInfo[]>([]);
 let chosenId = $state<string>("");
 export type DiffTool = "inapp" | "external";
 let diffTool = $state<DiffTool>("inapp");
+let mergeTool = $state<DiffTool>("inapp");
 
 /** Binary UE assets — text diffs are useless; diff them in Unreal's asset-diff
  *  tool (`UnrealEditor -diff`) instead. */
@@ -43,6 +45,7 @@ export const editor = {
    *  the Windows default, else the first detected (Notepad always exists). */
   async init() {
     diffTool = cacheGetSync("nav", DIFF_KEY) === "external" ? "external" : "inapp";
+  mergeTool = cacheGetSync("nav", MERGE_KEY) === "external" ? "external" : "inapp";
     editors = await detectEditors().catch(() => []);
     const saved = cacheGetSync("nav", CHOICE_KEY) ?? "";
     if (saved && editors.some((e) => e.id === saved)) {
@@ -73,6 +76,14 @@ export const editor = {
   setDiffTool(t: DiffTool) {
     diffTool = t;
     cacheSet("nav", DIFF_KEY, t);
+  },
+  /** Which tool settles a three-way conflict ("external" = P4MERGE). */
+  get mergeTool(): DiffTool {
+    return mergeTool;
+  },
+  setMergeTool(t: DiffTool) {
+    mergeTool = t;
+    cacheSet("nav", MERGE_KEY, t);
   },
 
   /** Open a local file in the preferred editor. */

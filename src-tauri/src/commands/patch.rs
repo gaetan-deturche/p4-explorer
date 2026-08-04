@@ -11,23 +11,23 @@ use tauri_plugin_dialog::DialogExt;
 const SEARCH_WINDOW: usize = 2000;
 
 #[derive(Clone)]
-struct Hunk {
+pub(crate) struct Hunk {
     /// 1-based line in the original file.
-    old_start: usize,
+    pub(crate) old_start: usize,
     /// Context + removed lines: what the hunk expects to find.
-    old: Vec<String>,
+    pub(crate) old: Vec<String>,
     /// Context + added lines: what it leaves behind.
-    new: Vec<String>,
+    pub(crate) new: Vec<String>,
     /// Raw text, replayed verbatim into a `.rej` when the hunk is rejected.
-    raw: String,
+    pub(crate) raw: String,
 }
 
-struct PatchFile {
-    depot: String,
+pub(crate) struct PatchFile {
+    pub(crate) depot: String,
     /// The `+++` path, i.e. wherever the patch was generated. Only a fallback:
     /// another machine's workspace maps the same depot path elsewhere.
-    local_hint: String,
-    hunks: Vec<Hunk>,
+    pub(crate) local_hint: String,
+    pub(crate) hunks: Vec<Hunk>,
 }
 
 #[derive(serde::Serialize, Clone)]
@@ -109,6 +109,91 @@ struct ApplyOpts {
     mode: String,
     change: String,
     partial: bool,
+}
+
+/// Open a rejected hunk as a three-way merge: the patch's expected text is the
+/// base, what it wants is "theirs", and the file's closest-matching region is
+/// "yours". Returns the merge id for the resolve window.
+#[tauri::command]
+pub async fn merge_start_patch(
+    conn: P4Conn,
+    patch_path: String,
+    depot_file: String,
+    hunk_index: usize,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let text = std::fs::read_to_string(&patch_path)
+            .map_err(|e| format!("cannot read the patch: {e}"))?;
+        let files = parse_patch(&text);
+        let pf = files
+            .iter()
+            .find(|f| f.depot == depot_file)
+            .ok_or("this patch no longer contains that file")?;
+        let h = pf
+            .hunks
+            .get(hunk_index.saturating_sub(1))
+            .ok_or("this patch no longer contains that hunk")?;
+        let local = resolve_target(&conn, &pf.depot, &pf.local_hint)
+            .ok_or("the target file is not in this workspace")?;
+        let raw = std::fs::read(&local).map_err(|e| format!("cannot read the target: {e}"))?;
+        let (_, body) = split_bom(&raw);
+        let body = String::from_utf8(body.to_vec())
+            .map_err(|_| "the target is not a UTF-8 text file".to_string())?;
+        let lines = split_lines(&body);
+
+        // The region the hunk was meant for: whichever window of the file looks
+        // most like its expected text.
+        let (from, to) = closest_region(&lines, &h.old, h.old_start.saturating_sub(1));
+        let name = pf.depot.rsplit('/').next().unwrap_or("file").to_string();
+        let rej = rej_for(&local, &h.raw);
+        Ok(super::merge::register(super::merge::MergeJob {
+            kind: "patch".into(),
+            conn: conn.clone(),
+            depot: pf.depot.clone(),
+            target: local,
+            name,
+            base_label: format!("patch expects (hunk #{hunk_index})"),
+            theirs_label: "patch".into(),
+            yours_label: format!("workspace (lines {}–{})", from + 1, to.max(from + 1)),
+            base: h.old.clone(),
+            ours: lines[from..to].to_vec(),
+            theirs: h.new.clone(),
+            splice: Some((from, to)),
+            rej,
+        }))
+    })
+    .await
+    .map_err(|e| format!("merge-start-patch task failed: {e}"))?
+}
+
+/// The `.rej` beside `local` and this hunk's text, so resolving it can prune
+/// the entry. None when no `.rej` mentions the hunk.
+fn rej_for(local: &str, raw: &str) -> Option<(String, String)> {
+    let path = format!("{local}.rej");
+    let body = std::fs::read_to_string(&path).ok()?;
+    body.contains(raw).then_some((path, raw.to_string()))
+}
+
+/// The window of `lines` that best matches `want`, searching outward from
+/// `expected`. Ties go to the position nearest the expected one.
+fn closest_region(lines: &[String], want: &[String], expected: usize) -> (usize, usize) {
+    let len = want.len().min(lines.len());
+    if len == 0 || lines.is_empty() {
+        let at = expected.min(lines.len());
+        return (at, at);
+    }
+    let mut best = (expected.min(lines.len() - len), 0usize);
+    for at in candidates(lines.len(), len, expected) {
+        let score = want
+            .iter()
+            .zip(&lines[at..at + len])
+            .filter(|(a, b)| a.trim() == b.trim())
+            .count();
+        if score > best.1 {
+            best = (at, score);
+        }
+    }
+    (best.0, best.0 + len)
 }
 
 /// The shared pipeline: parse, resolve each target, place every hunk, and —
@@ -359,7 +444,7 @@ fn matches_at(lines: &[String], want: &[String], at: usize, loose: bool) -> bool
 
 /// The local path to patch: `p4 where` for this client, else the patch's own
 /// `+++` path when it happens to exist on this machine.
-fn resolve_target(conn: &P4Conn, depot: &str, hint: &str) -> Option<String> {
+pub(crate) fn resolve_target(conn: &P4Conn, depot: &str, hint: &str) -> Option<String> {
     if let Ok(recs) = p4::run(conn, &["where", depot]) {
         let mapped = recs.first().and_then(|r| {
             r.get("path")
@@ -379,7 +464,7 @@ fn resolve_target(conn: &P4Conn, depot: &str, hint: &str) -> Option<String> {
     None
 }
 
-fn make_writable(path: &str) -> std::io::Result<()> {
+pub(crate) fn make_writable(path: &str) -> std::io::Result<()> {
     let md = std::fs::metadata(path)?;
     let mut perms = md.permissions();
     if perms.readonly() {
@@ -390,7 +475,7 @@ fn make_writable(path: &str) -> std::io::Result<()> {
     Ok(())
 }
 
-fn split_bom(raw: &[u8]) -> (&[u8], &[u8]) {
+pub(crate) fn split_bom(raw: &[u8]) -> (&[u8], &[u8]) {
     if raw.starts_with(&[0xEF, 0xBB, 0xBF]) {
         raw.split_at(3)
     } else {
@@ -400,7 +485,7 @@ fn split_bom(raw: &[u8]) -> (&[u8], &[u8]) {
 
 /// Split into lines without their terminator, EOL style irrelevant. A trailing
 /// newline does not produce a final empty line (that is tracked separately).
-fn split_lines(body: &str) -> Vec<String> {
+pub(crate) fn split_lines(body: &str) -> Vec<String> {
     let mut v: Vec<String> = body.split('\n').map(|l| l.strip_suffix('\r').unwrap_or(l).to_string()).collect();
     if body.ends_with('\n') {
         v.pop();
@@ -410,7 +495,7 @@ fn split_lines(body: &str) -> Vec<String> {
 
 /// Parse a unified diff. Hunk bodies are consumed by their `@@` line counts, so
 /// content that itself looks like a header cannot derail the walk.
-fn parse_patch(text: &str) -> Vec<PatchFile> {
+pub(crate) fn parse_patch(text: &str) -> Vec<PatchFile> {
     let lines: Vec<&str> = text.split('\n').map(|l| l.strip_suffix('\r').unwrap_or(l)).collect();
     let mut files: Vec<PatchFile> = Vec::new();
     let mut i = 0;

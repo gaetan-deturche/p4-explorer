@@ -145,6 +145,33 @@
           <span class="epath mono dim">P4DIFF (p4 set P4DIFF=…)</span>
         </label>
       </div>
+      <div class="section"><span>Merge / resolve</span></div>
+      <p class="hint dim">
+        The tool used to settle a three-way conflict — a <code>p4 resolve</code> or a rejected
+        patch hunk.
+      </p>
+      <div class="edlist">
+        <label class="erow">
+          <input
+            type="radio"
+            name="mergetool"
+            checked={editor.mergeTool === "inapp"}
+            onchange={() => editor.setMergeTool("inapp")}
+          />
+          <span class="ename">In-app resolve window</span>
+          <span class="epath mono dim">base / theirs / yours + result</span>
+        </label>
+        <label class="erow">
+          <input
+            type="radio"
+            name="mergetool"
+            checked={editor.mergeTool === "external"}
+            onchange={() => editor.setMergeTool("external")}
+          />
+          <span class="ename">External tool</span>
+          <span class="epath mono dim">P4MERGE (p4 set P4MERGE=…)</span>
+        </label>
+      </div>
     {:else}
       <label class="toggle">
         <input

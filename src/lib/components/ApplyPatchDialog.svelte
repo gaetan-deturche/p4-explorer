@@ -7,6 +7,7 @@
     files,
     busy,
     onApply,
+    onResolveHunk,
     onClose,
   }: {
     path: string;
@@ -14,6 +15,7 @@
     files: PatchFileReport[];
     busy: boolean;
     onApply: (mode: "edit" | "offline", partial: boolean) => void;
+    onResolveHunk: (depot: string, hunkIndex: number) => void;
     onClose: () => void;
   } = $props();
 
@@ -91,6 +93,18 @@
             </div>
             {#if offsets(f)}<div class="dim sub">{offsets(f)}</div>{/if}
             {#if f.message}<div class="msg">{f.message}</div>{/if}
+            {#if f.conflicts > 0}
+              <div class="acts">
+                {#each f.hunks.filter((hk) => hk.status === "conflict") as hk (hk.index)}
+                  <button
+                    title="Settle hunk #{hk.index} three-way (patch expects / patch / workspace)"
+                    onclick={() => onResolveHunk(f.depot, hk.index)}
+                  >
+                    Resolve #{hk.index}…
+                  </button>
+                {/each}
+              </div>
+            {/if}
           </div>
         {/each}
       </div>
@@ -226,6 +240,12 @@
     font-size: 10px;
     color: var(--warn);
     overflow-wrap: anywhere;
+  }
+  .acts {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin-top: 2px;
   }
   .pill {
     border: 1px solid var(--border);

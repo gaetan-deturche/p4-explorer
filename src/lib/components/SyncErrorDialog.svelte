@@ -4,6 +4,7 @@
     items,
     busyFile,
     onFixFile,
+    onResolveFile,
     onIgnoreFile,
     onRetryAll,
     onForceAll,
@@ -13,6 +14,7 @@
     items: { line: string; file: string | null }[];
     busyFile: string | null;
     onFixFile: (file: string, force: boolean) => void;
+    onResolveFile: (file: string) => void; // opens the three-way resolve
     onIgnoreFile: (file: string) => void; // drop the line, leave the file alone
     onRetryAll: () => void;
     onForceAll: () => void;
@@ -57,7 +59,7 @@
     <div class="hint">
       <b>Retry</b> re-syncs (safe — for files that were open in another app; close it first).
       <b>Force</b> overwrites writable files with the depot version (discards local changes).
-      Conflicts must be resolved in P4V.
+      <b>Resolve</b> opens the three-way merge.
     </div>
 
     <div class="scroll">
@@ -73,7 +75,14 @@
               {#if !it.file}
                 <span class="dim">—</span>
               {:else if cat === "resolve"}
-                <button disabled title="Resolve in P4V / p4 resolve">Resolve</button>
+                <button
+                  class="primary"
+                  disabled={busy}
+                  title="Settle the conflict three-way (base / depot / workspace)"
+                  onclick={() => onResolveFile(it.file!)}
+                >
+                  Resolve…
+                </button>
               {:else if cat === "protected"}
                 <button
                   class="danger-btn"

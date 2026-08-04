@@ -1,8 +1,8 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability for the main window and in-app diff windows",
-  "windows": ["main", "diff-*"],
+  "description": "Capability for the main window and the in-app diff / resolve windows",
+  "windows": ["main", "diff-*", "merge-*"],
   "permissions": [
     "core:default",
     "core:window:allow-close",
