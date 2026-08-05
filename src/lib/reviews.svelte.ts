@@ -23,23 +23,23 @@ type Hooks = {
   rootPath: () => string;
 };
 
-/** Swarm states that count as "still open" — what the tab shows by default. */
-export const OPEN_STATES = ["needsReview", "needsRevision"];
-/** Every state, for the "All" option (Swarm has no "any state" filter). */
-export const ALL_STATES = [
-  "needsReview",
-  "needsRevision",
-  "approved",
-  "rejected",
-  "archived",
+/** Every review state, in display order, with the same label the row badges
+ *  use. The filter is a tickable set of these. */
+export const REVIEW_STATES: { key: string; label: string }[] = [
+  { key: "needsReview", label: "Needs Review" },
+  { key: "needsRevision", label: "Needs Revision" },
+  { key: "approved", label: "Approved" },
+  { key: "rejected", label: "Rejected" },
+  { key: "archived", label: "Archived" },
 ];
+/** Ticked by default: the states that still want something from someone. */
+const DEFAULT_STATES = ["needsReview", "needsRevision"];
 
 /** A review's content: the changelist it lives in, and whether that is a
  *  submitted change (no shelf left) rather than a shelf. */
 export type ReviewContent = { change: number; submitted: boolean; files: P4Record[] };
 
 export type Role = "author" | "reviewer" | "any";
-export type StatusFilter = "open" | "needsReview" | "needsRevision" | "approved" | "rejected" | "all";
 
 const PAGE = 25;
 
@@ -49,7 +49,7 @@ let loading = $state(false);
 let paging = $state(false);
 let error = $state("");
 let cursor = 0; // Swarm's `lastSeen`; 0 = no more pages
-let status = $state<StatusFilter>("open");
+let states = $state<string[]>([...DEFAULT_STATES]);
 let user = $state("");
 let role = $state<Role>("author");
 let search = $state("");
@@ -68,14 +68,14 @@ function cacheScope(): string {
   return `p4:reviews:${h?.conn().client ?? ""}`;
 }
 function fingerprint(): string {
-  return [status, user, role, search.trim(), streamOnly ? "s" : "", hideSubmitted ? "h" : ""].join("|");
-}
-
-/** The `state[]` values a status filter maps to. */
-function statesFor(f: StatusFilter): string[] {
-  if (f === "open") return OPEN_STATES;
-  if (f === "all") return ALL_STATES;
-  return [f];
+  return [
+    [...states].sort().join(","),
+    user,
+    role,
+    search.trim(),
+    streamOnly ? "s" : "",
+    hideSubmitted ? "h" : "",
+  ].join("|");
 }
 
 export const reviews = {
@@ -101,8 +101,8 @@ export const reviews = {
   get more() {
     return cursor > 0;
   },
-  get status() {
-    return status;
+  get states() {
+    return states;
   },
   get user() {
     return user;
@@ -126,9 +126,8 @@ export const reviews = {
 
   /** Change a filter and reload. Every setter goes through here so a filter can
    *  never be shown without the list it implies. */
-  setStatus(next: StatusFilter) {
-    if (next === status) return;
-    status = next;
+  toggleState(key: string) {
+    states = states.includes(key) ? states.filter((s) => s !== key) : [...states, key];
     void reviews.load();
   },
   setUser(next: string) {
@@ -165,6 +164,16 @@ export const reviews = {
       error = "";
       return;
     }
+    if (states.length === 0) {
+      // No state[] at all would make Swarm return every review ever.
+      seq++;
+      rows = [];
+      cursor = 0;
+      error = "";
+      loading = false;
+      version++;
+      return;
+    }
     const mine = ++seq;
     // Paint the cached list for this exact filter set before the round-trip —
     // Swarm answers in ~100ms but p4-backed setups deserve the same instant
@@ -187,7 +196,7 @@ export const reviews = {
     error = "";
     try {
       const page = await p4.swarmReviews(h.conn(), {
-        states: statesFor(status),
+        states,
         user,
         role,
         keywords: search.trim(),
@@ -219,7 +228,7 @@ export const reviews = {
     paging = true;
     try {
       const page = await p4.swarmReviews(h.conn(), {
-        states: statesFor(status),
+        states,
         user,
         role,
         keywords: search.trim(),

@@ -8,7 +8,7 @@
   //! reason; the others are discrete enough to fire immediately.
   import DiffView from "$lib/components/DiffView.svelte";
   import { fmtTime, firstLine, splitPath, type P4Record, type ReviewRow } from "$lib/p4";
-  import type { ReviewContent, Role, StatusFilter } from "$lib/reviews.svelte";
+  import { REVIEW_STATES, type ReviewContent, type Role } from "$lib/reviews.svelte";
 
   let {
     rows,
@@ -16,7 +16,7 @@
     paging,
     more,
     error,
-    status,
+    states,
     user,
     role,
     search,
@@ -26,7 +26,7 @@
     me,
     refreshKey,
     contextReview,
-    onStatus,
+    onToggleState,
     onUser,
     onRole,
     onSearch,
@@ -45,7 +45,7 @@
     paging: boolean;
     more: boolean;
     error: string;
-    status: StatusFilter;
+    states: string[]; // ticked review states (same keys as the row badges)
     user: string;
     role: Role;
     search: string;
@@ -55,7 +55,7 @@
     me: string; // the connected user, for the "me" shortcut
     refreshKey: number; // bumps when the list reloads → drop per-review caches
     contextReview: number; // id of the review whose context menu is open
-    onStatus: (s: StatusFilter) => void;
+    onToggleState: (key: string) => void;
     onUser: (u: string) => void;
     onRole: (r: Role) => void;
     onSearch: (q: string) => void;
@@ -70,15 +70,6 @@
     onContext: (r: ReviewRow, e: MouseEvent) => void;
     onFileContext?: (f: P4Record, r: ReviewRow, e: MouseEvent) => void;
   } = $props();
-
-  const STATUSES: { key: StatusFilter; label: string }[] = [
-    { key: "open", label: "Open" },
-    { key: "needsReview", label: "Needs Review" },
-    { key: "needsRevision", label: "Needs Revision" },
-    { key: "approved", label: "Approved" },
-    { key: "rejected", label: "Rejected" },
-    { key: "all", label: "All" },
-  ];
 
   type Expanded = {
     open: boolean;
@@ -233,16 +224,18 @@
 
 <div class="panel">
   <div class="filters">
-    <select
-      class="pick"
-      title="Review state (Swarm filters this server-side)"
-      value={status}
-      onchange={(e) => onStatus(e.currentTarget.value as StatusFilter)}
-    >
-      {#each STATUSES as s (s.key)}
-        <option value={s.key}>{s.label}</option>
+    <span class="pills" title="Which review states to list (Swarm filters this server-side)">
+      {#each REVIEW_STATES as s (s.key)}
+        <button
+          class="state st-{s.key} pill"
+          class:off={!states.includes(s.key)}
+          aria-pressed={states.includes(s.key)}
+          onclick={() => onToggleState(s.key)}
+        >
+          {s.label}
+        </button>
       {/each}
-    </select>
+    </span>
 
     <label
       class="scope"
@@ -325,11 +318,17 @@
       <div class="msg dim">Loading reviews…</div>
     {:else if rows.length === 0 && !error}
       <div class="msg dim">
-        No {status === "all" ? "" : STATUSES.find((s) => s.key === status)?.label.toLowerCase()} reviews{user
-          ? ` with ${user} as ${role}`
-          : ""}{search ? ` matching “${search}”` : ""}{streamOnly && streamPath ? ` on ${streamPath}` : ""}{hideSubmitted
-          ? " that aren't submitted yet"
-          : ""}.
+        {#if states.length === 0}
+          No review state is ticked — pick at least one above.
+        {:else}
+          No {REVIEW_STATES.filter((s) => states.includes(s.key))
+            .map((s) => s.label.toLowerCase())
+            .join(" / ")} reviews{user ? ` with ${user} as ${role}` : ""}{search
+            ? ` matching “${search}”`
+            : ""}{streamOnly && streamPath ? ` on ${streamPath}` : ""}{hideSubmitted
+            ? " that aren't submitted yet"
+            : ""}.
+        {/if}
       </div>
     {:else}
       {#each rows as r (r.id)}
@@ -470,6 +469,30 @@
   .search {
     flex: 1;
     min-width: 80px;
+  }
+  .pills {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex: none;
+  }
+  /* Same cell as the row badges (.state supplies font/color/border); a pill is
+     just a clickable one, and unticked reads as an outline ghost. */
+  .pill {
+    background: none;
+    font-family: inherit; /* buttons don't inherit it — the badge cell must match */
+    cursor: pointer;
+    user-select: none;
+  }
+  .pill.off {
+    color: var(--text-dim);
+    opacity: 0.45;
+    border-style: dashed;
+    font-weight: 400;
+    font-style: normal;
+  }
+  .pill:hover {
+    opacity: 1;
   }
   .scope {
     display: flex;

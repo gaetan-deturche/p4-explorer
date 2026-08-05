@@ -17,7 +17,7 @@
   import { patches } from "$lib/patch.svelte";
   import { merges, afterMerge } from "$lib/merge.svelte";
   import { pending } from "$lib/pending.svelte";
-  import { reviews, type Role, type StatusFilter } from "$lib/reviews.svelte";
+  import { reviews, type Role } from "$lib/reviews.svelte";
   import { history } from "$lib/history.svelte";
   import { browse } from "$lib/browse.svelte";
   import { connection } from "$lib/connection.svelte";
@@ -763,7 +763,7 @@
           paging={reviews.paging}
           more={reviews.more}
           error={reviews.error}
-          status={reviews.status}
+          states={reviews.states}
           user={reviews.user}
           role={reviews.role}
           search={reviews.search}
@@ -773,7 +773,7 @@
           me={conn.user}
           refreshKey={reviews.version}
           contextReview={reviewCtx?.r.id ?? 0}
-          onStatus={(s: StatusFilter) => reviews.setStatus(s)}
+          onToggleState={(k: string) => reviews.toggleState(k)}
           onUser={(u: string) => reviews.setUser(u)}
           onRole={(r: Role) => reviews.setRole(r)}
           onSearch={(q: string) => reviews.setSearch(q)}
