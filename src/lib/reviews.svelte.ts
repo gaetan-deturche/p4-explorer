@@ -10,12 +10,14 @@
 //! shelved changelist, so `describe -S` and the shelved-diff path already in the
 //! app serve them.
 
-import { p4, type P4Conn, type P4Record, type ReviewRow } from "$lib/p4";
+import { p4, openDiffWindow, type P4Conn, type P4Record, type ReviewRow } from "$lib/p4";
+import { editor, isUnrealAsset, unrealAssetName } from "$lib/editor.svelte";
 
 type Hooks = {
   conn: () => P4Conn;
   connected: () => boolean;
   setError: (m: string) => void;
+  setNotice: (m: string, ms?: number) => void;
   /** Depot path of the workspace's stream, for the "this stream only" filter. */
   rootPath: () => string;
 };
@@ -247,12 +249,46 @@ export const reviews = {
       : p4.diffShelved(h!.conn(), file, rev, change);
   },
 
-  /** Open the same diff in the diff window. */
-  openDiff(file: string, rev: number, change: string, submitted: boolean) {
-    const go = submitted
-      ? p4.openDiff(h!.conn(), file, rev)
-      : p4.openDiffShelved(h!.conn(), file, rev, change);
-    void go.catch((e) => h!.setError(String(e)));
+  /** Open the diff outside the list: Unreal's asset diff for a `.uasset`, else
+   *  the in-app diff window or the external P4DIFF tool, exactly as the History
+   *  and Pending tabs do. The two sides come from the shelf or from the submitted
+   *  revision, depending on where this review's content is. */
+  async openDiff(file: string, rev: number, change: string, submitted: boolean) {
+    const conn = h!.conn();
+    const pair = () =>
+      submitted ? p4.diffPairRev(conn, file, rev) : p4.diffPairShelved(conn, file, rev, change);
+    try {
+      if (isUnrealAsset(file)) {
+        h!.setNotice("Opening Unreal diff…", 15000); // instant feedback; replaced on completion
+        const p = await pair();
+        const mode = await p4.openUnrealDiff(
+          conn,
+          p.left,
+          p.right,
+          unrealAssetName(file),
+          p.leftLabel,
+          p.rightLabel,
+        );
+        h!.setNotice(
+          mode === "nocompare"
+            ? // Empty counterpart: the asset is new (or gone) in this change, so
+              // there is nothing for Unreal's asset diff to compare.
+              "No earlier revision of this asset to compare."
+            : mode === "remote"
+              ? "Diff opened in the running Unreal Editor."
+              : "Launching Unreal Editor for the diff — this takes a moment…",
+          8000,
+        );
+      } else if (editor.diffTool === "inapp") {
+        await openDiffWindow(await pair());
+      } else if (submitted) {
+        await p4.openDiff(conn, file, rev);
+      } else {
+        await p4.openDiffShelved(conn, file, rev, change);
+      }
+    } catch (e) {
+      h!.setNotice(String(e), 5000);
+    }
   },
 
   /** The review's page on the Swarm server, or "" when unconfigured. */

@@ -553,6 +553,7 @@
       conn: () => conn,
       connected: () => connection.connected,
       setError,
+      setNotice,
       rootPath: () => browse.rootPath,
     });
     patches.init({
