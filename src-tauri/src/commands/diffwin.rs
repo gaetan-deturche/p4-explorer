@@ -284,6 +284,13 @@ fn loadable_spec(editor_project_dir: &std::path::Path, src: &str) -> Result<Stri
     Ok(format!("/Temp/Diff/{base}"))
 }
 
+/// Skips the startup map on an editor we launch ourselves, so a diff does not
+/// pay for loading a level it never shows. Overrides the user's own preference
+/// for this process only — it is a command-line override, nothing is written to
+/// their EditorPerProjectUserSettings.ini.
+const NO_STARTUP_MAP: &str =
+    "-ini:EditorPerProjectUserSettings:[/Script/UnrealEd.EditorLoadingSavingSettings]:LoadLevelAtStartup=None";
+
 /// Diff two UE asset files in Unreal's asset-diff tool. Prefers an ALREADY
 /// RUNNING editor (Python remote execution → in-place DiffAssets); falls back
 /// to launching `UnrealEditor.exe <project> -diff <left> <right>`. Returns
@@ -358,7 +365,20 @@ pub async fn open_unreal_diff(
         let editor = find_unreal_editor(&root)
             .ok_or("UnrealEditor.exe not found at or above the workspace root")?;
         let mut c = std::process::Command::new(editor);
-        c.arg(project).arg("-diff").arg(&left).arg(&right);
+        // Boot with NO level. The asset diff needs no world, and loading the
+        // project's startup map is by far the slowest part of an editor launch.
+        // UnrealEdMisc::OnInit only calls LoadDefaultMapAtStartup() when this
+        // setting is not None (UnrealEdMisc.cpp: `LoadLevelAtStartup !=
+        // ELoadLevelAtStartup::None`), and the -ini: override is compiled in for
+        // every non-shipping build (ALLOW_INI_OVERRIDE_FROM_COMMANDLINE).
+        //
+        // It goes BEFORE -diff on purpose: the engine splits the command line at
+        // `-diff` and treats everything after it as the diff's own arguments.
+        c.arg(project)
+            .arg(NO_STARTUP_MAP)
+            .arg("-diff")
+            .arg(&left)
+            .arg(&right);
         c.spawn().map_err(|e| format!("failed to launch Unreal diff: {e}"))?;
         Ok("launched".to_string())
     })
