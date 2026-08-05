@@ -59,6 +59,10 @@ export interface ReviewRow {
    *  `swarm`-owned changelist tracking the latest version. */
   change: number;
   pending: boolean;
+  /** Submitted changelists this review landed as. Often non-empty while the
+   *  review still says needsReview: submitting deletes the shelf, so this is
+   *  where the content lives when someone pushed without waiting for approval. */
+  commits: number[];
   reviewers: string[];
 }
 

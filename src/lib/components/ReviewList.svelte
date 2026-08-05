@@ -8,7 +8,7 @@
   //! reason; the others are discrete enough to fire immediately.
   import DiffView from "$lib/components/DiffView.svelte";
   import { fmtTime, firstLine, splitPath, type P4Record, type ReviewRow } from "$lib/p4";
-  import type { Role, StatusFilter } from "$lib/reviews.svelte";
+  import type { ReviewContent, Role, StatusFilter } from "$lib/reviews.svelte";
 
   let {
     rows,
@@ -31,7 +31,7 @@
     onSearch,
     onStreamOnly,
     onLoadMore,
-    onFiles,
+    onContent,
     onDiff,
     onOpenDiff,
     onContext,
@@ -57,9 +57,9 @@
     onSearch: (q: string) => void;
     onStreamOnly: (v: boolean) => void;
     onLoadMore: () => void;
-    onFiles: (change: string) => Promise<P4Record[]>;
-    onDiff: (depotFile: string, rev: number, change: string) => Promise<string>;
-    onOpenDiff: (depotFile: string, rev: number, change: string) => void;
+    onContent: (r: ReviewRow) => Promise<ReviewContent>;
+    onDiff: (depotFile: string, rev: number, change: string, submitted: boolean) => Promise<string>;
+    onOpenDiff: (depotFile: string, rev: number, change: string, submitted: boolean) => void;
     onContext: (r: ReviewRow, e: MouseEvent) => void;
     onFileContext?: (f: P4Record, r: ReviewRow, e: MouseEvent) => void;
   } = $props();
@@ -73,7 +73,14 @@
     { key: "all", label: "All" },
   ];
 
-  type Expanded = { open: boolean; loading: boolean; files: P4Record[] };
+  type Expanded = {
+    open: boolean;
+    loading: boolean;
+    files: P4Record[];
+    /** Changelist the files came from: the shelf, or the submitted change. */
+    change: number;
+    submitted: boolean;
+  };
   let exp = $state<Record<number, Expanded>>({});
   // Per-file inline diff, keyed by "<review id>|<depotFile>".
   let fdiff = $state<Record<string, { open: boolean; loading: boolean; text: string }>>({});
@@ -96,15 +103,16 @@
       return;
     }
     if (!r.change) {
-      exp[r.id] = { open: true, loading: false, files: [] };
+      exp[r.id] = { open: true, loading: false, files: [], change: 0, submitted: false };
       return;
     }
-    exp[r.id] = { open: true, loading: true, files: [] };
-    const files = await onFiles(String(r.change));
-    exp[r.id] = { open: exp[r.id]?.open ?? true, loading: false, files };
+    exp[r.id] = { open: true, loading: true, files: [], change: r.change, submitted: false };
+    const c = await onContent(r);
+    exp[r.id] = { open: exp[r.id]?.open ?? true, loading: false, ...c };
   }
 
   async function toggleDiff(r: ReviewRow, f: P4Record) {
+    const s = exp[r.id];
     const key = `${r.id}|${f.depotFile}`;
     const cur = fdiff[key];
     if (cur) {
@@ -113,9 +121,12 @@
     } else {
       fdiff[key] = { open: true, loading: true, text: "" };
     }
-    const text = await onDiff(f.depotFile, Number(f.rev ?? 0), String(r.change)).catch(
-      (e) => `Could not diff this file: ${e}`,
-    );
+    const text = await onDiff(
+      f.depotFile,
+      Number(f.rev ?? 0),
+      String(s?.change ?? r.change),
+      s?.submitted ?? false,
+    ).catch((e) => `Could not diff this file: ${e}`);
     fdiff[key] = { open: fdiff[key]?.open ?? true, loading: false, text };
   }
 
@@ -309,6 +320,14 @@
             <span class="cnum mono">#{r.id}</span>
             <span class="state st-{r.state}">{r.stateLabel}</span>
             <span class="desc">{firstLine(r.description) || "(no description)"}</span>
+            {#if r.commits.length}
+              <span
+                class="committed"
+                title={`Already submitted as @${[...r.commits].sort((a, b) => b - a)[0]}, though the review is still ${r.stateLabel.toLowerCase()} — submitting deletes the shelf, so the content shown comes from that change.`}
+              >
+                submitted
+              </span>
+            {/if}
             <span class="user dim">{r.author}</span>
             <span class="date dim" title={fmtTime(String(r.updated))}>{ago(r.updated)}</span>
           </button>
@@ -319,14 +338,17 @@
             {:else if !r.change}
               <div class="finfo dim">Swarm reports no version for this review.</div>
             {:else if s.files.length === 0}
-              <div class="finfo dim">No shelved files in @{r.change}.</div>
+              <div class="finfo dim">
+                Nothing to show: @{r.change} has no shelf{r.commits.length
+                  ? " and the submitted change is not readable here"
+                  : " (it may have been deleted)"}.
+              </div>
             {:else}
               <!-- The depot comes from the files themselves: Swarm's list
                    endpoint doesn't say which stream a review is on. -->
               <div class="finfo dim">
-                @{r.change} · {depotOf(s.files[0].depotFile)} · {s.files.length} file{s.files.length === 1
-                  ? ""
-                  : "s"}
+                {s.submitted ? "submitted" : "shelved in"} @{s.change} · {depotOf(s.files[0].depotFile)} ·
+                {s.files.length} file{s.files.length === 1 ? "" : "s"}
               </div>
               {#each s.files as f (f.depotFile)}
                 {@const fd = fdiff[`${r.id}|${f.depotFile}`]}
@@ -335,7 +357,8 @@
                 <div
                   class="frow mono"
                   title={"Double-click to open the diff window\n" + f.depotFile}
-                  ondblclick={() => onOpenDiff(f.depotFile, Number(f.rev ?? 0), String(r.change))}
+                  ondblclick={() =>
+                    onOpenDiff(f.depotFile, Number(f.rev ?? 0), String(s.change), s.submitted)}
                   oncontextmenu={(e) => {
                     if (onFileContext) {
                       e.preventDefault();
@@ -520,6 +543,13 @@
   }
   /* Same scale as the review badge in the Pending tab, so a state means the same
      thing in both places. */
+  .committed {
+    flex: none;
+    font-size: 10px;
+    line-height: 16px;
+    color: var(--text-dim);
+    font-style: italic;
+  }
   .state {
     flex: none;
     font-size: 10px;

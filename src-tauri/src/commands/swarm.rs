@@ -31,6 +31,10 @@ pub struct ReviewRow {
     pub change: u64,
     /// True while the review is still open (not committed/archived).
     pub pending: bool,
+    /// Submitted changelists this review landed as. Often non-empty on a review
+    /// that is STILL `needsReview`: submitting deletes the shelf, so this is where
+    /// the content lives once someone pushed without waiting for approval.
+    pub commits: Vec<u64>,
     /// Distinct participants other than the author — reviewers, roughly.
     pub reviewers: Vec<String>,
 }
@@ -259,6 +263,11 @@ pub async fn swarm_reviews(conn: P4Conn, query: ReviewQuery) -> Result<ReviewPag
                 updated: r.get("updated").and_then(|v| v.as_i64()).unwrap_or(0),
                 change,
                 pending: r.get("pending").and_then(|v| v.as_bool()).unwrap_or(false),
+                commits: r
+                    .get("commits")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.iter().filter_map(|v| v.as_u64()).collect())
+                    .unwrap_or_default(),
                 reviewers,
             })
         };
@@ -411,9 +420,21 @@ pub async fn review_patch(conn: P4Conn, change: String) -> Result<ReviewPatch, S
         if change.trim().is_empty() {
             return Err("This review has no shelved changelist to apply.".into());
         }
+        // A review's content is normally a shelf — but a review that was submitted
+        // without approval has none (submitting deletes it), and then the
+        // changelist itself is the content. Ask what this one is before diffing.
+        let shelved = p4::run(&conn, &["describe", "-S", "-s", &change])
+            .unwrap_or_default()
+            .iter()
+            .any(|r| r.get("depotFile").is_some());
         // -S: shelved content, -du: unified diff. P4DIFF is cleared inside
         // run_raw_stdout_diff, so an external diff tool cannot hijack this.
-        let describe = p4::run_raw_stdout_diff(&conn, &["describe", "-S", "-du", &change])?;
+        let args: Vec<&str> = if shelved {
+            vec!["describe", "-S", "-du", &change]
+        } else {
+            vec!["describe", "-du", &change]
+        };
+        let describe = p4::run_raw_stdout_diff(&conn, &args)?;
         let (patch, _) = shelf_to_patch(&describe);
         let covered: std::collections::HashSet<String> = patch
             .lines()
@@ -425,7 +446,12 @@ pub async fn review_patch(conn: P4Conn, change: String) -> Result<ReviewPatch, S
         // The shelf is the authority on what the review contains: anything it
         // holds that the diff did not cover has to be copied verbatim instead,
         // so it is listed rather than quietly dropped.
-        let shelf: Vec<(String, String)> = p4::run(&conn, &["describe", "-S", "-s", &change])
+        let list_args: Vec<&str> = if shelved {
+            vec!["describe", "-S", "-s", &change]
+        } else {
+            vec!["describe", "-s", &change]
+        };
+        let shelf: Vec<(String, String)> = p4::run(&conn, &list_args)
             .unwrap_or_default()
             .iter()
             .filter_map(|r| {
@@ -441,7 +467,7 @@ pub async fn review_patch(conn: P4Conn, change: String) -> Result<ReviewPatch, S
             .collect();
 
         if shelf.is_empty() {
-            return Err(format!("@{change} has no shelved files to apply."));
+            return Err(format!("@{change} has no files to apply."));
         }
         // A review on another depot maps nowhere here; say that once, with the
         // depot, instead of reporting every single file as "not found".
@@ -520,11 +546,21 @@ pub async fn review_copy_files(
         if change.trim().is_empty() || files.is_empty() {
             return Ok(Vec::new());
         }
-        // The shelf tells us each file's action; a copy of an `add` has to be
-        // opened differently from a copy of an `edit`.
+        // Each file's action decides how to open it. Where that list comes from
+        // depends on the source: a shelf (`-S`) or, for a review submitted without
+        // approval, the submitted changelist itself.
+        let shelved = p4::run(&conn, &["describe", "-S", "-s", &change])
+            .unwrap_or_default()
+            .iter()
+            .any(|r| r.get("depotFile").is_some());
+        let list_args: Vec<&str> = if shelved {
+            vec!["describe", "-S", "-s", &change]
+        } else {
+            vec!["describe", "-s", &change]
+        };
         let mut action_of: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
-        if let Ok(recs) = p4::run(&conn, &["describe", "-S", "-s", &change]) {
+        if let Ok(recs) = p4::run(&conn, &list_args) {
             for r in &recs {
                 let f = r.get("depotFile").and_then(|v| v.as_str()).unwrap_or("");
                 let a = r.get("action").and_then(|v| v.as_str()).unwrap_or("");
@@ -572,7 +608,10 @@ pub async fn review_copy_files(
 
             // Open BEFORE writing: `p4 edit` syncs nothing but clears the
             // read-only flag, and a later write would otherwise be clobbered.
-            if mode == "edit" && action != "add" {
+            // An `add` from a SUBMITTED change is already in the depot, so it is
+            // opened for edit like any other file — only a shelved add is new here.
+            let adding = action == "add" && shelved;
+            if mode == "edit" && !adding {
                 if let Err(e) = p4::run_strict(&conn, &["edit", &depot]) {
                     rep.message = format!("p4 edit failed: {e}");
                     out.push(rep);
@@ -585,7 +624,9 @@ pub async fn review_copy_files(
             if std::path::Path::new(&local).exists() {
                 let _ = crate::commands::make_writable(&local);
             }
-            // `@=change` is the SHELVED revision — the review's content.
+            // `@=change` is the review's content: the shelved revision, and for a
+            // submitted change the revision as of it (checked byte-for-byte
+            // against `@change`, and different from `#head`).
             let spec = format!("{depot}@={change}");
             match p4::run_strict(&conn, &["print", "-o", &local, &spec]) {
                 Ok(_) => {
@@ -597,7 +638,7 @@ pub async fn review_copy_files(
                     continue;
                 }
             }
-            if mode == "edit" && action == "add" {
+            if mode == "edit" && adding {
                 match p4::run_strict(&conn, &["add", &local]) {
                     Ok(_) => {
                         rep.status = "opened".into();

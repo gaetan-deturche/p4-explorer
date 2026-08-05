@@ -285,12 +285,18 @@
     type MenuItem = { label: string; action?: () => void; disabled?: boolean; sep?: boolean };
     const items: MenuItem[] = [];
     // Whether the review maps into this workspace is only knowable from its
-    // shelved files, so it isn't gated here: `review_patch` refuses with the
-    // depot name when nothing maps.
+    // files, so it isn't gated here: `review_patch` refuses with the depot name
+    // when nothing maps. The content changelist is resolved first — a review that
+    // was submitted without approval has no shelf, and its content is the
+    // submitted change instead.
     items.push({
       label: "Apply to workspace…",
       disabled: !r.change,
-      action: () => patches.previewReview(String(r.change), `Review #${r.id} (@${r.change})`),
+      action: async () => {
+        const c = await reviews.content(r);
+        const from = c.files.length ? c.change : r.change;
+        patches.previewReview(String(from), `Review #${r.id} (@${from})`);
+      },
     });
     items.push({ label: "", sep: true });
     items.push({ label: "Open in Swarm", action: () => openReviewPage(r.id) });
@@ -766,9 +772,9 @@
           onSearch={(q: string) => reviews.setSearch(q)}
           onStreamOnly={(v: boolean) => reviews.setStreamOnly(v)}
           onLoadMore={() => void reviews.loadMore()}
-          onFiles={(change) => reviews.files(change)}
-          onDiff={(f, rev, change) => reviews.diff(f, rev, change)}
-          onOpenDiff={(f, rev, change) => reviews.openDiff(f, rev, change)}
+          onContent={(r) => reviews.content(r)}
+          onDiff={(f, rev, change, submitted) => reviews.diff(f, rev, change, submitted)}
+          onOpenDiff={(f, rev, change, submitted) => reviews.openDiff(f, rev, change, submitted)}
           onContext={(r, e) => {
             e.preventDefault();
             reviewCtx = { x: e.clientX, y: e.clientY, r };

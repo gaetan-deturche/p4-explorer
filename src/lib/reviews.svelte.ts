@@ -31,6 +31,10 @@ export const ALL_STATES = [
   "archived",
 ];
 
+/** A review's content: the changelist it lives in, and whether that is a
+ *  submitted change (no shelf left) rather than a shelf. */
+export type ReviewContent = { change: number; submitted: boolean; files: P4Record[] };
+
 export type Role = "author" | "reviewer" | "any";
 export type StatusFilter = "open" | "needsReview" | "needsRevision" | "approved" | "rejected" | "all";
 
@@ -197,23 +201,45 @@ export const reviews = {
     }
   },
 
-  /** Shelved files of a review's current version. */
-  async files(change: string): Promise<P4Record[]> {
-    if (!h || !change || change === "0") return [];
-    return p4.describeShelved(h.conn(), change).then(
-      (recs) => recs.filter((r) => r.depotFile),
-      () => [],
-    );
+  /** Where a review's content actually is, and its files.
+   *
+   *  Normally the shelf on the review's own changelist. But a review that was
+   *  submitted without waiting for approval has no shelf left — submitting
+   *  deletes it — while Swarm still reports it as needing review. For those the
+   *  content is the submitted changelist, so the tab shows that instead of
+   *  claiming the review is empty. */
+  async content(row: ReviewRow): Promise<ReviewContent> {
+    if (!h || !row.change) return { change: row.change, submitted: false, files: [] };
+    const conn = h.conn();
+    const shelved = await p4
+      .describeShelved(conn, String(row.change))
+      .then((recs) => recs.filter((r) => r.depotFile))
+      .catch(() => [] as P4Record[]);
+    if (shelved.length) return { change: row.change, submitted: false, files: shelved };
+
+    // Newest commit first: a review can land in more than one changelist.
+    const commit = [...row.commits].sort((a, b) => b - a)[0];
+    if (!commit) return { change: row.change, submitted: false, files: [] };
+    const files = await p4
+      .describe(conn, String(commit))
+      .then((recs) => recs.filter((r) => r.depotFile))
+      .catch(() => [] as P4Record[]);
+    return { change: commit, submitted: true, files };
   },
 
-  /** Inline diff of one shelved file against its base revision. */
-  diff(file: string, rev: number, change: string): Promise<string> {
-    return p4.diffShelved(h!.conn(), file, rev, change);
+  /** Inline diff of one file, from wherever the content is. */
+  diff(file: string, rev: number, change: string, submitted: boolean): Promise<string> {
+    return submitted
+      ? p4.diff2(h!.conn(), file, rev) // the submitted revision against the one before
+      : p4.diffShelved(h!.conn(), file, rev, change);
   },
 
   /** Open the same diff in the diff window. */
-  openDiff(file: string, rev: number, change: string) {
-    void p4.openDiffShelved(h!.conn(), file, rev, change).catch((e) => h!.setError(String(e)));
+  openDiff(file: string, rev: number, change: string, submitted: boolean) {
+    const go = submitted
+      ? p4.openDiff(h!.conn(), file, rev)
+      : p4.openDiffShelved(h!.conn(), file, rev, change);
+    void go.catch((e) => h!.setError(String(e)));
   },
 
   /** The review's page on the Swarm server, or "" when unconfigured. */
