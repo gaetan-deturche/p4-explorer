@@ -148,7 +148,7 @@ export const reviews = {
     }
   },
 
-  /** Append the next page (the list's "Load more"). */
+  /** Append the next page (the list pages on scroll). */
   async loadMore() {
     if (!h || !h.connected() || !cursor || paging) return;
     const mine = seq;
@@ -168,7 +168,9 @@ export const reviews = {
       rows = [...rows, ...page.reviews.filter((r) => !known.has(r.id))];
       cursor = page.lastSeen;
       if (page.error) error = page.error;
-      version++;
+      // Deliberately NOT bumping `version`: a page is an append, so the rows
+      // already on screen (and their loaded file lists) are still valid. Bumping
+      // it would collapse every expanded review on each scroll.
     } catch (e) {
       if (mine === seq) error = String(e);
     } finally {

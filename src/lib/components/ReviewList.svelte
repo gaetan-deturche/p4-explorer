@@ -149,6 +149,39 @@
     }
   });
 
+  // Infinite scroll, like the History tab: nearing the bottom fetches the next
+  // page. `exhausted` latches when a page adds nothing — Swarm can hand back a
+  // cursor with only rows we already have, and without the latch that would ask
+  // forever.
+  let body = $state<HTMLDivElement>();
+  let exhausted = $state(false);
+  let lenBeforePage = 0;
+  let wasPaging = false;
+  $effect(() => {
+    void refreshKey; // a filter change starts a fresh list
+    exhausted = false;
+  });
+  $effect(() => {
+    if (wasPaging && !paging && rows.length === lenBeforePage) exhausted = true;
+    wasPaging = paging;
+  });
+  function pageIn() {
+    lenBeforePage = rows.length;
+    onLoadMore();
+  }
+  function onScroll(e: Event) {
+    const el = e.currentTarget as HTMLElement;
+    if (!more || paging || exhausted || loading || rows.length === 0) return;
+    if (el.scrollTop + el.clientHeight >= el.scrollHeight - 300) pageIn();
+  }
+  // A page that doesn't fill the view leaves no scrollbar, so the scroll trigger
+  // could never fire — keep pulling until it does.
+  $effect(() => {
+    void rows.length;
+    if (!body || !more || paging || exhausted || loading || rows.length === 0) return;
+    if (body.scrollHeight <= body.clientHeight + 50) pageIn();
+  });
+
   /** `//depot/stream` of a depot path — enough to see which project a review is on. */
   function depotOf(path: string): string {
     return path.split("/").slice(0, 5).join("/");
@@ -228,7 +261,7 @@
     />
   </div>
 
-  <div class="body scroll">
+  <div class="body scroll" bind:this={body} onscroll={onScroll}>
     {#if error}
       <div class="msg err">{error}</div>
     {/if}
@@ -323,10 +356,12 @@
         </div>
       {/each}
 
-      {#if more}
-        <button class="loadmore" disabled={paging} onclick={onLoadMore}>
-          {paging ? "Loading…" : "Load more reviews"}
-        </button>
+      {#if paging}
+        <div class="foot dim">Loading more…</div>
+      {:else if rows.length}
+        <div class="foot dim">
+          {rows.length} review{rows.length === 1 ? "" : "s"}{more && !exhausted ? "" : " — end of list"}
+        </div>
       {/if}
     {/if}
   </div>
@@ -530,20 +565,9 @@
     flex: none;
     font-size: 11px;
   }
-  .loadmore {
-    display: block;
-    width: calc(100% - 20px);
-    margin: 6px 10px 10px;
-    padding: 4px;
-    border: 1px solid var(--border);
-    border-radius: 3px;
-    background: none;
-    color: var(--text-dim);
-    font-size: 12px;
-    cursor: pointer;
-  }
-  .loadmore:hover:not(:disabled) {
-    color: var(--text);
-    background: var(--bg-hover);
+  .foot {
+    padding: 6px 10px 10px;
+    font-size: 11px;
+    text-align: center;
   }
 </style>
