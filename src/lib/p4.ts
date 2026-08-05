@@ -118,7 +118,7 @@ export interface PatchHunkReport {
 export interface PatchFileReport {
   depot: string;
   local: string;
-  status: "clean" | "fuzz" | "already" | "partial" | "conflict" | "missing" | "notext";
+  status: "clean" | "fuzz" | "already" | "partial" | "conflict" | "missing" | "notext" | "binary";
   hunks: PatchHunkReport[];
   applied: number;
   conflicts: number;

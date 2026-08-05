@@ -50,21 +50,101 @@ pub async fn export_patch(
         if targets.is_empty() {
             return Err("No modified files to include in the patch.".into());
         }
+        // Sort the targets: text files go through `p4 diff`; binaries and adds
+        // carry no unified diff, so their WHOLE content is embedded as a
+        // standard `GIT binary patch` literal section instead (adds included —
+        // p4 has no diff for those either, whatever their type).
+        let meta = p4::run(
+            &conn,
+            &{
+                let mut a: Vec<&str> =
+                    vec!["fstat", "-T", "depotFile,headType,type,action,clientFile"];
+                for t in &targets {
+                    a.push(t.as_str());
+                }
+                a
+            },
+        )
+        .unwrap_or_default();
+        let mut text_targets: Vec<String> = Vec::new();
+        let mut embed: Vec<(String, String, bool)> = Vec::new(); // (depot, local, is_add)
+        let mut deletes: Vec<String> = Vec::new();
+        for t in &targets {
+            let r = meta
+                .iter()
+                .find(|r| r.get("depotFile").and_then(|v| v.as_str()) == Some(t.as_str()));
+            let get = |k: &str| {
+                r.and_then(|r| r.get(k)).and_then(|v| v.as_str()).unwrap_or("").to_string()
+            };
+            let action = get("action");
+            if action == "delete" || action == "move/delete" {
+                deletes.push(t.clone());
+                continue;
+            }
+            let is_add = action == "add" || action == "move/add" || get("headType").is_empty();
+            let binary = get("type").contains("binary") || get("headType").contains("binary");
+            let local = get("clientFile");
+            if (is_add || binary) && !local.is_empty() {
+                embed.push((t.clone(), local, is_add));
+            } else {
+                text_targets.push(t.clone());
+            }
+        }
+
         // -f: force the diff even for files that aren't opened, so a patch can
         // be exported from OFFLINE-modified files too (no effect on opened ones).
         // #have is REQUIRED: for a file that isn't opened, a bare `p4 diff -f`
         // compares against #head, so on a workspace that is behind, the patch
         // would also carry the depot changes not yet synced.
-        let specs: Vec<String> = targets.iter().map(|t| format!("{t}#have")).collect();
-        let mut args: Vec<&str> = vec!["diff", "-f", "-du"];
-        for s in &specs {
-            args.push(s.as_str());
+        let mut patch = if text_targets.is_empty() {
+            String::new()
+        } else {
+            let specs: Vec<String> = text_targets.iter().map(|t| format!("{t}#have")).collect();
+            let mut args: Vec<&str> = vec!["diff", "-f", "-du"];
+            for s in &specs {
+                args.push(s.as_str());
+            }
+            p4::run_raw_stdout_diff(&conn, &args)?
+        };
+
+        for (depot, local, is_add) in &embed {
+            let data = std::fs::read(local)
+                .map_err(|e| format!("cannot read {local} for the patch: {e}"))?;
+            // `git apply` verifies the OLD blob id against the file it patches,
+            // so a modified file's section hashes the have revision (one print
+            // per binary; an export is an explicit action). Failing that, an
+            // all-zero id still applies fine in Auger.
+            let old_sha = if *is_add {
+                None
+            } else {
+                let tmp = std::env::temp_dir().join(format!(
+                    "auger-export-have-{}",
+                    std::process::id()
+                ));
+                let tmp_s = tmp.to_string_lossy().to_string();
+                let spec = format!("{depot}#have");
+                let sha = p4::run_raw(&conn, &["print", "-q", "-o", &tmp_s, &spec])
+                    .ok()
+                    .and_then(|_| std::fs::read(&tmp).ok())
+                    .map(|old| super::gitbin::blob_sha(&old));
+                let _ = std::fs::remove_file(&tmp);
+                Some(sha.unwrap_or_else(|| "0".repeat(40)))
+            };
+            patch.push_str(&super::gitbin::encode_section(
+                depot.trim_start_matches('/'),
+                &data,
+                old_sha.as_deref(),
+            ));
         }
-        let patch = p4::run_raw_stdout_diff(&conn, &args)?;
+
         // p4 prints `--- / +++` headers even for an unchanged file, so emptiness
-        // has to be judged on hunks, not on the output being blank.
-        if !patch.lines().any(|l| l.starts_with("@@")) {
-            return Err("No textual diff to export (files may be adds, binaries or unchanged).".into());
+        // has to be judged on hunks/sections, not on the output being blank.
+        if !patch.lines().any(|l| l.starts_with("@@")) && embed.is_empty() {
+            return Err(if deletes.is_empty() {
+                "No diff to export (files may be unchanged).".into()
+            } else {
+                "Only deletes are selected — a patch cannot carry a delete.".into()
+            });
         }
         let picked = app
             .dialog()

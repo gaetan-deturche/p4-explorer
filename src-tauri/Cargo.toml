@@ -42,4 +42,8 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 socket2 = "0.5"
 # System clipboard for the copy-path context actions (no plugin/capability needed).
 arboard = "3"
+# zlib for `GIT binary patch` sections (binary files inside .patch files).
+flate2 = "1"
+# git blob shas for those sections' index lines (`git apply` verifies them).
+sha1_smol = "1"
 

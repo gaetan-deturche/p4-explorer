@@ -44,13 +44,15 @@
     conflict: "conflicts",
     missing: "not found",
     notext: "not text",
+    binary: "binary (replaced whole)",
   };
   function tone(s: PatchFileReport["status"]): string {
-    if (s === "clean") return "ok";
+    if (s === "clean" || s === "binary") return "ok";
     if (s === "fuzz" || s === "already") return "warnish";
     return "bad";
   }
   function hunkSummary(f: PatchFileReport): string {
+    if (f.status === "binary") return ""; // the message carries the size instead
     const n = f.hunks.length;
     if (phase === "done") return `${f.applied}/${n} hunk${n === 1 ? "" : "s"} applied`;
     const fuzz = f.hunks.filter((h) => h.status === "fuzz").length;

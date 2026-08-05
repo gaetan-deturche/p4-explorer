@@ -28,6 +28,16 @@ pub(crate) struct PatchFile {
     /// another machine's workspace maps the same depot path elsewhere.
     pub(crate) local_hint: String,
     pub(crate) hunks: Vec<Hunk>,
+    /// Set for a `GIT binary patch` section: the whole file travels in the
+    /// patch instead of hunks.
+    pub(crate) binary: Option<BinaryPatch>,
+}
+
+pub(crate) enum BinaryPatch {
+    /// The complete new content (git `literal`).
+    Literal(Vec<u8>),
+    /// A section we recognize but cannot apply (git `delta` needs the base).
+    Unsupported(String),
 }
 
 #[derive(serde::Serialize, Clone)]
@@ -228,6 +238,9 @@ fn run_patch(
 }
 
 fn apply_one(conn: &P4Conn, pf: &PatchFile, opts: Option<&ApplyOpts>) -> FileReport {
+    if let Some(bin) = &pf.binary {
+        return apply_binary(conn, pf, bin, opts);
+    }
     let mut rep = FileReport {
         depot: pf.depot.clone(),
         local: String::new(),
@@ -378,6 +391,119 @@ fn apply_one(conn: &P4Conn, pf: &PatchFile, opts: Option<&ApplyOpts>) -> FileRep
     rep
 }
 
+/// Apply (or preview) one `GIT binary patch` section: the whole new file is in
+/// the patch, so this is a write, not a merge — the only outcomes are identical,
+/// replaced, created, or blocked.
+fn apply_binary(conn: &P4Conn, pf: &PatchFile, bin: &BinaryPatch, opts: Option<&ApplyOpts>) -> FileReport {
+    let mut rep = FileReport {
+        depot: pf.depot.clone(),
+        local: String::new(),
+        status: "conflict".into(),
+        hunks: Vec::new(),
+        applied: 0,
+        conflicts: 0,
+        message: String::new(),
+        rej_path: String::new(),
+    };
+    let data = match bin {
+        BinaryPatch::Literal(d) => d,
+        BinaryPatch::Unsupported(msg) => {
+            rep.status = "notext".into();
+            rep.message = msg.clone();
+            return rep;
+        }
+    };
+
+    // Unlike a text hunk, a binary target may legitimately NOT exist yet (the
+    // patch carries an added file), so mapping matters more than existence.
+    let mapped = p4::run(conn, &["where", &pf.depot]).ok().and_then(|recs| {
+        recs.first().and_then(|r| {
+            r.get("path")
+                .or_else(|| r.get("clientFile"))
+                .and_then(|v| v.as_str())
+                .map(String::from)
+        })
+    });
+    let local = match mapped {
+        Some(p) => p,
+        None if std::path::Path::new(&pf.local_hint).is_file() => pf.local_hint.clone(),
+        None => {
+            rep.status = "missing".into();
+            rep.message = "not mapped in this workspace".into();
+            return rep;
+        }
+    };
+    rep.local = local.clone();
+    let exists = std::path::Path::new(&local).is_file();
+
+    if exists && std::fs::read(&local).map(|cur| cur == *data).unwrap_or(false) {
+        rep.status = "already".into();
+        rep.message = "binary — identical content".into();
+        return rep;
+    }
+    rep.status = "binary".into();
+    rep.applied = 1;
+    rep.message = format!(
+        "binary, {}{}",
+        human_size(data.len()),
+        if exists { "" } else { " (new file)" }
+    );
+
+    let Some(opts) = opts else { return rep }; // preview stops here
+
+    if opts.mode == "edit" && exists {
+        let mut args: Vec<&str> = vec!["edit"];
+        if !opts.change.is_empty() {
+            args.push("-c");
+            args.push(&opts.change);
+        }
+        args.push(&pf.depot);
+        if let Err(e) = p4::run_strict(conn, &args) {
+            rep.status = "conflict".into();
+            rep.message = format!("p4 edit failed: {e}");
+            return rep;
+        }
+    }
+    if let Some(dir) = std::path::Path::new(&local).parent() {
+        let _ = std::fs::create_dir_all(dir); // an added file may bring its folder
+    }
+    if exists {
+        if let Err(e) = make_writable(&local) {
+            rep.status = "conflict".into();
+            rep.message = format!("cannot make the file writable: {e}");
+            return rep;
+        }
+    }
+    if let Err(e) = std::fs::write(&local, data) {
+        rep.status = "conflict".into();
+        rep.message = format!("cannot write the file: {e}");
+        return rep;
+    }
+    if opts.mode == "edit" && !exists {
+        let mut args: Vec<&str> = vec!["add"];
+        if !opts.change.is_empty() {
+            args.push("-c");
+            args.push(&opts.change);
+        }
+        args.push(&local);
+        if let Err(e) = p4::run_strict(conn, &args) {
+            rep.message = format!("written, but p4 add failed: {e}");
+        }
+    }
+    rep
+}
+
+/// "162.5 KB"-style size for the report line.
+fn human_size(n: usize) -> String {
+    if n >= 1 << 20 {
+        format!("{:.1} MB", n as f64 / (1 << 20) as f64)
+    } else if n >= 1 << 10 {
+        format!("{:.1} KB", n as f64 / (1 << 10) as f64)
+    } else {
+        format!("{n} bytes")
+    }
+}
+
 enum Placed {
     At { at: usize, loose: bool },
     Already { at: usize },
@@ -508,8 +634,68 @@ pub(crate) fn parse_patch(text: &str) -> Vec<PatchFile> {
     let lines: Vec<&str> = text.split('\n').map(|l| l.strip_suffix('\r').unwrap_or(l)).collect();
     let mut files: Vec<PatchFile> = Vec::new();
     let mut i = 0;
+    // Path from the last `diff --git a/P b/P` line, waiting for its section.
+    let mut git_path: Option<String> = None;
     while i < lines.len() {
         let l = lines[i];
+        if let Some(rest) = l.strip_prefix("diff --git a/") {
+            // Both sides name the same file here, so splitting at " b/" is safe
+            // even for paths with spaces.
+            git_path = rest.split(" b/").next().map(str::to_string);
+            i += 1;
+            continue;
+        }
+        if l == "GIT binary patch" {
+            let path = git_path.take().unwrap_or_default();
+            i += 1;
+            let head = lines.get(i).copied().unwrap_or("");
+            let binary = if let Some(n) = head.strip_prefix("literal ") {
+                let size: usize = n.trim().parse().unwrap_or(0);
+                i += 1;
+                let start = i;
+                while i < lines.len() && !lines[i].trim().is_empty() {
+                    i += 1;
+                }
+                match super::gitbin::decode_literal(size, &lines[start..i]) {
+                    Ok(bytes) => BinaryPatch::Literal(bytes),
+                    Err(e) => BinaryPatch::Unsupported(e),
+                }
+            } else if head.starts_with("delta ") {
+                while i < lines.len() && !lines[i].trim().is_empty() {
+                    i += 1;
+                }
+                BinaryPatch::Unsupported(
+                    "git delta binary — needs the base file; re-export as whole-file (literal)".into(),
+                )
+            } else {
+                BinaryPatch::Unsupported("unrecognized git binary section".into())
+            };
+            // `git diff --binary` appends a REVERSE hunk (for `apply -R`) right
+            // after; skip it — forward application never needs it.
+            let mut j = i;
+            while j < lines.len() && lines[j].trim().is_empty() {
+                j += 1;
+            }
+            if lines
+                .get(j)
+                .is_some_and(|l| l.starts_with("literal ") || l.starts_with("delta "))
+            {
+                j += 1;
+                while j < lines.len() && !lines[j].trim().is_empty() {
+                    j += 1;
+                }
+                i = j;
+            }
+            files.push(PatchFile {
+                // Our exports write the depot path minus its leading slashes;
+                // a repo-relative path from a real git patch stays as a hint.
+                depot: if path.starts_with("//") { path.clone() } else { format!("//{path}") },
+                local_hint: path,
+                hunks: Vec::new(),
+                binary: Some(binary),
+            });
+            continue;
+        }
         if let Some(rest) = l.strip_prefix("--- ") {
             let next = lines.get(i + 1).copied().unwrap_or("");
             if let Some(plus) = next.strip_prefix("+++ ") {
@@ -517,6 +703,7 @@ pub(crate) fn parse_patch(text: &str) -> Vec<PatchFile> {
                     depot: strip_tab(rest).to_string(),
                     local_hint: strip_tab(plus).to_string(),
                     hunks: Vec::new(),
+                    binary: None,
                 });
                 i += 2;
                 continue;
@@ -576,7 +763,7 @@ pub(crate) fn parse_patch(text: &str) -> Vec<PatchFile> {
         }
         i += 1;
     }
-    files.retain(|f| !f.hunks.is_empty());
+    files.retain(|f| !f.hunks.is_empty() || f.binary.is_some());
     files
 }
 
@@ -607,6 +794,69 @@ fn parse_range(l: &str) -> Option<(usize, usize, usize)> {
 
 #[cfg(test)]
 mod tests {
+    // Real `git diff --binary` output for a 500-byte file whose bytes are
+    // ((i*11) & 0xFF) — pins the parser against git itself, not our own encoder.
+    const GIT_FIXTURE: &str = concat!(
+        "diff --git a/newfile.bin b/newfile.bin\n",
+        "new file mode 100644\n",
+        "index 0000000000000000000000000000000000000000..800c7bf716f3fe058072a9535bf05d353caa4a97\n",
+        "GIT binary patch\n",
+        "literal 500\n",
+        "zcmZSJ7E{zQck+!$&Z}(cpS5(u?qe74Jpc5ULs(AJ#NI13A-k-xXZoVGI}V?_`Q-gC\n",
+        "zRsm@>LmT&?*o@-3&MEU(Z9Q=M+QT>BnRq3X^(<Zdqf!g1+a}IgzG?4?%lBS>`OhV)\n",
+        "zpl#;p6P}b?(cCw4$@*PKFWi3i@ejL@tcJ0jXGnZjX+!t4g=@ASI(y^syPqulQmO{l\n",
+        "zZh<lBMYSE1=dIkb|J2n7ufH+!h%4z@IQvDW<X5#$n7wS{p5vG9zWDr)Q$$|N)WJI}\n",
+        "zF{iw#cgEs%JCB^d_4LDUHbEJ6BU_K)xXhCJuBi)FZ##JA`lGi$nE51C^sQV2qSFd%\n",
+        "V+9%Cjv3cLgEB9Z0Wf+0}2LLp>_FDh|\n",
+        "\n",
+        "literal 0\n",
+        "HcmV?d00001\n",
+        "\n"
+    );
+
+    #[test]
+    fn parses_a_real_git_binary_patch() {
+        let files = super::parse_patch(GIT_FIXTURE);
+        assert_eq!(files.len(), 1);
+        let f = &files[0];
+        assert_eq!(f.depot, "//newfile.bin");
+        let Some(super::BinaryPatch::Literal(bytes)) = &f.binary else {
+            panic!("expected a literal binary patch");
+        };
+        assert_eq!(bytes.len(), 500);
+        let expect: Vec<u8> = (0..500u32).map(|i| ((i * 11) & 0xFF) as u8).collect();
+        assert_eq!(*bytes, expect, "content survives base85+zlib from real git output");
+    }
+
+    #[test]
+    fn our_own_export_round_trips_through_the_parser() {
+        let data: Vec<u8> = (0..70001usize).map(|i| ((i * 37) ^ (i >> 3)) as u8).collect();
+        let old = "d".repeat(40);
+        let patch = super::super::gitbin::encode_section(
+            "Curiosity/main/Content/X.uasset",
+            &data,
+            Some(&old),
+        );
+        let files = super::parse_patch(&patch);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].depot, "//Curiosity/main/Content/X.uasset");
+        let Some(super::BinaryPatch::Literal(bytes)) = &files[0].binary else {
+            panic!("expected literal");
+        };
+        assert_eq!(*bytes, data);
+    }
+
+    #[test]
+    fn mixed_patch_keeps_text_and_binary_files_apart() {
+        let text = "--- //d/a.cpp\n+++ //d/a.cpp\n@@ -1,1 +1,1 @@\n-a\n+b\n";
+        let mixed = format!("{text}{GIT_FIXTURE}");
+        let files = super::parse_patch(&mixed);
+        assert_eq!(files.len(), 2);
+        assert!(files[0].binary.is_none());
+        assert_eq!(files[0].hunks.len(), 1);
+        assert!(files[1].binary.is_some());
+    }
+
     use super::*;
 
     const P: &str = "--- //depot/a.txt\t2026-01-01\r\n+++ C:\\ws\\a.txt\t2026-01-01\r\n@@ -2,3 +2,4 @@\r\n b\r\n-c\r\n+C\r\n+extra\r\n d\r\n";

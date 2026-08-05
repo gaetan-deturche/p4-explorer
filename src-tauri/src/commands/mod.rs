@@ -14,6 +14,7 @@ mod clipboard;
 mod diff;
 mod diffwin;
 mod editor;
+mod gitbin;
 mod merge;
 mod patch;
 mod pending;
