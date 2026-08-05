@@ -5,7 +5,7 @@
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { p4, openDiffWindow, type P4Conn, type P4Record, type ReviewInfo } from "$lib/p4";
 import { editor, isUnrealAsset, unrealAssetName } from "$lib/editor.svelte";
-import { cacheGetSync, cacheSet, storeGet, hydrate, storeSet } from "$lib/store.svelte";
+import { cacheGetSync, cacheSet, storeGet, hydrate, storeSet, storeSetMem } from "$lib/store.svelte";
 
 type Hooks = {
   conn: () => P4Conn;
@@ -124,6 +124,94 @@ async function runOfflineLoop() {
   const delay = ran ? (offlineFocused ? OFFLINE_MS_FOCUS : OFFLINE_MS_BG) : 5_000;
   offlineTimer = window.setTimeout(runOfflineLoop, delay);
 }
+
+/** Apply a change to the cached lists straight away and return its undo.
+ *
+ *  p4 can take seconds on a large file, and waiting for the command and the reload
+ *  before touching the UI makes the app look dead. These write only the reactive
+ *  map, never the persisted layers: the view updates on the next frame, the reload
+ *  that follows replaces the guess with the truth, and a failure rolls it back.
+ */
+function forgetFiles(files: string[]): () => void {
+  const client = h?.conn().client;
+  if (!client || !files.length) return () => {};
+  const gone = new Set(files);
+  const undo: (() => void)[] = [];
+
+  for (const row of currentPendingRows()) {
+    const change = String(row.change);
+    const cached = loadClFilesCache(client, change);
+    if (!cached) continue;
+    const kept = cached.filter((f) => !gone.has(String(f.depotFile)));
+    if (kept.length === cached.length) continue;
+    const scope = `p4:clfiles:${client}`;
+    storeSetMem(scope, change, JSON.stringify(kept));
+    undo.push(() => storeSetMem(scope, change, JSON.stringify(cached)));
+  }
+
+  const offline = currentOffline();
+  const keptOffline = offline.filter((o) => !gone.has(String(o.depotFile)));
+  if (keptOffline.length !== offline.length) {
+    storeSetMem("p4:offline", client, JSON.stringify(keptOffline));
+    offlineVer++;
+    undo.push(() => {
+      storeSetMem("p4:offline", client, JSON.stringify(offline));
+      offlineVer++;
+    });
+  }
+  return () => {
+    for (const f of undo) f();
+  };
+}
+
+/** As `forgetFiles`, and also list it under Offline - what `revert -k` produces. */
+function makeOfflineNow(file: string, record: P4Record): () => void {
+  const client = h?.conn().client;
+  const undoForget = forgetFiles([file]);
+  if (!client) return undoForget;
+  const offline = currentOffline();
+  storeSetMem(
+    "p4:offline",
+    client,
+    JSON.stringify([...offline.filter((o) => String(o.depotFile) !== file), record]),
+  );
+  offlineVer++;
+  return () => {
+    undoForget();
+    storeSetMem("p4:offline", client, JSON.stringify(offline));
+    offlineVer++;
+  };
+}
+
+/** Which changelist a file is cached under, "" when it is in none. */
+function currentChangeOf(file: string): string {
+  const client = h?.conn().client;
+  if (!client) return "";
+  for (const row of currentPendingRows()) {
+    const change = String(row.change);
+    const cached = loadClFilesCache(client, change);
+    if (cached?.some((f) => String(f.depotFile) === file)) return change;
+  }
+  return "";
+}
+
+/** Move a file between two changelists' cached lists. */
+function moveFileNow(file: string, from: string, to: string): () => void {
+  const client = h?.conn().client;
+  if (!client) return () => {};
+  const scope = `p4:clfiles:${client}`;
+  const src = loadClFilesCache(client, from);
+  const dst = loadClFilesCache(client, to);
+  const rec = src?.find((f) => String(f.depotFile) === file);
+  if (!src || !rec) return () => {};
+  storeSetMem(scope, from, JSON.stringify(src.filter((f) => f !== rec)));
+  if (dst) storeSetMem(scope, to, JSON.stringify([...dst, rec]));
+  return () => {
+    storeSetMem(scope, from, JSON.stringify(src));
+    if (dst) storeSetMem(scope, to, JSON.stringify(dst));
+  };
+}
+
 
 export const pending = {
   init(hooks: Hooks) {
@@ -305,8 +393,15 @@ export const pending = {
    *  reloads the depot tree + history; skip it for CL-only moves that change no
    *  synced content. Pending is always reloaded in `finally`, so an optimistic UI
    *  update reconciles with the truth on success AND rolls back on error. */
-  async mutate(runFn: () => Promise<unknown>, okNotice: string, opts?: { refresh?: boolean }) {
+  async mutate(
+    runFn: () => Promise<unknown>,
+    okNotice: string,
+    opts?: { refresh?: boolean; optimistic?: () => () => void },
+  ) {
     if (!h || !h.connected() || h.syncing()) return;
+    // Guess the outcome first so the list reacts immediately; the reload in
+    // `finally` reconciles it, and `rollback` undoes the guess if p4 refuses.
+    const rollback = opts?.optimistic?.();
     h.setSyncing(true);
     try {
       await p4.cancelOfflineScan().catch(() => {}); // free its server locks before writing
@@ -314,6 +409,7 @@ export const pending = {
       h.setNotice(okNotice);
       if (opts?.refresh !== false) await h.refresh();
     } catch (e) {
+      rollback?.();
       h.setError(String(e));
     } finally {
       pending.load();
@@ -327,7 +423,7 @@ export const pending = {
     title: string,
     ok: string,
     note: string,
-    opts?: { refresh?: boolean },
+    opts?: { refresh?: boolean; optimistic?: () => () => void },
   ) {
     if (!h || !h.connected() || h.syncing()) return;
     if (!(await h.askConfirm(msg, title, ok))) return;
@@ -436,6 +532,7 @@ export const pending = {
       "Revert file",
       "Revert",
       "File reverted.",
+      { optimistic: () => forgetFiles([file]) },
     );
   },
   /** `p4 revert -k`: un-open the file but leave the edited copy on disk — i.e.
@@ -449,12 +546,24 @@ export const pending = {
       "Make offline",
       "Make offline",
       "File is now an offline change (your edits are still on disk).",
+      {
+        optimistic: () => {
+          const client = h!.conn().client;
+          const rec = currentPendingRows()
+            .flatMap((row) => loadClFilesCache(client, String(row.change)) ?? [])
+            .find((f) => String(f.depotFile) === file);
+          return makeOfflineNow(file, { ...(rec ?? {}), depotFile: file } as P4Record);
+        },
+      },
     );
   },
   reopen(file: string, change: string) {
     const label = change === "default" ? "Default" : "@" + change;
     // CL move only — no synced content changes, so skip the tree/history refresh.
-    pending.mutate(() => p4.reopen(h!.conn(), file, change), `Moved to ${label}.`, { refresh: false });
+    pending.mutate(() => p4.reopen(h!.conn(), file, change), `Moved to ${label}.`, {
+      refresh: false,
+      optimistic: () => moveFileNow(file, currentChangeOf(file), change),
+    });
   },
   moveToNew(file: string, desc: string) {
     pending.mutate(
@@ -566,6 +675,7 @@ export const pending = {
       "Revert files",
       "Revert",
       `Reverted ${n} file${n === 1 ? "" : "s"}.`,
+      { optimistic: () => forgetFiles(files) },
     );
     void pending.scanOffline();
   },
