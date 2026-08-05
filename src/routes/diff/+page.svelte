@@ -239,10 +239,21 @@
     return { from: anchor, to: ds.caret };
   }
 
+  /** Actions that only look: caret, selection, copy. A read-only pane keeps
+   *  these — it is the same editor, it just refuses to change the document. */
+  const READ_ONLY_OK = new Set(["move", "moveLines", "caret", "selectWord", "selectLine", "selectAll", "copy"]);
+
   /** Apply an intent to the document. Identical handling to the resolve window,
    *  because it is the same model. */
   function apply(a: MergeAction) {
-    if (!ds || !editable) return;
+    if (!ds) return;
+    if (!editable) {
+      // Dropping EVERY action here made a click scroll to the top: the caret
+      // never moved, and the pane's reveal() then scrolled to where it still
+      // was — line one. Navigation, selection and copy stay; mutations don't.
+      if (!READ_ONLY_OK.has(a.t)) return;
+      if (a.t === "copy" && a.cut) a = { ...a, cut: false }; // cut writes; degrade to copy
+    }
     const before = ds;
     const sel = selection();
     const edit = (next: DocState, coalesce = false) => {
