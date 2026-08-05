@@ -53,6 +53,9 @@ let search = $state("");
 // On by default: this Swarm serves several projects, and a review from another
 // depot can be read but not applied here.
 let streamOnly = $state(true);
+// Also on by default: a submitted review is settled in practice, whatever state
+// Swarm still shows, and here most open reviews are in that position.
+let hideSubmitted = $state(true);
 let version = $state(0); // bumps when rows change, so children refetch files
 let seq = 0; // discards the answer of a superseded request
 
@@ -101,6 +104,9 @@ export const reviews = {
   get streamOnly() {
     return streamOnly;
   },
+  get hideSubmitted() {
+    return hideSubmitted;
+  },
   /** The stream the filter is scoping to ("" when the workspace has none). */
   get streamPath() {
     return h?.rootPath() ?? "";
@@ -134,6 +140,11 @@ export const reviews = {
     streamOnly = next;
     void reviews.load();
   },
+  setHideSubmitted(next: boolean) {
+    if (next === hideSubmitted) return;
+    hideSubmitted = next;
+    void reviews.load();
+  },
 
   /** Fetch the first page for the current filters. */
   async load() {
@@ -154,6 +165,7 @@ export const reviews = {
         max: PAGE,
         after: 0,
         streamPath: streamOnly ? (h.rootPath() ?? "") : "",
+        hideSubmitted,
       });
       if (mine !== seq) return; // a newer filter already asked
       rows = page.reviews;
@@ -184,6 +196,7 @@ export const reviews = {
         max: PAGE,
         after: cursor,
         streamPath: streamOnly ? (h.rootPath() ?? "") : "",
+        hideSubmitted,
       });
       if (mine !== seq) return; // filters changed under us; that load owns `rows`
       // Swarm can repeat a row across pages when reviews are updated mid-paging.

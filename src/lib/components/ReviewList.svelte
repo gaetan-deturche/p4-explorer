@@ -22,6 +22,7 @@
     search,
     streamOnly,
     streamPath,
+    hideSubmitted,
     me,
     refreshKey,
     contextReview,
@@ -30,6 +31,7 @@
     onRole,
     onSearch,
     onStreamOnly,
+    onHideSubmitted,
     onLoadMore,
     onContent,
     onDiff,
@@ -48,6 +50,7 @@
     search: string;
     streamOnly: boolean;
     streamPath: string; // the stream being scoped to ("" = workspace has none)
+    hideSubmitted: boolean;
     me: string; // the connected user, for the "me" shortcut
     refreshKey: number; // bumps when the list reloads → drop per-review caches
     contextReview: number; // id of the review whose context menu is open
@@ -56,6 +59,7 @@
     onRole: (r: Role) => void;
     onSearch: (q: string) => void;
     onStreamOnly: (v: boolean) => void;
+    onHideSubmitted: (v: boolean) => void;
     onLoadMore: () => void;
     onContent: (r: ReviewRow) => Promise<ReviewContent>;
     onDiff: (depotFile: string, rev: number, change: string, submitted: boolean) => Promise<string>;
@@ -247,6 +251,18 @@
       this stream
     </label>
 
+    <label
+      class="scope"
+      title="Hide reviews whose change was already submitted. Swarm leaves those at Needs Review for good, so they otherwise crowd out the ones still waiting to be read."
+    >
+      <input
+        type="checkbox"
+        checked={hideSubmitted}
+        onchange={(e) => onHideSubmitted(e.currentTarget.checked)}
+      />
+      hide submitted
+    </label>
+
     <select
       class="pick"
       title="Whether the user below is the review's author or one of its reviewers"
@@ -303,7 +319,9 @@
       <div class="msg dim">
         No {status === "all" ? "" : STATUSES.find((s) => s.key === status)?.label.toLowerCase()} reviews{user
           ? ` with ${user} as ${role}`
-          : ""}{search ? ` matching “${search}”` : ""}{streamOnly && streamPath ? ` on ${streamPath}` : ""}.
+          : ""}{search ? ` matching “${search}”` : ""}{streamOnly && streamPath ? ` on ${streamPath}` : ""}{hideSubmitted
+          ? " that aren't submitted yet"
+          : ""}.
       </div>
     {:else}
       {#each rows as r (r.id)}

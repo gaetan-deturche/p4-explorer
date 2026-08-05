@@ -66,6 +66,10 @@ pub struct ReviewQuery {
     /// reviews whose changelists live under it are returned. Empty = every review
     /// the server has, whatever depot it is on.
     pub stream_path: String,
+    /// Drop reviews that already went in (a non-empty `commits`). Swarm keeps
+    /// those at needsReview forever, so they otherwise crowd out the ones that
+    /// still want reading.
+    pub hide_submitted: bool,
 }
 
 /// Human label for a Swarm review state.
@@ -160,8 +164,13 @@ pub async fn swarm_reviews(conn: P4Conn, query: ReviewQuery) -> Result<ReviewPag
         };
 
         let max = query.max.clamp(1, 200);
+        // Filtering happens here, not on the server, so ask for more per request
+        // than the caller wants: a 100-row page costs the same as a 25-row one,
+        // and most of it is thrown away.
+        let filtering = !query.stream_path.is_empty() || query.hide_submitted;
+        let page_size = if filtering { 100 } else { max };
         let page_url = |after: u64| {
-            let mut url = format!("{base}/api/v9/reviews?max={max}");
+            let mut url = format!("{base}/api/v9/reviews?max={page_size}");
             for s in &query.states {
                 url.push_str(&format!("&state[]={}", esc(s)));
             }
@@ -215,6 +224,16 @@ pub async fn swarm_reviews(conn: P4Conn, query: ReviewQuery) -> Result<ReviewPag
                 .and_then(|v| v.get("change"))
                 .and_then(|v| v.as_u64())
                 .unwrap_or(id);
+
+            // Already submitted: the review is done in practice, whatever Swarm
+            // still calls it.
+            if query.hide_submitted
+                && r.get("commits")
+                    .and_then(|v| v.as_array())
+                    .is_some_and(|a| !a.is_empty())
+            {
+                return None;
+            }
 
             if let Some(scope) = &scope {
                 // Any of the review's changelists being in the stream places it:
@@ -307,7 +326,7 @@ pub async fn swarm_reviews(conn: P4Conn, query: ReviewQuery) -> Result<ReviewPag
             out.extend(raw.iter().filter_map(&parse_row));
             // `lastSeen` is Swarm's cursor. It repeats on the final page, so a
             // short page is what actually ends the paging.
-            let more = raw.len() as u32 == max;
+            let more = raw.len() as u32 == page_size;
             last_seen = if more {
                 body.get("lastSeen").and_then(|v| v.as_u64()).unwrap_or(0)
             } else {

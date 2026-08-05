@@ -762,6 +762,7 @@
           role={reviews.role}
           search={reviews.search}
           streamOnly={reviews.streamOnly}
+          hideSubmitted={reviews.hideSubmitted}
           streamPath={reviews.streamPath}
           me={conn.user}
           refreshKey={reviews.version}
@@ -771,6 +772,7 @@
           onRole={(r: Role) => reviews.setRole(r)}
           onSearch={(q: string) => reviews.setSearch(q)}
           onStreamOnly={(v: boolean) => reviews.setStreamOnly(v)}
+          onHideSubmitted={(v: boolean) => reviews.setHideSubmitted(v)}
           onLoadMore={() => void reviews.loadMore()}
           onContent={(r) => reviews.content(r)}
           onDiff={(f, rev, change, submitted) => reviews.diff(f, rev, change, submitted)}

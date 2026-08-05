@@ -85,6 +85,8 @@ export interface ReviewQuery {
   after: number;
   /** Current stream (`//Curiosity/main`); only reviews on it. "" = every depot. */
   streamPath: string;
+  /** Drop reviews that already went in (Swarm leaves those at needsReview). */
+  hideSubmitted: boolean;
 }
 
 /** A review's shelf written out as a patch, plus what it could not carry.
