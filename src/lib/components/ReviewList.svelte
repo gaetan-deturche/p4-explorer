@@ -553,12 +553,13 @@
   }
   .frow {
     display: flex;
-    align-items: center;
-    gap: 6px;
+    align-items: baseline;
+    gap: 5px;
     padding: 2px 10px 2px 20px;
     font-size: 12px;
     white-space: nowrap;
     cursor: default;
+    user-select: none;
   }
   .frow:hover {
     background: var(--bg-hover);
@@ -575,9 +576,8 @@
   }
   .act {
     flex: none;
-    width: 52px;
-    font-size: 10px;
-    color: var(--text-dim);
+    text-transform: capitalize;
+    width: 4rem;
   }
   .act-add {
     color: var(--have);
@@ -585,15 +585,27 @@
   .act-delete {
     color: var(--warn);
   }
+  .act-edit {
+    color: var(--accent);
+  }
   .fpath {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
     flex: 1;
     min-width: 0;
     overflow: hidden;
-    text-overflow: ellipsis;
   }
-  .pdir {
-    font-size: 11px;
-    margin-left: 6px;
+  .fpath .pfile {
+    flex: none;
+    white-space: nowrap;
+  }
+  .fpath .pdir {
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .ftype {
     flex: none;
