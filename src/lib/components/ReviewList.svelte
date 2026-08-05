@@ -20,6 +20,8 @@
     user,
     role,
     search,
+    streamOnly,
+    streamPath,
     me,
     refreshKey,
     contextReview,
@@ -27,6 +29,7 @@
     onUser,
     onRole,
     onSearch,
+    onStreamOnly,
     onLoadMore,
     onFiles,
     onDiff,
@@ -43,6 +46,8 @@
     user: string;
     role: Role;
     search: string;
+    streamOnly: boolean;
+    streamPath: string; // the stream being scoped to ("" = workspace has none)
     me: string; // the connected user, for the "me" shortcut
     refreshKey: number; // bumps when the list reloads → drop per-review caches
     contextReview: number; // id of the review whose context menu is open
@@ -50,6 +55,7 @@
     onUser: (u: string) => void;
     onRole: (r: Role) => void;
     onSearch: (q: string) => void;
+    onStreamOnly: (v: boolean) => void;
     onLoadMore: () => void;
     onFiles: (change: string) => Promise<P4Record[]>;
     onDiff: (depotFile: string, rev: number, change: string) => Promise<string>;
@@ -215,6 +221,21 @@
       {/each}
     </select>
 
+    <label
+      class="scope"
+      title={streamPath
+        ? `Only reviews with a changelist under ${streamPath} — this Swarm serves several projects, and a review from another depot cannot be applied here`
+        : "This workspace has no stream, so there is nothing to scope to"}
+    >
+      <input
+        type="checkbox"
+        checked={streamOnly}
+        disabled={!streamPath}
+        onchange={(e) => onStreamOnly(e.currentTarget.checked)}
+      />
+      this stream
+    </label>
+
     <select
       class="pick"
       title="Whether the user below is the review's author or one of its reviewers"
@@ -271,7 +292,7 @@
       <div class="msg dim">
         No {status === "all" ? "" : STATUSES.find((s) => s.key === status)?.label.toLowerCase()} reviews{user
           ? ` with ${user} as ${role}`
-          : ""}{search ? ` matching “${search}”` : ""}.
+          : ""}{search ? ` matching “${search}”` : ""}{streamOnly && streamPath ? ` on ${streamPath}` : ""}.
       </div>
     {:else}
       {#each rows as r (r.id)}
@@ -400,6 +421,19 @@
   .search {
     flex: 1;
     min-width: 80px;
+  }
+  .scope {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    flex: none;
+    font-size: 11px;
+    color: var(--text-dim);
+    white-space: nowrap;
+    cursor: pointer;
+  }
+  .scope input {
+    margin: 0;
   }
   .mini {
     border: 1px solid var(--border);

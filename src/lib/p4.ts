@@ -79,6 +79,8 @@ export interface ReviewQuery {
   keywords: string;
   max: number;
   after: number;
+  /** Current stream (`//Curiosity/main`); only reviews on it. "" = every depot. */
+  streamPath: string;
 }
 
 /** A review's shelf written out as a patch, plus what it could not carry.

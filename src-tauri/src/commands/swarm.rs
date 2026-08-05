@@ -58,6 +58,10 @@ pub struct ReviewQuery {
     pub keywords: String,
     pub max: u32,
     pub after: u64,
+    /// Depot path of the current stream (e.g. `//Curiosity/main`). When set, only
+    /// reviews whose changelists live under it are returned. Empty = every review
+    /// the server has, whatever depot it is on.
+    pub stream_path: String,
 }
 
 /// Human label for a Swarm review state.
@@ -106,6 +110,33 @@ fn esc(s: &str) -> String {
     out
 }
 
+/// Every changelist under `path` that could belong to a review: the shelved ones
+/// (a review version is a shelf, including Swarm's own shadow changelists) plus
+/// recent submitted ones (a committed review points at those instead).
+///
+/// This is how a review is placed in a stream at all: Swarm's list endpoint
+/// returns no stream, and asking it per review would be a round-trip each. One
+/// `p4 changes` answers it for two thousand changelists in a fraction of a second.
+fn changes_under(conn: &P4Conn, path: &str) -> std::collections::HashSet<u64> {
+    let mut out = std::collections::HashSet::new();
+    let spec = format!("{}/...", path.trim_end_matches('/'));
+    for args in [
+        vec!["changes", "-s", "shelved", "-m", "2000", spec.as_str()],
+        vec!["changes", "-m", "2000", spec.as_str()],
+    ] {
+        if let Ok(recs) = p4::run(conn, &args) {
+            for r in &recs {
+                if let Some(c) = r.get("change").and_then(|v| v.as_str()) {
+                    if let Ok(n) = c.parse::<u64>() {
+                        out.insert(n);
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
 /// A page of reviews matching `query`. Errors are reported in the page rather
 /// than thrown, so the tab can say *why* it is empty.
 #[tauri::command]
@@ -125,27 +156,30 @@ pub async fn swarm_reviews(conn: P4Conn, query: ReviewQuery) -> Result<ReviewPag
         };
 
         let max = query.max.clamp(1, 200);
-        let mut url = format!("{base}/api/v9/reviews?max={max}");
-        for s in &query.states {
-            url.push_str(&format!("&state[]={}", esc(s)));
-        }
-        if !query.user.is_empty() {
-            match query.role.as_str() {
-                "author" => url.push_str(&format!("&author[]={}", esc(&query.user))),
-                "reviewer" => url.push_str(&format!("&participants[]={}", esc(&query.user))),
-                // "any": Swarm ANDs distinct filters, so asking for both at once
-                // would return only reviews the user authored AND reviews on
-                // themselves. Authored is the useful half; the role toggle is
-                // there for the other one.
-                _ => url.push_str(&format!("&author[]={}", esc(&query.user))),
+        let page_url = |after: u64| {
+            let mut url = format!("{base}/api/v9/reviews?max={max}");
+            for s in &query.states {
+                url.push_str(&format!("&state[]={}", esc(s)));
             }
-        }
-        if !query.keywords.is_empty() {
-            url.push_str(&format!("&keywords={}", esc(&query.keywords)));
-        }
-        if query.after > 0 {
-            url.push_str(&format!("&after={}", query.after));
-        }
+            if !query.user.is_empty() {
+                match query.role.as_str() {
+                    "author" => url.push_str(&format!("&author[]={}", esc(&query.user))),
+                    "reviewer" => url.push_str(&format!("&participants[]={}", esc(&query.user))),
+                    // "any": Swarm ANDs distinct filters, so asking for both at once
+                    // would return only reviews the user authored AND reviews on
+                    // themselves. Authored is the useful half; the role toggle is
+                    // there for the other one.
+                    _ => url.push_str(&format!("&author[]={}", esc(&query.user))),
+                }
+            }
+            if !query.keywords.is_empty() {
+                url.push_str(&format!("&keywords={}", esc(&query.keywords)));
+            }
+            if after > 0 {
+                url.push_str(&format!("&after={}", after));
+            }
+            url
+        };
 
         let client = match reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(20))
@@ -154,42 +188,17 @@ pub async fn swarm_reviews(conn: P4Conn, query: ReviewQuery) -> Result<ReviewPag
             Ok(c) => c,
             Err(e) => return Ok(empty(&format!("HTTP client failed: {e}"))),
         };
-        let resp = match client.get(&url).basic_auth(&conn.user, Some(&ticket)).send() {
-            Ok(r) if r.status().is_success() => r,
-            Ok(r) => {
-                let code = r.status().as_u16();
-                return Ok(empty(&match code {
-                    401 | 403 => "Swarm refused the P4 ticket (401) — try logging in again.".into(),
-                    _ => format!("Swarm returned HTTP {code}."),
-                }));
-            }
-            Err(e) => return Ok(empty(&format!("Swarm is unreachable: {e}"))),
+        // Which changelists belong to this stream (empty set = no stream filter).
+        let scope = if query.stream_path.is_empty() {
+            None
+        } else {
+            Some(changes_under(&conn, &query.stream_path))
         };
-        let body: serde_json::Value = match resp.json() {
-            Ok(v) => v,
-            Err(e) => return Ok(empty(&format!("Swarm sent something unreadable: {e}"))),
-        };
-        if let Some(err) = body.get("error").and_then(|v| v.as_str()) {
-            return Ok(empty(&format!("Swarm: {err}")));
-        }
 
-        let mut out: Vec<ReviewRow> = Vec::new();
-        for r in body
-            .get("reviews")
-            .and_then(|v| v.as_array())
-            .map(|a| a.as_slice())
-            .unwrap_or_default()
-        {
-            let state = r
-                .get("state")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let author = r
-                .get("author")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
+        // One review row, or None when the stream filter rejects it.
+        let parse_row = |r: &serde_json::Value| -> Option<ReviewRow> {
+            let state = r.get("state").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let author = r.get("author").and_then(|v| v.as_str()).unwrap_or("").to_string();
             let versions = r
                 .get("versions")
                 .and_then(|v| v.as_array())
@@ -202,6 +211,26 @@ pub async fn swarm_reviews(conn: P4Conn, query: ReviewQuery) -> Result<ReviewPag
                 .and_then(|v| v.get("change"))
                 .and_then(|v| v.as_u64())
                 .unwrap_or(id);
+
+            if let Some(scope) = &scope {
+                // Any of the review's changelists being in the stream places it:
+                // `id` is Swarm's own shadow changelist, `changes` the author's
+                // (and each version's), `commits` the submitted ones once it lands.
+                let nums = |key: &str| -> Vec<u64> {
+                    r.get(key)
+                        .and_then(|v| v.as_array())
+                        .map(|a| a.iter().filter_map(|v| v.as_u64()).collect())
+                        .unwrap_or_default()
+                };
+                let mine = std::iter::once(id)
+                    .chain(std::iter::once(change))
+                    .chain(nums("changes"))
+                    .chain(nums("commits"));
+                if !mine.into_iter().any(|c| scope.contains(&c)) {
+                    return None;
+                }
+            }
+
             let mut reviewers: Vec<String> = r
                 .get("participants")
                 .and_then(|v| v.as_array())
@@ -215,7 +244,7 @@ pub async fn swarm_reviews(conn: P4Conn, query: ReviewQuery) -> Result<ReviewPag
                 .unwrap_or_default();
             reviewers.sort();
             reviewers.dedup();
-            out.push(ReviewRow {
+            Some(ReviewRow {
                 id,
                 state_label: state_label(&state),
                 state,
@@ -231,15 +260,58 @@ pub async fn swarm_reviews(conn: P4Conn, query: ReviewQuery) -> Result<ReviewPag
                 change,
                 pending: r.get("pending").and_then(|v| v.as_bool()).unwrap_or(false),
                 reviewers,
-            });
-        }
-        // `lastSeen` is Swarm's cursor. It keeps returning the same value on the
-        // final page, so a short page is what actually ends the paging.
-        let last_seen = if out.len() as u32 == max {
-            body.get("lastSeen").and_then(|v| v.as_u64()).unwrap_or(0)
-        } else {
-            0
+            })
         };
+
+        // With a stream filter most of a server page can be for other depots, so
+        // keep pulling until the caller has a screenful. Bounded: a filter that
+        // matches nothing must not turn one request into an unbounded crawl.
+        const MAX_FETCHES: u32 = 8;
+        let mut out: Vec<ReviewRow> = Vec::new();
+        let mut after = query.after;
+        let mut last_seen = 0u64;
+        for _ in 0..MAX_FETCHES {
+            let url = page_url(after);
+            let resp = match client.get(&url).basic_auth(&conn.user, Some(&ticket)).send() {
+                Ok(r) if r.status().is_success() => r,
+                Ok(r) => {
+                    let code = r.status().as_u16();
+                    return Ok(empty(&match code {
+                        401 | 403 => "Swarm refused the P4 ticket (401) — try logging in again.".into(),
+                        _ => format!("Swarm returned HTTP {code}."),
+                    }));
+                }
+                Err(e) => return Ok(empty(&format!("Swarm is unreachable: {e}"))),
+            };
+            let body: serde_json::Value = match resp.json() {
+                Ok(v) => v,
+                Err(e) => return Ok(empty(&format!("Swarm sent something unreadable: {e}"))),
+            };
+            if let Some(err) = body.get("error").and_then(|v| v.as_str()) {
+                return Ok(empty(&format!("Swarm: {err}")));
+            }
+            let raw = body
+                .get("reviews")
+                .and_then(|v| v.as_array())
+                .map(|a| a.as_slice())
+                .unwrap_or_default();
+            out.extend(raw.iter().filter_map(&parse_row));
+            // `lastSeen` is Swarm's cursor. It repeats on the final page, so a
+            // short page is what actually ends the paging.
+            let more = raw.len() as u32 == max;
+            last_seen = if more {
+                body.get("lastSeen").and_then(|v| v.as_u64()).unwrap_or(0)
+            } else {
+                0
+            };
+            if !more || out.len() as u32 >= max {
+                break;
+            }
+            after = last_seen;
+            if after == 0 {
+                break;
+            }
+        }
         Ok(ReviewPage {
             reviews: out,
             last_seen,

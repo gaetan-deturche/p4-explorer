@@ -16,6 +16,8 @@ type Hooks = {
   conn: () => P4Conn;
   connected: () => boolean;
   setError: (m: string) => void;
+  /** Depot path of the workspace's stream, for the "this stream only" filter. */
+  rootPath: () => string;
 };
 
 /** Swarm states that count as "still open" — what the tab shows by default. */
@@ -44,6 +46,9 @@ let status = $state<StatusFilter>("open");
 let user = $state("");
 let role = $state<Role>("author");
 let search = $state("");
+// On by default: this Swarm serves several projects, and a review from another
+// depot can be read but not applied here.
+let streamOnly = $state(true);
 let version = $state(0); // bumps when rows change, so children refetch files
 let seq = 0; // discards the answer of a superseded request
 
@@ -89,6 +94,13 @@ export const reviews = {
   get search() {
     return search;
   },
+  get streamOnly() {
+    return streamOnly;
+  },
+  /** The stream the filter is scoping to ("" when the workspace has none). */
+  get streamPath() {
+    return h?.rootPath() ?? "";
+  },
 
   /** Change a filter and reload. Every setter goes through here so a filter can
    *  never be shown without the list it implies. */
@@ -113,6 +125,11 @@ export const reviews = {
     search = next;
     void reviews.load();
   },
+  setStreamOnly(next: boolean) {
+    if (next === streamOnly) return;
+    streamOnly = next;
+    void reviews.load();
+  },
 
   /** Fetch the first page for the current filters. */
   async load() {
@@ -132,6 +149,7 @@ export const reviews = {
         keywords: search.trim(),
         max: PAGE,
         after: 0,
+        streamPath: streamOnly ? (h.rootPath() ?? "") : "",
       });
       if (mine !== seq) return; // a newer filter already asked
       rows = page.reviews;
@@ -161,6 +179,7 @@ export const reviews = {
         keywords: search.trim(),
         max: PAGE,
         after: cursor,
+        streamPath: streamOnly ? (h.rootPath() ?? "") : "",
       });
       if (mine !== seq) return; // filters changed under us; that load owns `rows`
       // Swarm can repeat a row across pages when reviews are updated mid-paging.

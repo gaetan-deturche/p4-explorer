@@ -188,8 +188,11 @@
   });
   // Reviews come from the server, so the tab needs a load when it becomes the
   // active one (including restored at startup) and after a (re)connect — there is
-  // no local cache to paint in the meantime.
+  // no local cache to paint in the meantime. `rootPath` is a dependency too: it
+  // scopes the list, so switching stream must re-ask rather than keep the other
+  // stream's reviews on screen.
   $effect(() => {
+    void browse.rootPath;
     if (centerTab === "reviews" && connection.connected) void reviews.load();
   });
 
@@ -544,6 +547,7 @@
       conn: () => conn,
       connected: () => connection.connected,
       setError,
+      rootPath: () => browse.rootPath,
     });
     patches.init({
       conn: () => conn,
@@ -751,6 +755,8 @@
           user={reviews.user}
           role={reviews.role}
           search={reviews.search}
+          streamOnly={reviews.streamOnly}
+          streamPath={reviews.streamPath}
           me={conn.user}
           refreshKey={reviews.version}
           contextReview={reviewCtx?.r.id ?? 0}
@@ -758,6 +764,7 @@
           onUser={(u: string) => reviews.setUser(u)}
           onRole={(r: Role) => reviews.setRole(r)}
           onSearch={(q: string) => reviews.setSearch(q)}
+          onStreamOnly={(v: boolean) => reviews.setStreamOnly(v)}
           onLoadMore={() => void reviews.loadMore()}
           onFiles={(change) => reviews.files(change)}
           onDiff={(f, rev, change) => reviews.diff(f, rev, change)}
