@@ -10,8 +10,9 @@
 //! shelved changelist, so `describe -S` and the shelved-diff path already in the
 //! app serve them.
 
-import { p4, openDiffWindow, type P4Conn, type P4Record, type ReviewRow } from "$lib/p4";
-import { editor, isUnrealAsset, unrealAssetName } from "$lib/editor.svelte";
+import { p4, type P4Conn, type P4Record, type ReviewRow } from "$lib/p4";
+import { openDiff as openDiffFor } from "$lib/opendiff";
+import { cacheGetSync, cacheSet, hydrate, storeGet, storeSet } from "$lib/store.svelte";
 
 type Hooks = {
   conn: () => P4Conn;
@@ -60,6 +61,15 @@ let streamOnly = $state(true);
 let hideSubmitted = $state(true);
 let version = $state(0); // bumps when rows change, so children refetch files
 let seq = 0; // discards the answer of a superseded request
+
+/** One store key per filter combination, so each revisited view paints from its
+ *  own cache. The scope is per client (a review list is server+user specific). */
+function cacheScope(): string {
+  return `p4:reviews:${h?.conn().client ?? ""}`;
+}
+function fingerprint(): string {
+  return [status, user, role, search.trim(), streamOnly ? "s" : "", hideSubmitted ? "h" : ""].join("|");
+}
 
 /** The `state[]` values a status filter maps to. */
 function statesFor(f: StatusFilter): string[] {
@@ -156,7 +166,24 @@ export const reviews = {
       return;
     }
     const mine = ++seq;
-    loading = true;
+    // Paint the cached list for this exact filter set before the round-trip —
+    // Swarm answers in ~100ms but p4-backed setups deserve the same instant
+    // paint every other tab gets; the fetch below reconciles.
+    const scope = cacheScope();
+    const fp = fingerprint();
+    hydrate(scope, fp);
+    const cached = storeGet(scope, fp);
+    if (cached) {
+      try {
+        const c = JSON.parse(cached) as { rows: ReviewRow[]; cursor: number };
+        rows = c.rows;
+        cursor = c.cursor;
+        version++;
+      } catch {
+        /* corrupt cache — the fetch below replaces it */
+      }
+    }
+    loading = !cached; // with a cached list on screen, refresh silently
     error = "";
     try {
       const page = await p4.swarmReviews(h.conn(), {
@@ -173,6 +200,7 @@ export const reviews = {
       rows = page.reviews;
       cursor = page.lastSeen;
       error = page.error;
+      if (!page.error) storeSet(scope, fp, JSON.stringify({ rows, cursor }));
       version++;
     } catch (e) {
       if (mine !== seq) return;
@@ -206,6 +234,7 @@ export const reviews = {
       rows = [...rows, ...page.reviews.filter((r) => !known.has(r.id))];
       cursor = page.lastSeen;
       if (page.error) error = page.error;
+      storeSet(cacheScope(), fingerprint(), JSON.stringify({ rows, cursor }));
       // Deliberately NOT bumping `version`: a page is an append, so the rows
       // already on screen (and their loaded file lists) are still valid. Bumping
       // it would collapse every expanded review on each scroll.
@@ -223,6 +252,19 @@ export const reviews = {
    *  deletes it — while Swarm still reports it as needing review. For those the
    *  content is the submitted changelist, so the tab shows that instead of
    *  claiming the review is empty. */
+  /** The cached content of a review, or undefined when never fetched. Lets the
+   *  list paint an expansion instantly while `content` reconciles. */
+  contentCached(row: ReviewRow): ReviewContent | undefined {
+    if (!h || !row.change) return undefined;
+    const json = cacheGetSync(`p4:rvcontent:${h.conn().client}`, String(row.change));
+    if (json === null) return undefined;
+    try {
+      return JSON.parse(json) as ReviewContent;
+    } catch {
+      return undefined;
+    }
+  },
+
   async content(row: ReviewRow): Promise<ReviewContent> {
     if (!h || !row.change) return { change: row.change, submitted: false, files: [] };
     const conn = h.conn();
@@ -230,7 +272,11 @@ export const reviews = {
       .describeShelved(conn, String(row.change))
       .then((recs) => recs.filter((r) => r.depotFile))
       .catch(() => [] as P4Record[]);
-    if (shelved.length) return { change: row.change, submitted: false, files: shelved };
+    const save = (c: ReviewContent): ReviewContent => {
+      cacheSet(`p4:rvcontent:${conn.client}`, String(row.change), JSON.stringify(c));
+      return c;
+    };
+    if (shelved.length) return save({ change: row.change, submitted: false, files: shelved });
 
     // Newest commit first: a review can land in more than one changelist.
     const commit = [...row.commits].sort((a, b) => b - a)[0];
@@ -239,7 +285,9 @@ export const reviews = {
       .describe(conn, String(commit))
       .then((recs) => recs.filter((r) => r.depotFile))
       .catch(() => [] as P4Record[]);
-    return { change: commit, submitted: true, files };
+    // An empty result is not cached: it may be a transient p4 error, and a
+    // stale "nothing here" is worse than refetching next time.
+    return files.length ? save({ change: commit, submitted: true, files }) : { change: commit, submitted: true, files };
   },
 
   /** Inline diff of one file, from wherever the content is. */
@@ -253,42 +301,12 @@ export const reviews = {
    *  the in-app diff window or the external P4DIFF tool, exactly as the History
    *  and Pending tabs do. The two sides come from the shelf or from the submitted
    *  revision, depending on where this review's content is. */
-  async openDiff(file: string, rev: number, change: string, submitted: boolean) {
-    const conn = h!.conn();
-    const pair = () =>
-      submitted ? p4.diffPairRev(conn, file, rev) : p4.diffPairShelved(conn, file, rev, change);
-    try {
-      if (isUnrealAsset(file)) {
-        h!.setNotice("Opening Unreal diff…", 15000); // instant feedback; replaced on completion
-        const p = await pair();
-        const mode = await p4.openUnrealDiff(
-          conn,
-          p.left,
-          p.right,
-          unrealAssetName(file),
-          p.leftLabel,
-          p.rightLabel,
-        );
-        h!.setNotice(
-          mode === "nocompare"
-            ? // Empty counterpart: the asset is new (or gone) in this change, so
-              // there is nothing for Unreal's asset diff to compare.
-              "No earlier revision of this asset to compare."
-            : mode === "remote"
-              ? "Diff opened in the running Unreal Editor."
-              : "Launching Unreal Editor for the diff — this takes a moment…",
-          8000,
-        );
-      } else if (editor.diffTool === "inapp") {
-        await openDiffWindow(await pair());
-      } else if (submitted) {
-        await p4.openDiff(conn, file, rev);
-      } else {
-        await p4.openDiffShelved(conn, file, rev, change);
-      }
-    } catch (e) {
-      h!.setNotice(String(e), 5000);
-    }
+  openDiff(file: string, rev: number, change: string, submitted: boolean) {
+    return openDiffFor(
+      h!.conn(),
+      submitted ? { kind: "rev", file, rev } : { kind: "shelved", file, rev, change },
+      h!.setNotice,
+    );
   },
 
   /** The review's page on the Swarm server, or "" when unconfigured. */

@@ -776,6 +776,7 @@
           onHideSubmitted={(v: boolean) => reviews.setHideSubmitted(v)}
           onLoadMore={() => void reviews.loadMore()}
           onContent={(r) => reviews.content(r)}
+          onContentCached={(r) => reviews.contentCached(r)}
           onDiff={(f, rev, change, submitted) => reviews.diff(f, rev, change, submitted)}
           onOpenDiff={(f, rev, change, submitted) => reviews.openDiff(f, rev, change, submitted)}
           onContext={(r, e) => {

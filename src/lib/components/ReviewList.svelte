@@ -34,6 +34,7 @@
     onHideSubmitted,
     onLoadMore,
     onContent,
+    onContentCached,
     onDiff,
     onOpenDiff,
     onContext,
@@ -62,6 +63,8 @@
     onHideSubmitted: (v: boolean) => void;
     onLoadMore: () => void;
     onContent: (r: ReviewRow) => Promise<ReviewContent>;
+    /** Cached content (instant); undefined = never fetched (show loading). */
+    onContentCached: (r: ReviewRow) => ReviewContent | undefined;
     onDiff: (depotFile: string, rev: number, change: string, submitted: boolean) => Promise<string>;
     onOpenDiff: (depotFile: string, rev: number, change: string, submitted: boolean) => void;
     onContext: (r: ReviewRow, e: MouseEvent) => void;
@@ -110,7 +113,12 @@
       exp[r.id] = { open: true, loading: false, files: [], change: 0, submitted: false };
       return;
     }
-    exp[r.id] = { open: true, loading: true, files: [], change: r.change, submitted: false };
+    // Stale-while-revalidate, like the Pending tab's changelists: paint the
+    // cached files instantly, then let the fetch reconcile.
+    const cached = onContentCached(r);
+    exp[r.id] = cached
+      ? { open: true, loading: false, ...cached }
+      : { open: true, loading: true, files: [], change: r.change, submitted: false };
     const c = await onContent(r);
     exp[r.id] = { open: exp[r.id]?.open ?? true, loading: false, ...c };
   }
