@@ -45,6 +45,59 @@ export interface LocalDir {
   files: string[];
 }
 
+/** One row of the Swarm review list. */
+export interface ReviewRow {
+  id: number;
+  state: string;
+  stateLabel: string;
+  author: string;
+  description: string;
+  created: number;
+  updated: number;
+  /** Changelist holding the current shelf: what to describe/diff/apply. Swarm's
+   *  list endpoint returns no version list, and the review id is itself the
+   *  `swarm`-owned changelist tracking the latest version. */
+  change: number;
+  pending: boolean;
+  reviewers: string[];
+}
+
+/** A page of reviews. `error` is set instead of throwing, so the tab can say
+ *  why it is empty rather than showing a bare "no reviews". */
+export interface ReviewPage {
+  reviews: ReviewRow[];
+  lastSeen: number; // cursor for the next page; 0 = end
+  error: string;
+}
+
+/** What to ask Swarm for. `role` decides whether `user` is the author or a
+ *  participant (Swarm ANDs unrelated filters, so it has to be one or the other). */
+export interface ReviewQuery {
+  states: string[];
+  user: string;
+  role: "author" | "reviewer" | "any";
+  keywords: string;
+  max: number;
+  after: number;
+}
+
+/** A review's shelf written out as a patch, plus what it could not carry.
+ *  `skipped` files are copied verbatim instead (binaries and adds). */
+export interface ReviewPatch {
+  path: string;
+  files: number;
+  skipped: string[];
+}
+
+/** What happened to one file copied straight from a review's shelf. */
+export interface CopyResult {
+  depot: string;
+  local: string;
+  action: string;
+  status: "copied" | "opened" | "skipped" | "failed";
+  message: string;
+}
+
 /** Where one hunk of a patch landed, or why it didn't. */
 export interface PatchHunkReport {
   index: number;
@@ -218,6 +271,13 @@ export const p4 = {
   requestReview: (conn: P4Conn, change: string) =>
     g<void>("p4_request_review", { conn, change }),
   swarmUrl: (conn: P4Conn) => g<string>("swarm_url", { conn }),
+  /** A page of Swarm reviews; every filter is applied server-side. */
+  swarmReviews: (conn: P4Conn, query: ReviewQuery) => g<ReviewPage>("swarm_reviews", { conn, query }),
+  /** Write a review's shelf out as a patch so the apply pipeline can take it. */
+  reviewPatch: (conn: P4Conn, change: string) => g<ReviewPatch>("review_patch", { conn, change }),
+  /** Copy a review's binary/added files verbatim (p4 print of the shelved rev). */
+  reviewCopyFiles: (conn: P4Conn, change: string, files: string[], mode: "edit" | "offline") =>
+    g<CopyResult[]>("review_copy_files", { conn, change, files, mode }),
   swarmReview: (conn: P4Conn, change: string) =>
     g<ReviewInfo | null>("swarm_review", { conn, change }),
   /** Authenticated? `error` carries the p4 text when not (charset vs ticket). */
@@ -307,4 +367,10 @@ export function fmtTime(epoch: string | undefined): string {
 export function firstLine(desc: string | undefined): string {
   if (!desc) return "";
   return desc.split("\n")[0].trim();
+}
+
+/** Split a depot/local path into its directory (with trailing slash) and name. */
+export function splitPath(path: string): { dir: string; name: string } {
+  const i = path.lastIndexOf("/");
+  return i >= 0 ? { dir: path.slice(0, i + 1), name: path.slice(i + 1) } : { dir: "", name: path };
 }

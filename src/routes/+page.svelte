@@ -1,13 +1,23 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import { getVersion } from "@tauri-apps/api/app";
-  import { isReleaseBuild, emptyConn, firstLine, setClipboard, p4, type P4Conn, type P4Record } from "$lib/p4";
+  import {
+    isReleaseBuild,
+    emptyConn,
+    firstLine,
+    setClipboard,
+    p4,
+    type P4Conn,
+    type P4Record,
+    type ReviewRow,
+  } from "$lib/p4";
   import { localPathFor } from "$lib/cache";
   import { updates } from "$lib/updates.svelte";
   import { sync, type SyncTarget } from "$lib/sync.svelte";
   import { patches } from "$lib/patch.svelte";
   import { merges, afterMerge } from "$lib/merge.svelte";
   import { pending } from "$lib/pending.svelte";
+  import { reviews, type Role, type StatusFilter } from "$lib/reviews.svelte";
   import { history } from "$lib/history.svelte";
   import { browse } from "$lib/browse.svelte";
   import { connection } from "$lib/connection.svelte";
@@ -39,6 +49,7 @@
   import DepotTree from "$lib/components/DepotTree.svelte";
   import HistoryTable from "$lib/components/HistoryTable.svelte";
   import PendingList from "$lib/components/PendingList.svelte";
+  import ReviewList from "$lib/components/ReviewList.svelte";
   import CommandLog from "$lib/components/CommandLog.svelte";
   import NotificationLog from "$lib/components/NotificationLog.svelte";
   import StreamsBrowser from "$lib/components/StreamsBrowser.svelte";
@@ -142,7 +153,7 @@
 
   // Center tab. History/details pane lives in $lib/history.svelte.ts; the depot
   // tree, streams/repo tabs and index live in $lib/browse.svelte.ts.
-  let centerTab = $state<"history" | "pending" | "streams" | "log" | "notes">("pending");
+  let centerTab = $state<"history" | "pending" | "reviews" | "streams" | "log" | "notes">("pending");
 
   const centerRows = $derived(centerTab === "pending" ? pending.rows : history.rows);
 
@@ -150,9 +161,13 @@
   //     View menu. Depot and Streams are hidden by default.
   let views = $state<Views>(loadViews());
   $effect(() => saveViews(views));
-  const TABS: { key: "history" | "pending" | "streams" | "log" | "notes"; label: string }[] = [
+  const TABS: {
+    key: "history" | "pending" | "reviews" | "streams" | "log" | "notes";
+    label: string;
+  }[] = [
     { key: "history", label: "History" },
     { key: "pending", label: "Pending" },
+    { key: "reviews", label: "Reviews" },
     { key: "streams", label: "Streams" },
     { key: "log", label: "Commands" },
     { key: "notes", label: "Notifications" },
@@ -161,6 +176,7 @@
   function showTab(key: (typeof TABS)[number]["key"]) {
     centerTab = key;
     if (key === "pending") pending.load();
+    else if (key === "reviews") void reviews.load();
     else if (key === "streams") browse.loadStreams();
   }
   // Keep centerTab on a visible tab; if the active one was closed, pick another.
@@ -170,6 +186,13 @@
       if (next) centerTab = next.key;
     }
   });
+  // Reviews come from the server, so the tab needs a load when it becomes the
+  // active one (including restored at startup) and after a (re)connect — there is
+  // no local cache to paint in the meantime.
+  $effect(() => {
+    if (centerTab === "reviews" && connection.connected) void reviews.load();
+  });
+
   function closeTab(key: (typeof TABS)[number]["key"]) {
     views[key] = false;
     if (centerTab === key) {
@@ -252,7 +275,41 @@
     return items;
   }
 
-  // --- pending FILE context (local/opened files) -----------------------------
+  // --- reviews: context menu over the Swarm review list ----------------------
+  let reviewCtx = $state<{ x: number; y: number; r: ReviewRow } | null>(null);
+
+  function reviewMenuItems(r: ReviewRow) {
+    type MenuItem = { label: string; action?: () => void; disabled?: boolean; sep?: boolean };
+    const items: MenuItem[] = [];
+    // Whether the review maps into this workspace is only knowable from its
+    // shelved files, so it isn't gated here: `review_patch` refuses with the
+    // depot name when nothing maps.
+    items.push({
+      label: "Apply to workspace…",
+      disabled: !r.change,
+      action: () => patches.previewReview(String(r.change), `Review #${r.id} (@${r.change})`),
+    });
+    items.push({ label: "", sep: true });
+    items.push({ label: "Open in Swarm", action: () => openReviewPage(r.id) });
+    items.push({
+      label: `Copy @${r.change}`,
+      disabled: !r.change,
+      action: () => void setClipboard(String(r.change)),
+    });
+    return items;
+  }
+
+  async function openReviewPage(id: number) {
+    const url = await reviews.url(id);
+    if (!url) {
+      setError("No Swarm server is configured (P4.Swarm.URL is unset).");
+      return;
+    }
+    const { openUrl } = await import("@tauri-apps/plugin-opener");
+    await openUrl(url).catch((e) => setError(String(e)));
+  }
+
+    // --- pending FILE context (local/opened files) -----------------------------
   let fileCtx = $state<{
     x: number;
     y: number;
@@ -483,6 +540,11 @@
         void afterMerge();
       }),
     );
+    reviews.init({
+      conn: () => conn,
+      connected: () => connection.connected,
+      setError,
+    });
     patches.init({
       conn: () => conn,
       connected: () => connection.connected,
@@ -678,6 +740,34 @@
         <CommandLog entries={cmdlog.entries} onClear={() => cmdlog.clear()} />
       {:else if centerTab === "notes"}
         <NotificationLog entries={notifications.entries} onClear={() => notifications.clear()} />
+      {:else if centerTab === "reviews"}
+        <ReviewList
+          rows={reviews.rows}
+          loading={reviews.loading}
+          paging={reviews.paging}
+          more={reviews.more}
+          error={reviews.error}
+          status={reviews.status}
+          user={reviews.user}
+          role={reviews.role}
+          search={reviews.search}
+          me={conn.user}
+          refreshKey={reviews.version}
+          contextReview={reviewCtx?.r.id ?? 0}
+          onStatus={(s: StatusFilter) => reviews.setStatus(s)}
+          onUser={(u: string) => reviews.setUser(u)}
+          onRole={(r: Role) => reviews.setRole(r)}
+          onSearch={(q: string) => reviews.setSearch(q)}
+          onLoadMore={() => void reviews.loadMore()}
+          onFiles={(change) => reviews.files(change)}
+          onDiff={(f, rev, change) => reviews.diff(f, rev, change)}
+          onOpenDiff={(f, rev, change) => reviews.openDiff(f, rev, change)}
+          onContext={(r, e) => {
+            e.preventDefault();
+            reviewCtx = { x: e.clientX, y: e.clientY, r };
+          }}
+          onFileContext={(f, r, e) => (shelvedCtx = { x: e.clientX, y: e.clientY, file: f, change: String(r.change) })}
+        />
       {:else if centerTab === "pending"}
         <PendingList
           bind:this={pendingList}
@@ -991,6 +1081,15 @@
   />
 {/if}
 
+{#if reviewCtx}
+  <ContextMenu
+    x={reviewCtx.x}
+    y={reviewCtx.y}
+    items={reviewMenuItems(reviewCtx.r)}
+    onClose={() => (reviewCtx = null)}
+  />
+{/if}
+
 {#if serverCtx}
   <ContextMenu
     x={serverCtx.x}
@@ -1049,6 +1148,8 @@
     phase={patches.phase}
     files={patches.files}
     busy={patches.busy}
+    subject={patches.subject}
+    skipped={patches.skipped}
     onApply={(mode, partial) => patches.apply(mode, partial)}
     onResolveHunk={(depot, hunk) => merges.resolvePatchHunk(patches.path, depot, hunk)}
     onClose={() => patches.close()}

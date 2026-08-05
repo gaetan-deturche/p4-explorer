@@ -18,6 +18,7 @@ mod merge;
 mod patch;
 mod pending;
 mod server;
+mod swarm;
 mod sync;
 pub mod unreal_remote; // pub: exercised by the uediscover dev bin
 
@@ -32,6 +33,7 @@ pub use merge::*;
 pub use patch::*;
 pub use pending::*;
 pub use server::*;
+pub use swarm::*;
 pub use sync::*;
 
 /// Result of a tagged-record `p4` command.

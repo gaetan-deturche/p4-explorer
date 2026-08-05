@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { fmtTime, firstLine, type P4Record, type ReviewInfo } from "$lib/p4";
+  import { fmtTime, firstLine, splitPath, type P4Record, type ReviewInfo } from "$lib/p4";
   import DiffView from "$lib/components/DiffView.svelte";
 
   let {
@@ -281,10 +281,6 @@
     offlineDiffs[key] = { open: true, loading: false, text };
   }
 
-  function splitPath(p: string): { dir: string; name: string } {
-    const i = p.lastIndexOf("/");
-    return i >= 0 ? { dir: p.slice(0, i + 1), name: p.slice(i + 1) } : { dir: "", name: p };
-  }
   let offlineOpen = $state(true); // the "Offline changes" group is expanded
 </script>
 

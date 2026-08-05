@@ -31,7 +31,7 @@ import {
   type ViewState,
 } from "$lib/nav";
 
-type Tab = "history" | "pending" | "streams" | "log" | "notes";
+type Tab = "history" | "pending" | "reviews" | "streams" | "log" | "notes";
 /** The file browser's data source: on-disk files, the workspace stream (server),
  *  or the whole depot (server, all depots from //). */
 export type BrowseSource = "local" | "workspace" | "depot";
@@ -579,7 +579,7 @@ export const browse = {
     pending.startOfflineScan(); // low-rate workspace scan for offline changes
 
     // A saved "repo" tab no longer exists (Depot is a Files-pane source now).
-    const valid: Tab[] = ["history", "pending", "streams", "log", "notes"];
+    const valid: Tab[] = ["history", "pending", "reviews", "streams", "log", "notes"];
     const tab = valid.includes(view?.tab as Tab) ? (view!.tab as Tab) : fallbackTab;
     if (tab === "streams") browse.loadStreams();
     browse.ensureIndex(); // background: build the fuzzy-search index if new

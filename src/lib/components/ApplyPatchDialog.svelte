@@ -6,6 +6,8 @@
     phase,
     files,
     busy,
+    subject = "",
+    skipped = [],
     onApply,
     onResolveHunk,
     onClose,
@@ -14,6 +16,10 @@
     phase: "preview" | "applying" | "done";
     files: PatchFileReport[];
     busy: boolean;
+    /** Names the source when it isn't a file the user picked (e.g. a review). */
+    subject?: string;
+    /** Files the source carried that a patch cannot express (binaries, adds). */
+    skipped?: string[];
     onApply: (mode: "edit" | "offline", partial: boolean) => void;
     onResolveHunk: (depot: string, hunkIndex: number) => void;
     onClose: () => void;
@@ -66,8 +72,16 @@
   <div class="backdrop"></div>
   <div class="dialog" role="dialog" aria-modal="true" tabindex="-1">
     <div class="dtitle">
-      {phase === "done" ? "Patch applied" : "Apply patch"} — <span class="mono">{name}</span>
+      {phase === "done" ? "Applied" : "Apply"} — <span class="mono">{name}</span>
     </div>
+
+    {#if skipped.length}
+      <div class="hint warnish">
+        {skipped.length} file{skipped.length === 1 ? "" : "s"} carry no diff (binary, or added) and
+        {skipped.length === 1 ? "is" : "are"} copied from the shelf as-is:
+        <span class="mono">{skipped.map((s) => s.split("/").pop()).join(", ")}</span>
+      </div>
+    {/if}
 
     {#if phase !== "done"}
       <div class="hint">
