@@ -67,6 +67,65 @@ let seq = 0; // discards the answer of a superseded request
 function cacheScope(): string {
   return `p4:reviews:${h?.conn().client ?? ""}`;
 }
+
+// Every row any query has returned, keyed by review id. A filter combination
+// never visited still gets instant provisional rows: the pool is filtered
+// CLIENT-side with the same predicates while the real query runs. `onStream`
+// records whether the row was returned under the stream scope — the one filter
+// that cannot be evaluated locally.
+type PoolEntry = { r: ReviewRow; s: boolean };
+let pool = new Map<number, PoolEntry>();
+let poolClient = ""; // pool contents belong to one client
+const POOL_CAP = 500;
+
+function loadPool(): void {
+  const client = h?.conn().client ?? "";
+  if (client === poolClient) return;
+  poolClient = client;
+  pool = new Map();
+  const scope = cacheScope();
+  hydrate(scope, "pool");
+  const json = storeGet(scope, "pool");
+  if (!json) return;
+  try {
+    for (const e of JSON.parse(json) as PoolEntry[]) pool.set(e.r.id, e);
+  } catch {
+    /* corrupt — rebuilt as queries land */
+  }
+}
+
+/** Merge freshly fetched rows into the pool and persist a bounded slice. */
+function absorb(fetched: ReviewRow[], onStream: boolean): void {
+  for (const r of fetched) {
+    const prev = pool.get(r.id);
+    pool.set(r.id, { r, s: onStream || (prev?.s ?? false) });
+  }
+  const slice = [...pool.values()].sort((a, b) => b.r.id - a.r.id).slice(0, POOL_CAP);
+  if (slice.length < pool.size) pool = new Map(slice.map((e) => [e.r.id, e]));
+  storeSet(cacheScope(), "pool", JSON.stringify(slice));
+}
+
+/** The pool filtered with the current controls — client-side approximations of
+ *  what Swarm will answer (keywords become a substring match; close enough for
+ *  a provisional paint). */
+function provisional(): ReviewRow[] {
+  const q = search.trim().toLowerCase();
+  const out: ReviewRow[] = [];
+  for (const { r, s } of pool.values()) {
+    if (streamOnly && !s) continue;
+    if (!states.includes(r.state)) continue;
+    if (hideSubmitted && r.commits.length > 0) continue;
+    if (user) {
+      const asAuthor = r.author === user;
+      const asReviewer = r.reviewers.includes(user);
+      if (role === "author" ? !asAuthor : role === "reviewer" ? !asReviewer : !asAuthor && !asReviewer)
+        continue;
+    }
+    if (q && !String(r.id).includes(q) && !r.description.toLowerCase().includes(q)) continue;
+    out.push(r);
+  }
+  return out.sort((a, b) => b.id - a.id);
+}
 function fingerprint(): string {
   return [
     [...states].sort().join(","),
@@ -181,18 +240,32 @@ export const reviews = {
     const scope = cacheScope();
     const fp = fingerprint();
     hydrate(scope, fp);
+    loadPool();
     const cached = storeGet(scope, fp);
+    let painted = false;
     if (cached) {
       try {
         const c = JSON.parse(cached) as { rows: ReviewRow[]; cursor: number };
         rows = c.rows;
         cursor = c.cursor;
+        painted = true;
         version++;
       } catch {
         /* corrupt cache — the fetch below replaces it */
       }
     }
-    loading = !cached; // with a cached list on screen, refresh silently
+    if (!painted) {
+      // Never asked with THESE filters — but rows from other queries can be
+      // filtered locally into a provisional answer while the real one runs.
+      const guess = provisional();
+      if (guess.length) {
+        rows = guess;
+        cursor = 0; // unknown; the fetch sets the real paging cursor
+        painted = true;
+        version++;
+      }
+    }
+    loading = !painted; // with anything on screen, refresh silently
     error = "";
     try {
       const page = await p4.swarmReviews(h.conn(), {
@@ -209,7 +282,10 @@ export const reviews = {
       rows = page.reviews;
       cursor = page.lastSeen;
       error = page.error;
-      if (!page.error) storeSet(scope, fp, JSON.stringify({ rows, cursor }));
+      if (!page.error) {
+        storeSet(scope, fp, JSON.stringify({ rows, cursor }));
+        absorb(page.reviews, streamOnly);
+      }
       version++;
     } catch (e) {
       if (mine !== seq) return;
@@ -244,6 +320,7 @@ export const reviews = {
       cursor = page.lastSeen;
       if (page.error) error = page.error;
       storeSet(cacheScope(), fingerprint(), JSON.stringify({ rows, cursor }));
+      absorb(page.reviews, streamOnly);
       // Deliberately NOT bumping `version`: a page is an append, so the rows
       // already on screen (and their loaded file lists) are still valid. Bumping
       // it would collapse every expanded review on each scroll.
