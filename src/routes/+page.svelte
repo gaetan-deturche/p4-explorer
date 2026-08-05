@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, onDestroy } from "svelte";
+  import { untrack, onMount, onDestroy } from "svelte";
   import { getVersion } from "@tauri-apps/api/app";
   import {
     isReleaseBuild,
@@ -193,7 +193,12 @@
   // stream's reviews on screen.
   $effect(() => {
     void browse.rootPath;
-    if (centerTab === "reviews" && connection.connected) void reviews.load();
+    const show = centerTab === "reviews" && connection.connected;
+    // untrack: load() writes state synchronously (cached rows, version++), and a
+    // tracked read-modify-write like version++ makes the effect retrigger itself
+    // in a tight loop — which pegged the main thread the moment a workspace
+    // connected (the cached branch only exists once a client is set).
+    if (show) untrack(() => void reviews.load());
   });
 
   function closeTab(key: (typeof TABS)[number]["key"]) {
