@@ -284,12 +284,21 @@ fn loadable_spec(editor_project_dir: &std::path::Path, src: &str) -> Result<Stri
     Ok(format!("/Temp/Diff/{base}"))
 }
 
-/// Skips the startup map on an editor we launch ourselves, so a diff does not
-/// pay for loading a level it never shows. Overrides the user's own preference
-/// for this process only — it is a command-line override, nothing is written to
-/// their EditorPerProjectUserSettings.ini.
-const NO_STARTUP_MAP: &str =
-    "-ini:EditorPerProjectUserSettings:[/Script/UnrealEd.EditorLoadingSavingSettings]:LoadLevelAtStartup=None";
+/// Per-process config overrides for an editor we launch ourselves for a diff.
+/// Nothing is written to the user's own ini files — these are command-line
+/// overrides, and a throwaway diff instance doesn't need what they disable.
+/// Measured on a real launch (editor log timestamps):
+/// - the startup map is by far the slowest part of a boot the diff never shows;
+/// - Python developer mode regenerated the unreal.py stub for ~30s on frame 1;
+/// - Wwise kept trying to reach a WAAPI authoring app that isn't there.
+/// Remote execution stays ON on purpose: the diff editor answers the next
+/// asset diff's ping, so follow-up diffs open in it instantly.
+const DIFF_LAUNCH_OVERRIDES: [&str; 4] = [
+    "-ini:EditorPerProjectUserSettings:[/Script/UnrealEd.EditorLoadingSavingSettings]:LoadLevelAtStartup=None",
+    "-ini:Engine:[/Script/PythonScriptPlugin.PythonScriptPluginSettings]:bDeveloperMode=False",
+    "-ini:EditorPerProjectUserSettings:[/Script/PythonScriptPlugin.PythonScriptPluginUserSettings]:bDeveloperMode=False",
+    "-ini:EditorPerProjectUserSettings:[/Script/AkAudio.AkSettingsPerUser]:bAutoConnectToWAAPI=False",
+];
 
 /// Diff two UE asset files in Unreal's asset-diff tool. Prefers an ALREADY
 /// RUNNING editor (Python remote execution → in-place DiffAssets); falls back
@@ -365,20 +374,17 @@ pub async fn open_unreal_diff(
         let editor = find_unreal_editor(&root)
             .ok_or("UnrealEditor.exe not found at or above the workspace root")?;
         let mut c = std::process::Command::new(editor);
-        // Boot with NO level. The asset diff needs no world, and loading the
-        // project's startup map is by far the slowest part of an editor launch.
-        // UnrealEdMisc::OnInit only calls LoadDefaultMapAtStartup() when this
-        // setting is not None (UnrealEdMisc.cpp: `LoadLevelAtStartup !=
-        // ELoadLevelAtStartup::None`), and the -ini: override is compiled in for
-        // every non-shipping build (ALLOW_INI_OVERRIDE_FROM_COMMANDLINE).
-        //
-        // It goes BEFORE -diff on purpose: the engine splits the command line at
-        // `-diff` and treats everything after it as the diff's own arguments.
-        c.arg(project)
-            .arg(NO_STARTUP_MAP)
-            .arg("-diff")
-            .arg(&left)
-            .arg(&right);
+        // The overrides go BEFORE -diff on purpose: the engine splits the command
+        // line at `-diff` and treats everything after it as the diff's own
+        // arguments. The -ini: mechanism is compiled into every non-shipping
+        // build (ALLOW_INI_OVERRIDE_FROM_COMMANDLINE), and skipping the startup
+        // map works because UnrealEdMisc::OnInit only loads one when the setting
+        // is not ELoadLevelAtStartup::None.
+        c.arg(project);
+        for flag in DIFF_LAUNCH_OVERRIDES {
+            c.arg(flag);
+        }
+        c.arg("-diff").arg(&left).arg(&right);
         c.spawn().map_err(|e| format!("failed to launch Unreal diff: {e}"))?;
         Ok("launched".to_string())
     })
