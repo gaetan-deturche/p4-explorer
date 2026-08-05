@@ -133,6 +133,32 @@
     fdiff[key] = { open: fdiff[key]?.open ?? true, loading: false, text };
   }
 
+  // The state pills live in a dropdown (five inline cells ate the filter bar).
+  let statesOpen = $state(false);
+  let statesBox = $state<HTMLElement>();
+  $effect(() => {
+    if (!statesOpen) return;
+    const close = (e: PointerEvent) => {
+      if (!statesBox?.contains(e.target as Node)) statesOpen = false;
+    };
+    const key = (e: KeyboardEvent) => {
+      if (e.key === "Escape") statesOpen = false;
+    };
+    window.addEventListener("pointerdown", close, true);
+    window.addEventListener("keydown", key);
+    return () => {
+      window.removeEventListener("pointerdown", close, true);
+      window.removeEventListener("keydown", key);
+    };
+  });
+  /** Trigger caption: the single ticked state's label, or a count. */
+  const stateSummary = $derived.by(() => {
+    const on = REVIEW_STATES.filter((s) => states.includes(s.key));
+    if (on.length === 0) return "no state";
+    if (on.length === 1) return on[0].label;
+    return `${on.length} states`;
+  });
+
   // Debounced so typing doesn't fire a query per keystroke (Swarm does the
   // searching, so each one is a round-trip).
   let draft = $state("");
@@ -224,17 +250,30 @@
 
 <div class="panel">
   <div class="filters">
-    <span class="pills" title="Which review states to list (Swarm filters this server-side)">
-      {#each REVIEW_STATES as s (s.key)}
-        <button
-          class="state st-{s.key} pill"
-          class:off={!states.includes(s.key)}
-          aria-pressed={states.includes(s.key)}
-          onclick={() => onToggleState(s.key)}
-        >
-          {s.label}
-        </button>
-      {/each}
+    <span class="dd" bind:this={statesBox}>
+      <button
+        class="pick ddtrigger"
+        class:warnish={states.length === 0}
+        title="Which review states to list (Swarm filters this server-side)"
+        aria-expanded={statesOpen}
+        onclick={() => (statesOpen = !statesOpen)}
+      >
+        {stateSummary} ▾
+      </button>
+      {#if statesOpen}
+        <div class="ddpanel">
+          {#each REVIEW_STATES as s (s.key)}
+            <button
+              class="state st-{s.key} pill"
+              class:off={!states.includes(s.key)}
+              aria-pressed={states.includes(s.key)}
+              onclick={() => onToggleState(s.key)}
+            >
+              {s.label}
+            </button>
+          {/each}
+        </div>
+      {/if}
     </span>
 
     <label
@@ -470,11 +509,31 @@
     flex: 1;
     min-width: 80px;
   }
-  .pills {
-    display: flex;
-    align-items: center;
-    gap: 4px;
+  .dd {
+    position: relative;
     flex: none;
+  }
+  .ddtrigger {
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .ddtrigger.warnish {
+    color: var(--warn);
+  }
+  .ddpanel {
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 0;
+    z-index: 40;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 5px;
+    padding: 8px;
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    box-shadow: 0 6px 24px rgba(0, 0, 0, 0.4);
   }
   /* Same cell as the row badges (.state supplies font/color/border); a pill is
      just a clickable one, and unticked reads as an outline ghost. */
