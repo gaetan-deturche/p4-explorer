@@ -3,8 +3,8 @@
 //! file-content providers for PendingList. Shared bits come via `init()`.
 
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { p4, openDiffWindow, type P4Conn, type P4Record, type ReviewInfo } from "$lib/p4";
-import { editor, isUnrealAsset, unrealAssetName } from "$lib/editor.svelte";
+import { p4, type P4Conn, type P4Record, type ReviewInfo } from "$lib/p4";
+import { openDiff } from "$lib/opendiff";
 import { cacheGetSync, cacheSet, storeGet, hydrate, storeSet, storeSetMem } from "$lib/store.svelte";
 
 type Hooks = {
@@ -682,60 +682,12 @@ export const pending = {
   shelvedDiff(file: string, rev: number, change: string): Promise<string> {
     return p4.diffShelved(h!.conn(), file, rev, change);
   },
-  // Double-click diff: UE assets go to Unreal's asset-diff tool; text goes to
-  // the in-app diff window or the external P4DIFF tool, per Options → Editor.
-  async openLocalDiff(file: string) {
-    try {
-      if (isUnrealAsset(file)) {
-        h!.setNotice("Opening Unreal diff…", 15000); // instant feedback; replaced on completion
-        const pair = await p4.diffPairLocal(h!.conn(), file);
-        const mode = await p4.openUnrealDiff(
-          h!.conn(), pair.left, pair.right, unrealAssetName(file), pair.leftLabel, pair.rightLabel,
-        );
-        h!.setNotice(
-          mode === "nocompare"
-            ? // Empty counterpart: the asset is new (or gone) in this change, so
-              // there is nothing for Unreal's asset diff to compare.
-              "No earlier revision of this asset to compare."
-            : mode === "remote"
-              ? "Diff opened in the running Unreal Editor."
-              : "Launching Unreal Editor for the diff — this takes a moment…",
-          8000,
-        );
-      } else if (editor.diffTool === "inapp") {
-        await openDiffWindow(await p4.diffPairLocal(h!.conn(), file));
-      } else {
-        await p4.openDiffLocal(h!.conn(), file);
-      }
-    } catch (e) {
-      h!.setNotice(String(e), 5000);
-    }
+  // Double-click diff: the opened file against #have, the shelved one against
+  // its base revision (see $lib/opendiff for which tool each ends up in).
+  openLocalDiff(file: string) {
+    return openDiff(h!.conn(), { kind: "local", file }, h!.setNotice);
   },
-  async openShelvedDiff(file: string, rev: number, change: string) {
-    try {
-      if (isUnrealAsset(file)) {
-        h!.setNotice("Opening Unreal diff…", 15000); // instant feedback; replaced on completion
-        const pair = await p4.diffPairShelved(h!.conn(), file, rev, change);
-        const mode = await p4.openUnrealDiff(
-          h!.conn(), pair.left, pair.right, unrealAssetName(file), pair.leftLabel, pair.rightLabel,
-        );
-        h!.setNotice(
-          mode === "nocompare"
-            ? // Empty counterpart: the asset is new (or gone) in this change, so
-              // there is nothing for Unreal's asset diff to compare.
-              "No earlier revision of this asset to compare."
-            : mode === "remote"
-              ? "Diff opened in the running Unreal Editor."
-              : "Launching Unreal Editor for the diff — this takes a moment…",
-          8000,
-        );
-      } else if (editor.diffTool === "inapp") {
-        await openDiffWindow(await p4.diffPairShelved(h!.conn(), file, rev, change));
-      } else {
-        await p4.openDiffShelved(h!.conn(), file, rev, change);
-      }
-    } catch (e) {
-      h!.setNotice(String(e), 5000);
-    }
+  openShelvedDiff(file: string, rev: number, change: string) {
+    return openDiff(h!.conn(), { kind: "shelved", file, rev, change }, h!.setNotice);
   },
 };

@@ -6,8 +6,8 @@
 //! selection (no competing cache), so it stays plain $state. Shared bits (conn,
 //! path translation, notices) come via init().
 
-import { p4, openDiffWindow, type P4Conn, type P4Record } from "$lib/p4";
-import { editor, isUnrealAsset, unrealAssetName } from "$lib/editor.svelte";
+import { p4, type P4Conn, type P4Record } from "$lib/p4";
+import { openDiff } from "$lib/opendiff";
 import type { HistEntry } from "$lib/cache";
 import {
   storeGet,
@@ -319,33 +319,7 @@ export const history = {
   fileDiff(depotFile: string, rev: number): Promise<string> {
     return p4.diff2(h!.conn(), depotFile, rev);
   },
-  async openFileDiff(depotFile: string, rev: number) {
-    try {
-      // UE assets → Unreal's asset-diff tool; text → the in-app diff window or
-      // the external P4DIFF tool, per Options → Editor.
-      if (isUnrealAsset(depotFile)) {
-        h!.setNotice("Opening Unreal diff…", 15000); // instant feedback; replaced on completion
-        const pair = await p4.diffPairRev(h!.conn(), depotFile, rev);
-        const mode = await p4.openUnrealDiff(
-          h!.conn(), pair.left, pair.right, unrealAssetName(depotFile), pair.leftLabel, pair.rightLabel,
-        );
-        h!.setNotice(
-          mode === "nocompare"
-            ? // Empty counterpart: the asset is new (or gone) in this change, so
-              // there is nothing for Unreal's asset diff to compare.
-              "No earlier revision of this asset to compare."
-            : mode === "remote"
-              ? "Diff opened in the running Unreal Editor."
-              : "Launching Unreal Editor for the diff — this takes a moment…",
-          8000,
-        );
-      } else if (editor.diffTool === "inapp") {
-        await openDiffWindow(await p4.diffPairRev(h!.conn(), depotFile, rev));
-      } else {
-        await p4.openDiff(h!.conn(), depotFile, rev);
-      }
-    } catch (e) {
-      h!.setNotice(String(e), 5000);
-    }
+  openFileDiff(depotFile: string, rev: number) {
+    return openDiff(h!.conn(), { kind: "rev", file: depotFile, rev }, h!.setNotice);
   },
 };
