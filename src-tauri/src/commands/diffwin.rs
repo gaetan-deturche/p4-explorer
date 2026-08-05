@@ -59,7 +59,24 @@ fn print_side(conn: &P4Conn, spec: &str, file_tag: &str) -> Result<String, Strin
 }
 
 fn sane(s: &str) -> String {
-    s.replace(|c: char| !c.is_alphanumeric() && c != '.' && c != '-' && c != '_', "_")
+    s.replace(|c: char| !c.is_alphanumeric() && c != '.' && c != '-' && c != '_' && c != '#', "_")
+}
+
+/// Temp-file tag carrying a revision label: `M_Creature_01.uasset` + `33` →
+/// `M_Creature_01#33.uasset`. UE's `-diff` window derives each side's revision
+/// caption by splitting the file name at the first `#`
+/// (FMergeAsset::GetRevisionInfo); without one, both panels read the misleading
+/// "Local Revision". `p4 print -o` writes such paths fine (verified), and the
+/// in-place path re-sanitizes for /Temp package names, so the `#` never leaks
+/// into a package path.
+fn tag_rev(name: &str, label: &str) -> String {
+    if label.is_empty() {
+        return name.to_string();
+    }
+    match name.rfind('.') {
+        Some(i) => format!("{}#{}{}", &name[..i], label, &name[i..]),
+        None => format!("{name}#{label}"),
+    }
 }
 
 /// A revision vs its predecessor (history/changelist details). Rev 1 (added)
@@ -69,8 +86,8 @@ pub async fn diff_pair_rev(conn: P4Conn, depot_file: String, rev: i64) -> Result
     tauri::async_runtime::spawn_blocking(move || {
         let name = base_name(&depot_file).to_string();
         let prev = if rev > 1 { format!("{depot_file}#{}", rev - 1) } else { String::new() };
-        let left = print_side(&conn, &prev, &sane(&format!("{}_{}", rev - 1, name)))?;
-        let right = print_side(&conn, &format!("{depot_file}#{rev}"), &sane(&format!("{rev}_{name}")))?;
+        let left = print_side(&conn, &prev, &sane(&tag_rev(&name, &if rev > 1 { (rev - 1).to_string() } else { String::new() })))?;
+        let right = print_side(&conn, &format!("{depot_file}#{rev}"), &sane(&tag_rev(&name, &rev.to_string())))?;
         Ok(DiffPair {
             left,
             right,
@@ -95,8 +112,8 @@ pub async fn diff_pair_shelved(
     tauri::async_runtime::spawn_blocking(move || {
         let name = base_name(&depot_file).to_string();
         let base = if rev >= 1 { format!("{depot_file}#{rev}") } else { String::new() };
-        let left = print_side(&conn, &base, &sane(&format!("base{rev}_{name}")))?;
-        let right = print_side(&conn, &format!("{depot_file}@={change}"), &sane(&format!("shelf{change}_{name}")))?;
+        let left = print_side(&conn, &base, &sane(&tag_rev(&name, &if rev >= 1 { rev.to_string() } else { String::new() })))?;
+        let right = print_side(&conn, &format!("{depot_file}@={change}"), &sane(&tag_rev(&name, &format!("shelf-{change}"))))?;
         Ok(DiffPair {
             left,
             right,
@@ -125,7 +142,7 @@ pub async fn diff_pair_local(conn: P4Conn, depot_file: String) -> Result<DiffPai
         let name = base_name(&depot_file).to_string();
         // No have revision (add in progress) → empty left side.
         let spec = if have.is_empty() { String::new() } else { format!("{depot_file}#have") };
-        let left = print_side(&conn, &spec, &sane(&format!("have_{name}")))?;
+        let left = print_side(&conn, &spec, &sane(&tag_rev(&name, &have)))?;
         Ok(DiffPair {
             left,
             right: local,
