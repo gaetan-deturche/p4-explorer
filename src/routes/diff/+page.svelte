@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { cacheGetSync, cacheSet } from "$lib/store.svelte";
   //! The diff window: the same layout, palette and editing as the resolve window,
   //! with one reference side instead of two.
   //!
@@ -75,6 +76,38 @@
   let blocks = $state<Block[]>([]);
   let ds = $state<DocState | null>(null);
   let hist = $state<History>(emptyHistory());
+
+  // --- movable center split --------------------------------------------------
+  // Fraction of the width given to the LEFT pane. Persisted once dragged; an
+  // ADDED file (no previous version, left side empty) defaults to a sliver so
+  // the real content isn't halved for the sake of a blank column.
+  const SPLIT_KEY = "diffsplit";
+  let split = $state(0.5);
+  let splitDragged = false; // only a user drag persists
+  let gridEl = $state<HTMLDivElement>();
+  function initSplit(leftEmpty: boolean) {
+    const saved = Number(cacheGetSync("nav", SPLIT_KEY) ?? NaN);
+    if (leftEmpty) split = 0.12;
+    else if (Number.isFinite(saved)) split = Math.min(0.85, Math.max(0.15, saved));
+  }
+  function splitDown(e: PointerEvent) {
+    // Only from the gutter background — the revert buttons stay clickable.
+    if ((e.target as HTMLElement).closest("button")) return;
+    e.preventDefault();
+    const move = (ev: PointerEvent) => {
+      if (!gridEl) return;
+      const r = gridEl.getBoundingClientRect();
+      split = Math.min(0.85, Math.max(0.08, (ev.clientX - r.left) / r.width));
+      splitDragged = true;
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      if (splitDragged) cacheSet("nav", SPLIT_KEY, String(split));
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  }
   let anchor = $state<Caret | null>(null);
   let dirty = $state(false);
   let saving = $state(false);
@@ -150,7 +183,8 @@
    *  an absolute line index in the right file, so the caret survives the new block
    *  structure. */
   function rebuild(rightText: string, caret: Caret | number) {
-    blocks = toBlocks(diffLines(leftText, rightText));
+if (!splitDragged) initSplit(leftText.trim() === "");
+        blocks = toBlocks(diffLines(leftText, rightText));
     const regions = blocks.map((b, i) => ({
       region: i,
       kind: b.kind === "same" ? "" : "add",
@@ -502,9 +536,14 @@
   {:else}
     <div class="viewport">
       <div class="scroll" bind:this={scrollEl}>
-      <div class="grid mono">
+      <div
+        class="grid mono"
+        bind:this={gridEl}
+        style="grid-template-columns: minmax(0, {split}fr) 1.6rem minmax(0, {1 - split}fr)"
+      >
         <div class="head">{leftLabel}</div>
-        <div class="head gut"></div>
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <div class="head gut splitgrip" title="Drag to resize the panes" onpointerdown={splitDown}>⋮</div>
         <div class="head mid">
           {rightLabel}{#if editable}<span class="dim"> — editable</span>{/if}
         </div>
@@ -522,8 +561,10 @@
           {/each}
         </div>
 
-        <!-- One button per remaining change: revert that block to the other side. -->
-        <div class="col gut" style="height:{total}px">
+        <!-- One button per remaining change: revert that block to the other side.
+             The gutter background doubles as the split-drag handle. -->
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <div class="col gut splitgrip" style="height:{total}px" onpointerdown={splitDown}>
           {#each blocks as _b, i (i)}
             {#if !settled[i]}
               <div class="revwrap" style="top:{tops[i]}px">
@@ -637,8 +678,12 @@
   }
   .grid {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) 1.6rem minmax(0, 1fr);
+    /* columns come from the inline style (movable split) */
     align-items: start;
+  }
+  .splitgrip {
+    cursor: col-resize;
+    user-select: none;
   }
   .head {
     position: sticky;
