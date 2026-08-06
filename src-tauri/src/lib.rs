@@ -15,18 +15,50 @@ pub fn run() {
         .setup(|app| {
             p4::set_app_handle(app.handle().clone()); // for p4-command log events
             // SQLite DB in the app data dir: file index (+ future caches).
-            let dir = app.path().app_data_dir()?;
+            // AUGER_DATA_DIR: dev aid — run against a copy of the app data so
+            // a dev instance never contends with the installed app's live DB.
+            let dir = match std::env::var("AUGER_DATA_DIR") {
+                Ok(d) if !d.is_empty() => std::path::PathBuf::from(d),
+                _ => app.path().app_data_dir()?,
+            };
             std::fs::create_dir_all(&dir).ok();
             // TWO connections to the same file, in WAL mode: the tiny cache
             // table (source of truth for every view) must never queue behind
             // the multi-million-row file index. One mutex-guarded connection
             // made every cache read wait ~1s at boot while the index counted
             // or loaded; WAL lets the pair read/write concurrently.
-            let db = rusqlite::Connection::open(dir.join("p4gui.db"))?;
-            index::init_conn(&db)?;
-            index::init_schema(&db)?;
-            let cache_db = rusqlite::Connection::open(dir.join("p4gui.db"))?;
-            index::init_conn(&cache_db)?;
+            //
+            // A cache must never brick the app: if the file won't open cleanly
+            // (seen live: a second process got SQLITE_CORRUPT from the WAL
+            // handshake while the first ran fine), boot on an in-memory pair —
+            // everything works, refilled from the server, nothing persists
+            // that session, and the real file is left untouched for the next
+            // clean start.
+            let open_pair = || -> Result<(rusqlite::Connection, rusqlite::Connection), String> {
+                let db = rusqlite::Connection::open(dir.join("p4gui.db"))
+                    .map_err(|e| format!("open(index): {e}"))?;
+                index::init_conn(&db).map_err(|e| format!("init_conn(index): {e}"))?;
+                index::init_schema(&db).map_err(|e| format!("init_schema: {e}"))?;
+                let cache_db = rusqlite::Connection::open(dir.join("p4gui.db"))
+                    .map_err(|e| format!("open(cache): {e}"))?;
+                index::init_conn(&cache_db).map_err(|e| format!("init_conn(cache): {e}"))?;
+                Ok((db, cache_db))
+            };
+            let (db, cache_db) = open_pair()
+                .or_else(|e| {
+                    eprintln!("cache DB open failed ({e}); retrying once");
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    open_pair()
+                })
+                .unwrap_or_else(|e| {
+                    eprintln!("cache DB unavailable ({e}); running on an in-memory cache");
+                    let mk = || {
+                        let c = rusqlite::Connection::open_in_memory().expect("in-memory sqlite");
+                        let _ = index::init_schema(&c);
+                        c
+                    };
+                    (mk(), mk())
+                });
             app.manage(index::AppState::new(db, cache_db));
             Ok(())
         })

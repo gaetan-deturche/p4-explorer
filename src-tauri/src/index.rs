@@ -54,9 +54,9 @@ impl AppState {
 /// (one writer + readers run concurrently), NORMAL sync (WAL-safe), and a busy
 /// timeout instead of hard SQLITE_BUSY errors when both do write.
 pub fn init_conn(db: &Connection) -> rusqlite::Result<()> {
+    db.pragma_update(None, "busy_timeout", 5000)?; // first: the others may need the lock
     db.pragma_update(None, "journal_mode", "WAL")?;
     db.pragma_update(None, "synchronous", "NORMAL")?;
-    db.pragma_update(None, "busy_timeout", 5000)?;
     Ok(())
 }
 
