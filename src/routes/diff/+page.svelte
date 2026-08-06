@@ -84,12 +84,21 @@
   const SPLIT_KEY = "diffsplit";
   let split = $state(0.5);
   let splitDragged = false; // only a user drag persists
+  // An ADDED file has no previous version: one pane, no gutter. The hidden
+  // columns stay in the DOM at zero width so the change-navigation anchors
+  // (data-change) keep their positions.
+  let single = $state(false);
   let gridEl = $state<HTMLDivElement>();
   function initSplit(leftEmpty: boolean) {
+    single = leftEmpty;
     const saved = Number(cacheGetSync("nav", SPLIT_KEY) ?? NaN);
-    if (leftEmpty) split = 0.12;
-    else if (Number.isFinite(saved)) split = Math.min(0.85, Math.max(0.15, saved));
+    if (!leftEmpty && Number.isFinite(saved)) split = Math.min(0.85, Math.max(0.15, saved));
   }
+  const gridCols = $derived(
+    single
+      ? "0 0 minmax(0, 1fr)"
+      : `minmax(0, ${split}fr) 1.6rem minmax(0, ${1 - split}fr)`,
+  );
   function splitDown(e: PointerEvent) {
     // Only from the gutter background — the revert buttons stay clickable.
     if ((e.target as HTMLElement).closest("button")) return;
@@ -538,8 +547,9 @@ if (!splitDragged) initSplit(leftText.trim() === "");
       <div class="scroll" bind:this={scrollEl}>
       <div
         class="grid mono"
+        class:single
         bind:this={gridEl}
-        style="grid-template-columns: minmax(0, {split}fr) 1.6rem minmax(0, {1 - split}fr)"
+        style="grid-template-columns: {gridCols}"
       >
         <div class="head">{leftLabel}</div>
         <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -684,6 +694,19 @@ if (!splitDragged) initSplit(leftText.trim() === "");
   .splitgrip {
     cursor: col-resize;
     user-select: none;
+  }
+  /* Single-pane (added file): the zero-width columns must not leave stray
+     borders, and there is nothing to drag. */
+  .grid.single .col,
+  .grid.single .head {
+    border-right: none;
+  }
+  .grid.single .head:not(.mid) {
+    padding: 0;
+  }
+  .grid.single .splitgrip {
+    cursor: default;
+    pointer-events: none;
   }
   .head {
     position: sticky;
