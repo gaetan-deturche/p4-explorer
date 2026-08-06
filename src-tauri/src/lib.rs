@@ -17,9 +17,17 @@ pub fn run() {
             // SQLite DB in the app data dir: file index (+ future caches).
             let dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&dir).ok();
+            // TWO connections to the same file, in WAL mode: the tiny cache
+            // table (source of truth for every view) must never queue behind
+            // the multi-million-row file index. One mutex-guarded connection
+            // made every cache read wait ~1s at boot while the index counted
+            // or loaded; WAL lets the pair read/write concurrently.
             let db = rusqlite::Connection::open(dir.join("p4gui.db"))?;
+            index::init_conn(&db)?;
             index::init_schema(&db)?;
-            app.manage(index::AppState::new(db));
+            let cache_db = rusqlite::Connection::open(dir.join("p4gui.db"))?;
+            index::init_conn(&cache_db)?;
+            app.manage(index::AppState::new(db, cache_db));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

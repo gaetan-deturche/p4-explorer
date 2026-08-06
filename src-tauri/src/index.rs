@@ -19,7 +19,11 @@ pub struct Entry {
 }
 
 pub struct AppState {
+    /// The file index's connection — long scans and bulk inserts live here.
     pub db: Mutex<Connection>,
+    /// The cache table's own connection: cache reads back the ENTIRE UI at
+    /// boot, so they must never queue behind an index scan on `db`.
+    pub cache_db: Mutex<Connection>,
     /// (client, entries) currently loaded in memory for searching.
     pub mem: Mutex<Option<(String, Arc<Vec<Entry>>)>>,
     /// PIDs of the running `p4 sync` children (preview + real; for cancellation).
@@ -33,9 +37,10 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(db: Connection) -> Self {
+    pub fn new(db: Connection, cache_db: Connection) -> Self {
         AppState {
             db: Mutex::new(db),
+            cache_db: Mutex::new(cache_db),
             mem: Mutex::new(None),
             sync_pids: Arc::new(Mutex::new(Vec::new())),
             sync_abort: Arc::new(AtomicBool::new(false)),
@@ -43,6 +48,16 @@ impl AppState {
             offline_abort: Arc::new(AtomicBool::new(false)),
         }
     }
+}
+
+/// Per-connection pragmas: WAL so the two connections don't block each other
+/// (one writer + readers run concurrently), NORMAL sync (WAL-safe), and a busy
+/// timeout instead of hard SQLITE_BUSY errors when both do write.
+pub fn init_conn(db: &Connection) -> rusqlite::Result<()> {
+    db.pragma_update(None, "journal_mode", "WAL")?;
+    db.pragma_update(None, "synchronous", "NORMAL")?;
+    db.pragma_update(None, "busy_timeout", 5000)?;
+    Ok(())
 }
 
 pub fn init_schema(db: &Connection) -> rusqlite::Result<()> {
@@ -69,7 +84,7 @@ pub async fn cache_get(
     scope: String,
     key: String,
 ) -> Result<Option<String>, String> {
-    let db = state.db.lock().unwrap();
+    let db = state.cache_db.lock().unwrap();
     match db.query_row(
         "SELECT json FROM cache WHERE scope=?1 AND key=?2",
         rusqlite::params![scope, key],
@@ -89,7 +104,7 @@ pub async fn cache_set(
     key: String,
     json: String,
 ) -> Result<(), String> {
-    let db = state.db.lock().unwrap();
+    let db = state.cache_db.lock().unwrap();
     db.execute(
         "INSERT INTO cache(scope, key, json) VALUES(?1, ?2, ?3)
          ON CONFLICT(scope, key) DO UPDATE SET json=excluded.json",
@@ -102,7 +117,7 @@ pub async fn cache_set(
 /// Delete every entry in a scope (e.g. all of a client's tree cache).
 #[tauri::command]
 pub async fn cache_clear(state: tauri::State<'_, AppState>, scope: String) -> Result<(), String> {
-    let db = state.db.lock().unwrap();
+    let db = state.cache_db.lock().unwrap();
     db.execute("DELETE FROM cache WHERE scope=?1", rusqlite::params![scope])
         .map_err(|e| e.to_string())?;
     Ok(())
@@ -115,7 +130,7 @@ pub async fn cache_del(
     scope: String,
     key: String,
 ) -> Result<(), String> {
-    let db = state.db.lock().unwrap();
+    let db = state.cache_db.lock().unwrap();
     db.execute(
         "DELETE FROM cache WHERE scope=?1 AND key=?2",
         rusqlite::params![scope, key],
