@@ -192,7 +192,7 @@
   /** Re-diff `rightText` against the left side and rebuild the regions. `keep` is
    *  an absolute line index in the right file, so the caret survives the new block
    *  structure. */
-  function rebuild(rightText: string, caret: Caret | number) {
+  function rebuild(rightText: string, caret: Caret | number, col = 0) {
 initSplit(leftText.trim() === "");
     blocks = toBlocks(diffLines(leftText, rightText));
     const regions = blocks.map((b, i) => ({
@@ -204,13 +204,18 @@ initSplit(leftText.trim() === "");
     let target: Caret = { region: 0, line: 0, col: 0 };
     if (typeof caret === "number") {
       let n = caret;
+      const put = (r: (typeof regions)[number], line: number) => ({
+        region: r.region,
+        line,
+        col: Math.min(col, r.lines[line]?.length ?? 0),
+      });
       for (const r of regions) {
         if (n < r.lines.length) {
-          target = { region: r.region, line: n, col: 0 };
+          target = put(r, n);
           break;
         }
         n -= r.lines.length;
-        target = { region: r.region, line: Math.max(0, r.lines.length - 1), col: 0 };
+        target = put(r, Math.max(0, r.lines.length - 1));
       }
     } else {
       target = caret;

@@ -162,7 +162,19 @@ export function deleteBackward(state: DocState): DocState {
       r.lines = [];
       return { doc, caret: { region: r.region, line: 0, col: 0 } };
     }
-    return state;
+    // Otherwise join this line onto the previous region's last line. The regions
+    // themselves are never merged or removed — this one may end up empty, which
+    // is a perfectly valid block — so the structure (conflict tracking in the
+    // resolve window, diff blocks in the diff window) survives the edit while
+    // the keystroke still does what the user asked.
+    const i = doc.regions.findIndex((x) => x.region === r.region);
+    const prev = doc.regions.slice(0, i).reverse().find((x) => x.lines.length > 0);
+    if (!prev) return state; // start of the document: nothing to join onto
+    const at = prev.lines.length - 1;
+    const col = prev.lines[at].length;
+    prev.lines[at] += r.lines[0];
+    r.lines.splice(0, 1);
+    return { doc, caret: { region: prev.region, line: at, col } };
   }
   const prev = r.lines[caret.line - 1];
   r.lines[caret.line - 1] = prev + r.lines[caret.line];
@@ -186,7 +198,15 @@ export function deleteForward(state: DocState): DocState {
       r.lines = [];
       return { doc, caret: { region: r.region, line: 0, col: 0 } };
     }
-    return state;
+    // Pull the NEXT region's first line up onto this one — same reasoning as
+    // backspace at a region's first line: text joins, blocks stay (the next one
+    // may become empty).
+    const i = doc.regions.findIndex((x) => x.region === r.region);
+    const next = doc.regions.slice(i + 1).find((x) => x.lines.length > 0);
+    if (!next) return state; // end of the document
+    r.lines[caret.line] = line + next.lines[0];
+    next.lines.splice(0, 1);
+    return { doc, caret };
   }
   r.lines[caret.line] = line + r.lines[caret.line + 1];
   r.lines.splice(caret.line + 1, 1);
