@@ -82,17 +82,21 @@
   // ADDED file (no previous version, left side empty) defaults to a sliver so
   // the real content isn't halved for the sake of a blank column.
   const SPLIT_KEY = "diffsplit";
+  const SPLIT_MIN = 0.15;
+  const SPLIT_MAX = 0.85;
   let split = $state(0.5);
-  let splitDragged = false; // only a user drag persists
   // An ADDED file has no previous version: one pane, no gutter. The hidden
   // columns stay in the DOM at zero width so the change-navigation anchors
   // (data-change) keep their positions.
   let single = $state(false);
   let gridEl = $state<HTMLDivElement>();
+  /** Restore the shared split; `leftEmpty` only decides single-pane mode. The
+   *  saved value is never touched by an added file — it collapsed the split for
+   *  every LATER two-pane window, because this key is shared across windows. */
   function initSplit(leftEmpty: boolean) {
     single = leftEmpty;
     const saved = Number(cacheGetSync("nav", SPLIT_KEY) ?? NaN);
-    if (!leftEmpty && Number.isFinite(saved)) split = Math.min(0.85, Math.max(0.15, saved));
+    if (Number.isFinite(saved)) split = Math.min(SPLIT_MAX, Math.max(SPLIT_MIN, saved));
   }
   const gridCols = $derived(
     single
@@ -103,16 +107,19 @@
     // Only from the gutter background — the revert buttons stay clickable.
     if ((e.target as HTMLElement).closest("button")) return;
     e.preventDefault();
+    let moved = false;
     const move = (ev: PointerEvent) => {
       if (!gridEl) return;
       const r = gridEl.getBoundingClientRect();
-      split = Math.min(0.85, Math.max(0.08, (ev.clientX - r.left) / r.width));
-      splitDragged = true;
+      split = Math.min(SPLIT_MAX, Math.max(SPLIT_MIN, (ev.clientX - r.left) / r.width));
+      moved = true;
     };
     const up = () => {
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
-      if (splitDragged) cacheSet("nav", SPLIT_KEY, String(split));
+      // Persist only a real drag in a two-pane window, and only within the
+      // clamp a restore accepts — otherwise the next window can't use it.
+      if (moved && !single) cacheSet("nav", SPLIT_KEY, String(split));
     };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
@@ -192,8 +199,8 @@
    *  an absolute line index in the right file, so the caret survives the new block
    *  structure. */
   function rebuild(rightText: string, caret: Caret | number) {
-if (!splitDragged) initSplit(leftText.trim() === "");
-        blocks = toBlocks(diffLines(leftText, rightText));
+initSplit(leftText.trim() === "");
+    blocks = toBlocks(diffLines(leftText, rightText));
     const regions = blocks.map((b, i) => ({
       region: i,
       kind: b.kind === "same" ? "" : "add",
