@@ -115,6 +115,7 @@ pub fn run() {
             commands::is_release_build,
             commands::p4_env_port,
             index::cache_get,
+            index::cache_get_scope,
             index::cache_set,
             index::cache_clear,
             index::cache_del,

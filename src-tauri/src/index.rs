@@ -114,6 +114,23 @@ pub async fn cache_set(
     Ok(())
 }
 
+/// Every entry of a scope, for hydrating a whole namespace in one query (the
+/// boot-time prefs live in one scope, and each is read synchronously).
+#[tauri::command]
+pub async fn cache_get_scope(
+    state: tauri::State<'_, AppState>,
+    scope: String,
+) -> Result<Vec<(String, String)>, String> {
+    let db = state.cache_db.lock().unwrap();
+    let mut stmt = db
+        .prepare("SELECT key, json FROM cache WHERE scope=?1")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([&scope], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        .map_err(|e| e.to_string())?;
+    Ok(rows.filter_map(Result::ok).collect())
+}
+
 /// Delete every entry in a scope (e.g. all of a client's tree cache).
 #[tauri::command]
 pub async fn cache_clear(state: tauri::State<'_, AppState>, scope: String) -> Result<(), String> {

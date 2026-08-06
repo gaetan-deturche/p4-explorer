@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { hydrateScope } from "$lib/store.svelte";
   import { untrack, onMount, onDestroy } from "svelte";
   import { getVersion } from "@tauri-apps/api/app";
   import {
@@ -152,7 +153,13 @@
   // --- closable views (Depot pane + center tabs), persisted; re-shown via the
   //     View menu. Depot and Streams are hidden by default.
   let views = $state<Views>(loadViews());
-  $effect(() => saveViews(views));
+  // Not before the nav scope is hydrated from SQLite: this effect writes views
+  // back, and with localStorage evicted it would persist the DEFAULT layout
+  // over the real one milliseconds before hydration could restore it.
+  let navReady = $state(false);
+  $effect(() => {
+    if (navReady) saveViews(views);
+  });
   const TABS: {
     key: "history" | "pending" | "reviews" | "streams" | "log" | "notes";
     label: string;
@@ -580,17 +587,26 @@
       histSubject: () => history.subject,
       histMode: () => history.mode,
     });
-    // Reconnect to the server used last session. A KNOWN server goes through
-    // switchServerTo's optimistic path: the cached workspace opens immediately —
-    // every pane paints from the store — and the real connect validates in the
-    // background. Booting through the full connect() instead left the whole app
-    // blank for a handshake's worth of round-trips while every cache sat ready.
-    const last = loadLastServer();
-    if (last) {
-      void connection.switchServerTo(last);
-    } else {
-      void connection.connect(); // first run: adopt ambient P4PORT
-    }
+    // Boot order matters: every boot decision (last server, cached workspace
+    // list, saved workspace, per-client view/tab) is a SYNCHRONOUS read of the
+    // `nav` scope, so that scope is hydrated from SQLite FIRST — localStorage
+    // alone evicts, and one lost key used to reset the tab (or worse, the
+    // save-effects then persisted the fallback over the real state).
+    void (async () => {
+      await hydrateScope("nav");
+      views = loadViews(); // re-read: the pre-hydration value may be defaults
+      navReady = true;
+      // Reconnect to the server used last session. A KNOWN server goes through
+      // switchServerTo's optimistic path: the cached workspace opens
+      // immediately — every pane paints from the store — and the real connect
+      // validates in the background.
+      const last = loadLastServer();
+      if (last) {
+        void connection.switchServerTo(last);
+      } else {
+        void connection.connect(); // first run: adopt ambient P4PORT
+      }
+    })();
     getVersion()
       .then((v) => (appVersion = v))
       .catch(() => {});
