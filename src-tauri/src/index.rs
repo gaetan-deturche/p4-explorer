@@ -57,7 +57,19 @@ pub fn init_conn(db: &Connection) -> rusqlite::Result<()> {
     db.pragma_update(None, "busy_timeout", 5000)?; // first: the others may need the lock
     db.pragma_update(None, "journal_mode", "WAL")?;
     db.pragma_update(None, "synchronous", "NORMAL")?;
+    // After a successful checkpoint the WAL file shrinks back to this instead of
+    // squatting at its high-water mark forever (observed: 269MB of dead
+    // generations, because two busy connections kept starving the passive
+    // auto-checkpoint).
+    db.pragma_update(None, "journal_size_limit", 67108864)?; // 64 MiB
     Ok(())
+}
+
+/// Best-effort TRUNCATE checkpoint: backfill the WAL into the database and
+/// shrink the file. Never fails the caller — a busy reader just means the next
+/// quiesce point gets it.
+pub fn checkpoint(db: &Connection) {
+    let _ = db.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()));
 }
 
 pub fn init_schema(db: &Connection) -> rusqlite::Result<()> {
@@ -239,6 +251,11 @@ fn store_paths(state: &AppState, key: &str, paths: Vec<String>) -> Result<usize,
             }
         }
         tx.commit().map_err(|e| e.to_string())?;
+        // The index rebuild is by far the biggest writer (hundreds of MB of
+        // frames in one transaction). The moment it commits is the cheapest
+        // time to backfill — leaving it to the passive auto-checkpoint is what
+        // let the WAL grow unbounded.
+        checkpoint(&db);
     }
     *state.mem.lock().unwrap() = Some((key.to_string(), to_entries(paths)));
     Ok(n)

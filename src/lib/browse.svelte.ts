@@ -522,6 +522,7 @@ export const browse = {
     if (!h || s === source) return;
     source = s;
     saveBrowseSource(s); // persist across workspace switch + restart
+    if (s === "local") void browse.refreshLocalIndexIfStale();
     selectedTreePath = "";
     const rootP = rootPathForSource();
     if (!rootP) return; // no workspace open (derive renders nothing)
@@ -642,9 +643,22 @@ export const browse = {
     if (!h || !h.connected() || !h.conn().client || !clientRoot || !rootPath) return;
     try {
       await idx.buildLocal(localKey(), clientRoot, rootPath);
+      cacheSet("nav", `idxlocalbuilt:${localKey()}`, String(Date.now()));
     } catch {
       /* best effort */
     }
+  },
+  /** Refresh the Local index only when it has gone stale. Rebuilding it on
+   *  EVERY boot walked ~600k files and rewrote as many rows — a >100MB WAL
+   *  transaction per restart, which is what bloated the database and starved
+   *  its checkpoints. Half an hour of staleness is fine for a fuzzy-search
+   *  index; a truly fresh view is one Refresh away. */
+  async refreshLocalIndexIfStale() {
+    if (!h || !h.connected() || !h.conn().client) return;
+    const key = `idxlocalbuilt:${localKey()}`;
+    const at = Number((await cacheGet("nav", key)) ?? 0);
+    if (Date.now() - at < 30 * 60 * 1000) return;
+    void browse.buildLocalIndex();
   },
   // Build the whole-depot index (eager, on connect). Can be large on big servers.
   async buildDepotIndex() {
@@ -664,7 +678,7 @@ export const browse = {
       indexCount = 0;
     }
     if (indexCount === 0) browse.buildIndex();
-    browse.buildLocalIndex(); // fire-and-forget refresh of the on-disk index
+    void browse.refreshLocalIndexIfStale(); // NOT unconditional — see the method
   },
   // Ensure the whole-depot index exists (build once per server, eager on connect).
   async ensureDepotIndex() {

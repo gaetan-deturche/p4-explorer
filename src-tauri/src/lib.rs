@@ -60,6 +60,17 @@ pub fn run() {
                     (mk(), mk())
                 });
             app.manage(index::AppState::new(db, cache_db));
+            // Idle janitor: a TRUNCATE checkpoint every 10 minutes on its own
+            // connection, so the WAL returns to zero whenever the app quiets
+            // down. Best-effort — busy readers just defer it to the next tick.
+            let janitor_db = dir.join("p4gui.db");
+            std::thread::spawn(move || loop {
+                std::thread::sleep(std::time::Duration::from_secs(600));
+                if let Ok(c) = rusqlite::Connection::open(&janitor_db) {
+                    let _ = c.pragma_update(None, "busy_timeout", 2000);
+                    index::checkpoint(&c);
+                }
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
