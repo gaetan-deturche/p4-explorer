@@ -266,13 +266,17 @@ export const reviews = {
     }
     loading = !painted; // with anything on screen, refresh silently
     error = "";
+    // Refresh to the depth already on screen: replacing a cached multi-page
+    // list with ONE fresh page made the view shrink and then regrow as the
+    // fill-effect re-paged. One request — the backend pages internally.
+    const depth = painted ? Math.min(Math.max(rows.length, PAGE), 200) : PAGE;
     try {
       const page = await p4.swarmReviews(h.conn(), {
         states,
         user,
         role,
         keywords: search.trim(),
-        max: PAGE,
+        max: depth,
         after: 0,
         streamPath: streamOnly ? (h.rootPath() ?? "") : "",
         hideSubmitted,
