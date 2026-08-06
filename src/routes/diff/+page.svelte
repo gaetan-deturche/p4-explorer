@@ -523,7 +523,7 @@ initSplit(leftText.trim() === "");
 </script>
 
 <!-- Read-only side: mark, line number, coloured code — as in the resolve window. -->
-{#snippet pane(lines: string[], from: number, kind: string)}
+{#snippet pane(lines: string[], from: number, kind: string, fill = 0)}
   {#each lines as line, k}
     <div class="line k-{kind}"><span class="mk">{kind === "del" ? "-" : ""}</span><span class="ln"
         >{from + k}</span
@@ -531,6 +531,13 @@ initSplit(leftText.trim() === "");
         >{#if tokens.get(line)}{#each tokens.get(line) ?? [] as run}<span
               style:color={run.color}>{run.content}</span>{/each}{:else}{line || " "}{/if}</span
       ></div>
+  {/each}
+  <!-- Rows this side does not HAVE: the block is taller because the other side
+       has more lines. Rendered explicitly and hatched, because a blank row is
+       indistinguishable from a real empty line — only the line numbers gave it
+       away. -->
+  {#each { length: fill } as _, k (k)}
+    <div class="line void" aria-hidden="true"></div>
   {/each}
 {/snippet}
 
@@ -593,7 +600,7 @@ initSplit(leftText.trim() === "");
               data-change={b.kind === "same" ? undefined : i}
               style="top:{tops[i]}px; height:{rows[i] * LH}px"
             >
-              {@render pane(b.left, starts[i].l, leftKind(i))}
+              {@render pane(b.left, starts[i].l, leftKind(i), rows[i] - b.left.length)}
             </div>
           {/each}
         </div>
@@ -821,6 +828,16 @@ initSplit(leftText.trim() === "");
     width: 1em;
     text-align: center;
     user-select: none;
+  }
+  /* A row that does not exist on this side. Faint diagonal hatching reads as
+     "nothing here" without competing with the add/drop colours. */
+  .void {
+    background-image: repeating-linear-gradient(
+      -45deg,
+      transparent 0 5px,
+      var(--border, #333) 5px 6px
+    );
+    opacity: 0.5;
   }
   .ln {
     flex: none;

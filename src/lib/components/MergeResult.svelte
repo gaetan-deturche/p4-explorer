@@ -410,6 +410,11 @@
           >
         </div>
       {/each}
+      <!-- Rows this side does not have (the other side is longer). Hatched, so a
+           void never looks like a real empty line. -->
+      {#each { length: Math.max(0, (rows[i] ?? r.lines.length) - r.lines.length) } as _, k (k)}
+        <div class="rl void" style="height:{lineHeight}px" aria-hidden="true"></div>
+      {/each}
     </div>
   {/each}
 
@@ -483,6 +488,15 @@
     line-height: var(--lh);
     border-left: 3px solid transparent;
     box-sizing: border-box;
+  }
+  /* A row that does not exist on this side — see the diff window's .void. */
+  .void {
+    background-image: repeating-linear-gradient(
+      -45deg,
+      transparent 0 5px,
+      var(--border, #333) 5px 6px
+    );
+    opacity: 0.5;
   }
   .mk {
     flex: none;
