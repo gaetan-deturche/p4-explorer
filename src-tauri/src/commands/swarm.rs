@@ -291,14 +291,17 @@ pub async fn swarm_reviews(conn: P4Conn, query: ReviewQuery) -> Result<ReviewPag
             })
         };
 
-        // With a stream filter most of a server page can be for other depots, so
-        // keep pulling until the caller has a screenful. Bounded: a filter that
-        // matches nothing must not turn one request into an unbounded crawl.
-        const MAX_FETCHES: u32 = 8;
+        // With a stream filter most of a server page can be for other depots —
+        // measured ~4-6 kept per 100 with "this stream"+"hide submitted" — so
+        // keep pulling until the caller has what it asked for. Bounded by rows
+        // SCANNED, not fetches: a fixed 8-page cap under-delivered deep
+        // requests, and a filter matching nothing must still not crawl forever.
+        const MAX_SCANNED: u32 = 3000;
+        let mut scanned: u32 = 0;
         let mut out: Vec<ReviewRow> = Vec::new();
         let mut after = query.after;
         let mut last_seen = 0u64;
-        for _ in 0..MAX_FETCHES {
+        while scanned < MAX_SCANNED {
             let url = page_url(after);
             let resp = match client.get(&url).basic_auth(&conn.user, Some(&ticket)).send() {
                 Ok(r) if r.status().is_success() => r,
@@ -323,6 +326,7 @@ pub async fn swarm_reviews(conn: P4Conn, query: ReviewQuery) -> Result<ReviewPag
                 .and_then(|v| v.as_array())
                 .map(|a| a.as_slice())
                 .unwrap_or_default();
+            scanned += raw.len() as u32;
             out.extend(raw.iter().filter_map(&parse_row));
             // `lastSeen` is Swarm's cursor. It repeats on the final page, so a
             // short page is what actually ends the paging.

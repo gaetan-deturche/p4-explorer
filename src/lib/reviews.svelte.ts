@@ -282,12 +282,36 @@ export const reviews = {
         hideSubmitted,
       });
       if (mine !== seq) return; // a newer filter already asked
-      rows = page.reviews;
-      cursor = page.lastSeen;
+      // Never swap a SHORTER list over the cached paint while more exists —
+      // the backend's scan budget can under-deliver a deep request, and the
+      // shrink-then-regrow is exactly the flicker this replaces. Keep the old
+      // rows on screen and page until the fresh list reaches the same depth.
+      const fresh = [...page.reviews];
+      let seen = page.lastSeen;
+      let guard = 6;
+      while (fresh.length < depth && seen > 0 && guard-- > 0) {
+        const more = await p4.swarmReviews(h.conn(), {
+          states,
+          user,
+          role,
+          keywords: search.trim(),
+          max: PAGE,
+          after: seen,
+          streamPath: streamOnly ? (h.rootPath() ?? "") : "",
+          hideSubmitted,
+        });
+        if (mine !== seq) return;
+        const known = new Set(fresh.map((r) => r.id));
+        fresh.push(...more.reviews.filter((r) => !known.has(r.id)));
+        seen = more.lastSeen;
+        if (more.error) break;
+      }
+      rows = fresh;
+      cursor = seen;
       error = page.error;
       if (!page.error) {
         storeSet(scope, fp, JSON.stringify({ rows, cursor }));
-        absorb(page.reviews, streamOnly);
+        absorb(fresh, streamOnly);
       }
       version++;
     } catch (e) {
