@@ -69,13 +69,22 @@
     if (i < 0) return null;
     const r = docState.doc.regions[i];
     const top =
-      tops[i] + (r.conflict ? toolbarHeight : 0) + Math.min(docState.caret.line, r.lines.length) * lineHeight;
+      tops[i] + (r.conflict ? toolbarHeight : 0) + Math.min(docState.caret.line, r.lines.length) * lh;
     const line = r.lines[docState.caret.line] ?? "";
     return { top, prefix: line.slice(0, docState.caret.col) };
   });
 
   let probe: HTMLSpanElement | undefined = $state();
   let caretLeft = $state(0);
+  /** The row height the BROWSER ended up with, which is not `lineHeight`: at a
+   *  fractional CSS height (12px * 1.45 = 17.4) the layout snaps every row to a
+   *  device-pixel multiple — 17.3906 at 125% scaling. Positioning the caret at
+   *  `line * 17.4` therefore drifted ~0.0094px per line: invisible at the top of
+   *  a file, 2.8px by line 300, and eventually a whole row off (which would also
+   *  make a click land on the wrong line). Measured from a real row, so it is
+   *  right at any scale or zoom. */
+  let rowH = $state(0);
+  const lh = $derived(rowH || lineHeight);
 
   /** Width of `text` as this pane renders it. The probe carries the same font,
    *  white-space and tab-size as a code line, so measuring beats computing:
@@ -114,7 +123,7 @@
         // A selected line-break shows as a sliver, so an empty line still reads
         // as selected.
         const w = Math.max(x2 - x1, b0 >= line.length && !(i === ti && l === to.line) ? 4 : 0);
-        out.push({ top: base + l * lineHeight, left: x1, width: w });
+        out.push({ top: base + l * lh, left: x1, width: w });
       }
     }
     return out;
@@ -125,6 +134,9 @@
     const c = caretAt;
     if (!c || !probe) return;
     caretLeft = gutter() + widthOf(c.prefix);
+    const row = pane?.querySelector(".rl") as HTMLElement | null;
+    const h = row?.getBoundingClientRect().height ?? 0;
+    if (h > 0 && Math.abs(h - rowH) > 0.001) rowH = h;
   });
 
   /** Keep the caret visible without yanking the view around. */
@@ -192,7 +204,7 @@
     for (let i = 0; i < tops.length; i++) if (y >= tops[i]) idx = i;
     const r = docState.doc.regions[idx];
     const inner = y - tops[idx] - (r.conflict ? toolbarHeight : 0);
-    const line = Math.max(0, Math.min(Math.floor(inner / lineHeight), Math.max(0, r.lines.length - 1)));
+    const line = Math.max(0, Math.min(Math.floor(inner / lh), Math.max(0, r.lines.length - 1)));
     const x = clientX - box.left - gutter();
     return { region: r.region, line, col: columnAtX(r.lines[line] ?? "", x) };
   }
