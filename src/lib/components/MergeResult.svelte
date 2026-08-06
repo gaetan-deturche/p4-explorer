@@ -411,10 +411,15 @@
         </div>
       {/each}
       <!-- Rows this side does not have (the other side is longer). Hatched, so a
-           void never looks like a real empty line. -->
-      {#each { length: Math.max(0, (rows[i] ?? r.lines.length) - r.lines.length) } as _, k (k)}
-        <div class="rl void" style="height:{lineHeight}px" aria-hidden="true"></div>
-      {/each}
+           void never looks like a real empty line — one element for the whole
+           run, so the diagonals stay continuous across rows. -->
+      {#if (rows[i] ?? r.lines.length) > r.lines.length}
+        <div
+          class="void"
+          style="height:{((rows[i] ?? r.lines.length) - r.lines.length) * lineHeight}px"
+          aria-hidden="true"
+        ></div>
+      {/if}
     </div>
   {/each}
 
@@ -491,12 +496,17 @@
   }
   /* A row that does not exist on this side — see the diff window's .void. */
   .void {
+    /* Ramped stops, not hard ones: a hard edge at -45deg lands between device
+       pixels at fractional display scaling and the stripes come out jittery.
+       Ramping lets them anti-alias, and the alpha is the only opacity knob. */
     background-image: repeating-linear-gradient(
       -45deg,
-      transparent 0 5px,
-      var(--border, #333) 5px 6px
+      transparent 0px,
+      rgba(255, 255, 255, 0.16) 1px,
+      rgba(255, 255, 255, 0.16) 2px,
+      transparent 3px,
+      transparent 9px
     );
-    opacity: 0.5;
   }
   .mk {
     flex: none;

@@ -533,12 +533,13 @@ initSplit(leftText.trim() === "");
       ></div>
   {/each}
   <!-- Rows this side does not HAVE: the block is taller because the other side
-       has more lines. Rendered explicitly and hatched, because a blank row is
-       indistinguishable from a real empty line — only the line numbers gave it
-       away. -->
-  {#each { length: fill } as _, k (k)}
-    <div class="line void" aria-hidden="true"></div>
-  {/each}
+       has more lines. Hatched, because a blank row is indistinguishable from a
+       real empty line — only the line numbers gave it away. Drawn as ONE element
+       spanning the whole run, so the diagonals run continuously instead of
+       restarting (and visibly stepping) at every row. -->
+  {#if fill > 0}
+    <div class="void" style="height:{fill * LH}px" aria-hidden="true"></div>
+  {/if}
 {/snippet}
 
 {#snippet noToolbar(_region: number)}{/snippet}
@@ -832,12 +833,17 @@ initSplit(leftText.trim() === "");
   /* A row that does not exist on this side. Faint diagonal hatching reads as
      "nothing here" without competing with the add/drop colours. */
   .void {
+    /* Ramped stops, not hard ones: a hard edge at -45deg lands between device
+       pixels at fractional display scaling and the stripes come out jittery.
+       Ramping lets them anti-alias, and the alpha is the only opacity knob. */
     background-image: repeating-linear-gradient(
       -45deg,
-      transparent 0 5px,
-      var(--border, #333) 5px 6px
+      transparent 0px,
+      rgba(255, 255, 255, 0.16) 1px,
+      rgba(255, 255, 255, 0.16) 2px,
+      transparent 3px,
+      transparent 9px
     );
-    opacity: 0.5;
   }
   .ln {
     flex: none;
