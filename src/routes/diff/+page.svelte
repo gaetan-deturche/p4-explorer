@@ -219,6 +219,31 @@ initSplit(leftText.trim() === "");
     anchor = null;
   }
 
+  /** Re-diff after an edit settles.
+   *
+   *  `blocks` used to be computed only on load and on save, while every marker,
+   *  colour and change count derives from `agrees(i)` — a whole-BLOCK comparison.
+   *  Since everything after the last real change is ONE "same" block, a single
+   *  Enter in it made that entire block unequal, so the rest of the file painted
+   *  as removed/added. Re-diffing turns the edit back into its own small block.
+   *
+   *  Debounced (typing shouldn't re-diff per keystroke) and deferred while a
+   *  selection is open, because a re-diff rebuilds the regions the selection's
+   *  endpoints point into. */
+  let reflowTimer: number | null = null;
+  function scheduleReflow() {
+    if (reflowTimer !== null) window.clearTimeout(reflowTimer);
+    reflowTimer = window.setTimeout(() => {
+      reflowTimer = null;
+      if (!ds || !editable) return;
+      if (anchor) {
+        scheduleReflow(); // selection open — try again once it collapses
+        return;
+      }
+      rebuild(docText(ds.doc), absoluteLine());
+    }, 350);
+  }
+
   /** The caret's line counted from the top of the right file. */
   function absoluteLine(): number {
     if (!ds) return 0;
@@ -305,6 +330,7 @@ initSplit(leftText.trim() === "");
       ds = next;
       anchor = null;
       dirty = true;
+      scheduleReflow();
     };
     switch (a.t) {
       case "insert":
@@ -393,6 +419,7 @@ initSplit(leftText.trim() === "");
           hist = u.history;
           anchor = null;
           dirty = true;
+          scheduleReflow(); // the restored doc predates the current blocks
         }
         break;
       }
@@ -406,6 +433,7 @@ initSplit(leftText.trim() === "");
           hist = r.history;
           anchor = null;
           dirty = true;
+          scheduleReflow(); // the restored doc predates the current blocks
         }
         break;
       }
@@ -435,6 +463,10 @@ initSplit(leftText.trim() === "");
       // The file on disk is the new right side, so the diff is recomputed against
       // it: blocks that were edited into agreement stop being changes. The save is
       // a natural checkpoint, so history starts again from here.
+      if (reflowTimer !== null) {
+        window.clearTimeout(reflowTimer); // this save IS the re-diff
+        reflowTimer = null;
+      }
       rebuild(text, at);
       hist = emptyHistory();
       if (changes.length) goTo(Math.min(current, changes.length - 1));
