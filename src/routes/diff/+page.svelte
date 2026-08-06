@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { cacheGetSync, cacheSet } from "$lib/store.svelte";
   //! The diff window: the same layout, palette and editing as the resolve window,
   //! with one reference side instead of two.
   //!
@@ -81,22 +80,22 @@
   // Fraction of the width given to the LEFT pane. Persisted once dragged; an
   // ADDED file (no previous version, left side empty) defaults to a sliver so
   // the real content isn't halved for the sake of a blank column.
-  const SPLIT_KEY = "diffsplit";
   const SPLIT_MIN = 0.15;
   const SPLIT_MAX = 0.85;
+  // Deliberately NOT persisted: every diff is a different file with a different
+  // shape, so last window's split is not a useful default for this one — and one
+  // shared key across windows is what let an added-file window collapse the
+  // panes of every later diff. Drag applies to the window you are in.
   let split = $state(0.5);
   // An ADDED file has no previous version: one pane, no gutter. The hidden
   // columns stay in the DOM at zero width so the change-navigation anchors
   // (data-change) keep their positions.
   let single = $state(false);
   let gridEl = $state<HTMLDivElement>();
-  /** Restore the shared split; `leftEmpty` only decides single-pane mode. The
-   *  saved value is never touched by an added file — it collapsed the split for
-   *  every LATER two-pane window, because this key is shared across windows. */
+  /** An added file (empty left side) renders as a single pane; anything else
+   *  opens evenly split. */
   function initSplit(leftEmpty: boolean) {
     single = leftEmpty;
-    const saved = Number(cacheGetSync("nav", SPLIT_KEY) ?? NaN);
-    if (Number.isFinite(saved)) split = Math.min(SPLIT_MAX, Math.max(SPLIT_MIN, saved));
   }
   const gridCols = $derived(
     single
@@ -107,19 +106,14 @@
     // Only from the gutter background — the revert buttons stay clickable.
     if ((e.target as HTMLElement).closest("button")) return;
     e.preventDefault();
-    let moved = false;
     const move = (ev: PointerEvent) => {
       if (!gridEl) return;
       const r = gridEl.getBoundingClientRect();
       split = Math.min(SPLIT_MAX, Math.max(SPLIT_MIN, (ev.clientX - r.left) / r.width));
-      moved = true;
     };
     const up = () => {
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
-      // Persist only a real drag in a two-pane window, and only within the
-      // clamp a restore accepts — otherwise the next window can't use it.
-      if (moved && !single) cacheSet("nav", SPLIT_KEY, String(split));
     };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
