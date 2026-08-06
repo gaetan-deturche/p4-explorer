@@ -22,7 +22,13 @@ pub async fn p4_pending(conn: P4Conn, max: u32) -> Res {
 /// Files open (in the workspace) for a pending changelist (`opened -c`).
 #[tauri::command]
 pub async fn p4_opened(conn: P4Conn, change: String) -> Res {
-    run(conn, v(&["opened", "-c", &change])).await
+    // Empty change = every opened file of the client (one cheap command; the
+    // change-detection poll fingerprints it).
+    if change.is_empty() {
+        run(conn, v(&["opened"])).await
+    } else {
+        run(conn, v(&["opened", "-c", &change])).await
+    }
 }
 
 /// Shelved files of a pending changelist (`describe -S -s`), one row per file.

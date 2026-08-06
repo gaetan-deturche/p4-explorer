@@ -134,6 +134,7 @@ function startKeepAlive() {
         h.setConnError("");
       }
       if (browse.rootPath) p4.dirs(h.conn(), browse.rootPath).catch(() => {}); // keep cache warm
+      void pending.checkExternalChanges(); // external checkouts show within a tick
     } catch {
       if (connected) {
         connected = false;

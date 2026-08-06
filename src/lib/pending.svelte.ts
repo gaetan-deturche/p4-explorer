@@ -25,6 +25,8 @@ let reviews = $state<Record<string, ReviewInfo | null>>({}); // change → Swarm
 // Depot paths p4 is holding a resolve on. `p4 opened` says nothing about resolve
 // state, so a conflicted file is indistinguishable from a plain edit without this.
 let unresolved = $state<Set<string>>(new Set());
+// Fingerprint of `p4 opened` from the last poll; null = no baseline yet.
+let openedFingerprint: string | null = null;
 
 // The pending list is DERIVED from the store — the single source the UI reads
 // (see the `rows`/`loading` getters). `load()` only writes the p4 result to the
@@ -125,10 +127,7 @@ async function runOfflineLoop() {
   if (offlineStopped) return;
   const ran = await pending.scanOffline();
   if (offlineStopped) return;
-  // Same cadence keeps the OPENED files eventually consistent too: a checkout
-  // made outside the app (editor, p4v) used to stay invisible until a tab or
-  // workspace switch — nothing else ever re-asked p4.
-  if (ran) pending.load();
+
   // If the scan was skipped (another scan held the lock — e.g. right after a
   // workspace switch), retry soon instead of waiting the full interval.
   const delay = ran ? (offlineFocused ? OFFLINE_MS_FOCUS : OFFLINE_MS_BG) : 5_000;
@@ -357,9 +356,30 @@ export const pending = {
     const r = await p4.pending(conn, 100).catch(() => [] as P4Record[]);
     if (h.conn().client !== client) return; // switched workspace during the fetch
     storeSet("p4:pending", client, JSON.stringify(r)); // ONE write → rows re-derive
+    openedFingerprint = null; // next poll re-baselines instead of re-reloading
     version++; // fresh list in; also signals open CLs to refetch their file lists
     pending.loadReviews(); // fire-and-forget: populate Swarm review badges
     pending.loadUnresolved();
+  },
+
+  /** Cheap change-detection poll, run at keepalive rate: ONE `p4 opened` over
+   *  the whole client, fingerprinted. Only an actual change (a checkout made in
+   *  the editor or p4v, a revert elsewhere...) triggers the full pending reload
+   *  — so external changes show within seconds without per-tick churn. */
+  async checkExternalChanges() {
+    if (!h || !h.connected() || h.syncing() || !h.conn().client) return;
+    const conn = h.conn();
+    const recs = await p4.opened(conn, "").catch(() => null);
+    if (recs === null || h.conn().client !== conn.client) return; // error / switched
+    const fp = recs
+      .filter((r) => r.depotFile)
+      .map((r) => `${r.depotFile}|${r.action}|${r.change}`)
+      .sort()
+      .join("\n");
+    if (fp === openedFingerprint) return;
+    const first = openedFingerprint === null;
+    openedFingerprint = fp;
+    if (!first) pending.load(); // baseline tick just records; changes reload
   },
 
   /** Which opened files still need resolving (server-side filtered, so cheap). */
