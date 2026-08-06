@@ -12,7 +12,7 @@
 
 import { p4, type P4Conn, type P4Record, type ReviewRow } from "$lib/p4";
 import { openDiff as openDiffFor } from "$lib/opendiff";
-import { cacheGet, cacheSet, hydrate, storeGet, storeSet } from "$lib/store.svelte";
+import { cacheGet, cacheSet, storeSet } from "$lib/store.svelte";
 
 type Hooks = {
   conn: () => P4Conn;
@@ -78,14 +78,12 @@ let pool = new Map<number, PoolEntry>();
 let poolClient = ""; // pool contents belong to one client
 const POOL_CAP = 500;
 
-function loadPool(): void {
+async function loadPool(): Promise<void> {
   const client = h?.conn().client ?? "";
   if (client === poolClient) return;
   poolClient = client;
   pool = new Map();
-  const scope = cacheScope();
-  hydrate(scope, "pool");
-  const json = storeGet(scope, "pool");
+  const json = await cacheGet(cacheScope(), "pool"); // SQLite-backed, ~ms
   if (!json) return;
   try {
     for (const e of JSON.parse(json) as PoolEntry[]) pool.set(e.r.id, e);
@@ -239,9 +237,10 @@ export const reviews = {
     // paint every other tab gets; the fetch below reconciles.
     const scope = cacheScope();
     const fp = fingerprint();
-    hydrate(scope, fp);
-    loadPool();
-    const cached = storeGet(scope, fp);
+    await loadPool();
+    // SQLite is the source of truth; this resolves in ~ms and never misses an
+    // entry the way the localStorage mirror can.
+    const cached = await cacheGet(scope, fp);
     let painted = false;
     if (cached) {
       try {

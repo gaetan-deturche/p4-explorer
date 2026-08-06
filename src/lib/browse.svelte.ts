@@ -15,7 +15,7 @@ import { localChildren, type FolderContents } from "$lib/cache";
 import { history } from "$lib/history.svelte";
 import { pending } from "$lib/pending.svelte";
 import {
-  cacheGetSync,
+  cacheGet,
   cacheSet,
   cacheClearScope,
   storeGet,
@@ -173,7 +173,7 @@ async function computeFolderSync(path: string): Promise<void> {
   const cacheKey = path.toLowerCase();
   if (folderSyncCache.has(cacheKey) || markersInflight.has(cacheKey)) return;
   const client = h.conn().client;
-  const stored = parseJson<FolderSync>(cacheGetSync(syncScope(client), path));
+  const stored = parseJson<FolderSync>(await cacheGet(syncScope(client), path));
   if (stored) {
     folderSyncCache.set(cacheKey, stored);
     treeVer++;
