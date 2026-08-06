@@ -227,12 +227,14 @@ pub async fn merge_external(id: String) -> Result<String, String> {
 pub async fn open_merge_window(app: AppHandle, id: String, name: String) -> Result<(), String> {
     let label = format!("merge-{id}");
     let url = format!("merge?id={id}");
-    WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(url.into()))
+    let win = WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(url.into()))
         .title(format!("Resolve — {name}"))
         .inner_size(1400.0, 880.0)
         .min_inner_size(800.0, 480.0)
+        .visible(false) // shown by wingeom::apply, already at its remembered spot
         .build()
         .map_err(|e| format!("failed to open the resolve window: {e}"))?;
+    crate::wingeom::apply(&win, "merge");
     Ok(())
 }
 

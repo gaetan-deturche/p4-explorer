@@ -461,11 +461,15 @@ pub async fn open_diff_window(app: AppHandle, pair: DiffPair) -> Result<(), Stri
         if pair.right_editable { "1" } else { "0" },
     );
     let title = format!("Diff — {}", pair.title);
-    WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(url.into()))
+    let win = WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(url.into()))
         .title(&title)
         .inner_size(1280.0, 800.0)
         .min_inner_size(700.0, 400.0)
+        .visible(false) // shown by wingeom::apply, already at its remembered spot
         .build()
         .map_err(|e| format!("failed to open diff window: {e}"))?;
+    // One geometry shared by every diff window: their labels are unique, so
+    // per-window state could never be restored.
+    crate::wingeom::apply(&win, "diff");
     Ok(())
 }

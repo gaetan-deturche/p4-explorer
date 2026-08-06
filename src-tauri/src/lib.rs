@@ -1,5 +1,6 @@
 pub mod commands; // pub: the uediscover dev bin exercises unreal_remote directly
 mod index;
+mod wingeom;
 mod merge3;
 mod p4;
 
@@ -60,6 +61,11 @@ pub fn run() {
                     (mk(), mk())
                 });
             app.manage(index::AppState::new(db, cache_db));
+            // Put the main window back where it was (config has visible=false so
+            // this never shows as a jump), then reveal it.
+            if let Some(win) = app.get_webview_window("main") {
+                wingeom::apply(&win, "main");
+            }
             // Idle janitor: a TRUNCATE checkpoint every 10 minutes on its own
             // connection, so the WAL returns to zero whenever the app quiets
             // down. Best-effort — busy readers just defer it to the next tick.
