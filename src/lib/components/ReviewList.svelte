@@ -63,8 +63,8 @@
     onHideSubmitted: (v: boolean) => void;
     onLoadMore: () => void;
     onContent: (r: ReviewRow) => Promise<ReviewContent>;
-    /** Cached content (instant); undefined = never fetched (show loading). */
-    onContentCached: (r: ReviewRow) => ReviewContent | undefined;
+    /** Cached content (all cache layers, ~ms); undefined = never fetched. */
+    onContentCached: (r: ReviewRow) => Promise<ReviewContent | undefined>;
     onDiff: (depotFile: string, rev: number, change: string, submitted: boolean) => Promise<string>;
     onOpenDiff: (depotFile: string, rev: number, change: string, submitted: boolean) => void;
     onContext: (r: ReviewRow, e: MouseEvent) => void;
@@ -105,11 +105,11 @@
       return;
     }
     // Stale-while-revalidate, like the Pending tab's changelists: paint the
-    // cached files instantly, then let the fetch reconcile.
-    const cached = onContentCached(r);
-    exp[r.id] = cached
-      ? { open: true, loading: false, ...cached }
-      : { open: true, loading: true, files: [], change: r.change, submitted: false };
+    // cached files first (the read falls through to SQLite, ~ms), then let the
+    // fetch reconcile.
+    exp[r.id] = { open: true, loading: true, files: [], change: r.change, submitted: false };
+    const cached = await onContentCached(r);
+    if (cached) exp[r.id] = { open: exp[r.id]?.open ?? true, loading: false, ...cached };
     const c = await onContent(r);
     exp[r.id] = { open: exp[r.id]?.open ?? true, loading: false, ...c };
   }

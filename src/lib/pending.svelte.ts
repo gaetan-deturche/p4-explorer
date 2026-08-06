@@ -5,7 +5,7 @@
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { p4, type P4Conn, type P4Record, type ReviewInfo } from "$lib/p4";
 import { openDiff } from "$lib/opendiff";
-import { cacheGetSync, cacheSet, storeGet, hydrate, storeSet, storeSetMem } from "$lib/store.svelte";
+import { cacheGet, cacheGetSync, cacheSet, storeGet, hydrate, storeSet, storeSetMem } from "$lib/store.svelte";
 
 type Hooks = {
   conn: () => P4Conn;
@@ -96,18 +96,24 @@ function loadClFilesCache(client: string, change: string): P4Record[] | undefine
     return undefined;
   }
 }
-function saveClFilesCache(client: string, change: string, recs: P4Record[]): void {
-  if (client) cacheSet(`p4:clfiles:${client}`, change, JSON.stringify(recs));
-}
-function loadShelvedCache(client: string, change: string): P4Record[] | undefined {
+/** Like the sync variants below, but falling through to SQLite. localStorage is
+ *  only a bounded mirror — after enough caching it evicts, and a fresh boot then
+ *  found nothing synchronously and sat on "Loading files…" until p4 answered,
+ *  even though the list was a millisecond away on disk. */
+async function loadClCacheDeep(scope: string, change: string): Promise<P4Record[] | undefined> {
+  const client = h?.conn().client;
   if (!client) return undefined;
-  const json = cacheGetSync(`p4:clshelved:${client}`, change);
+  const json = await cacheGet(`${scope}:${client}`, change);
   if (json === null) return undefined;
   try {
     return JSON.parse(json) as P4Record[];
   } catch {
     return undefined;
   }
+}
+
+function saveClFilesCache(client: string, change: string, recs: P4Record[]): void {
+  if (client) cacheSet(`p4:clfiles:${client}`, change, JSON.stringify(recs));
 }
 function saveShelvedCache(client: string, change: string, recs: P4Record[]): void {
   if (client) cacheSet(`p4:clshelved:${client}`, change, JSON.stringify(recs));
@@ -600,8 +606,8 @@ export const pending = {
   // --- file-content providers for PendingList (no `this`; safe as callbacks) --
   /** The cached opened files of a changelist (sync) — for instant paint.
    *  `undefined` = never fetched (loading); `[]` = fetched, empty (no flash). */
-  localFilesCached(change: string): P4Record[] | undefined {
-    return h ? loadClFilesCache(h.conn().client, change) : undefined;
+  localFilesCached(change: string): Promise<P4Record[] | undefined> {
+    return loadClCacheDeep("p4:clfiles", change);
   },
   async localFiles(change: string): Promise<P4Record[]> {
     const conn = h!.conn();
@@ -613,10 +619,9 @@ export const pending = {
   /** The cached shelved files of a changelist (sync) — for instant paint.
    *  `undefined` = never fetched (loading); `[]` = fetched, empty (no flash).
    *  The default changelist can never have a shelf, so it's known-empty. */
-  shelvedFilesCached(change: string): P4Record[] | undefined {
-    if (!h) return undefined;
+  async shelvedFilesCached(change: string): Promise<P4Record[] | undefined> {
     if (change === "default") return [];
-    return loadShelvedCache(h.conn().client, change);
+    return loadClCacheDeep("p4:clshelved", change);
   },
   async shelvedFiles(change: string): Promise<P4Record[]> {
     if (change === "default") return [];

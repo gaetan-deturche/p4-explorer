@@ -44,10 +44,11 @@
     needsResolve: (depotFile: string) => boolean; // p4 is holding a resolve on it
     contextChange: string; // the changelist whose context menu is open (highlight it)
     onLocalFiles: (change: string) => Promise<P4Record[]>; // opened (workspace) files
-    // cached opened/shelved files (instant); undefined = never fetched (loading)
-    onLocalFilesCached: (change: string) => P4Record[] | undefined;
+    // cached opened/shelved files (all cache layers, resolves in ~ms);
+    // undefined = never fetched (loading)
+    onLocalFilesCached: (change: string) => Promise<P4Record[] | undefined>;
     onShelvedFiles: (change: string) => Promise<P4Record[]>; // shelved files
-    onShelvedFilesCached: (change: string) => P4Record[] | undefined;
+    onShelvedFilesCached: (change: string) => Promise<P4Record[] | undefined>;
     onLocalDiff: (depotFile: string) => Promise<string>; // local vs server
     onShelvedDiff: (depotFile: string, rev: number, change: string) => Promise<string>;
     onOpenLocalDiff: (depotFile: string) => void;
@@ -163,20 +164,26 @@
   // a refresh (e.g. after moving a file) doesn't flash "Loading…".
   async function loadCL(change: string) {
     const prev = cls[change];
-    // Paint the cached opened + shelved files instantly (so an expanded CL isn't
+    // Paint the cached opened + shelved files first (so an expanded CL isn't
     // empty — or flashing the empty state — while p4 runs); the fetch reconciles.
+    // The cache read is async because it falls through to SQLite (localStorage
+    // is a bounded mirror and evicts), but it resolves in ~ms — not p4 time.
     // `undefined` from the cache means NEVER fetched (show loading); `[]` means
     // fetched-and-empty (a genuine empty CL — render it empty, no loading flash).
-    const cachedLocal = prev?.local ?? onLocalFilesCached(change);
-    const cachedShelved = prev?.shelved ?? onShelvedFilesCached(change);
+    if (!prev) {
+      cls[change] = { open: true, loading: true, local: [], shelved: [], shelvedOpen: false };
+    }
+    const [cachedLocal, cachedShelved] = prev
+      ? [prev.local, prev.shelved]
+      : await Promise.all([onLocalFilesCached(change), onShelvedFilesCached(change)]);
     const known = cachedLocal !== undefined || cachedShelved !== undefined;
     cls[change] = {
-      open: prev?.open ?? true,
+      open: cls[change]?.open ?? true,
       // Spinner only when nothing is known yet — not for a cached empty CL.
       loading: !prev && !known,
       local: cachedLocal ?? [],
       shelved: cachedShelved ?? [],
-      shelvedOpen: prev?.shelvedOpen ?? false,
+      shelvedOpen: cls[change]?.shelvedOpen ?? false,
     };
     const [local, shelved] = await Promise.all([onLocalFiles(change), onShelvedFiles(change)]);
     const local2 = local.filter((f) => f.depotFile);

@@ -12,7 +12,7 @@
 
 import { p4, type P4Conn, type P4Record, type ReviewRow } from "$lib/p4";
 import { openDiff as openDiffFor } from "$lib/opendiff";
-import { cacheGetSync, cacheSet, hydrate, storeGet, storeSet } from "$lib/store.svelte";
+import { cacheGet, cacheSet, hydrate, storeGet, storeSet } from "$lib/store.svelte";
 
 type Hooks = {
   conn: () => P4Conn;
@@ -340,9 +340,11 @@ export const reviews = {
    *  claiming the review is empty. */
   /** The cached content of a review, or undefined when never fetched. Lets the
    *  list paint an expansion instantly while `content` reconciles. */
-  contentCached(row: ReviewRow): ReviewContent | undefined {
+  async contentCached(row: ReviewRow): Promise<ReviewContent | undefined> {
     if (!h || !row.change) return undefined;
-    const json = cacheGetSync(`p4:rvcontent:${h.conn().client}`, String(row.change));
+    // Through ALL cache layers (mem → localStorage → SQLite): the sync layers
+    // evict, and a post-boot expansion should still paint from disk in ~ms.
+    const json = await cacheGet(`p4:rvcontent:${h.conn().client}`, String(row.change));
     if (json === null) return undefined;
     try {
       return JSON.parse(json) as ReviewContent;
