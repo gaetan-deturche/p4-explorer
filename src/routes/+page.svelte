@@ -404,6 +404,15 @@
     ];
   }
 
+  // Refresh means the WHOLE view of the server, not just the tree: pending
+  // too (an external checkout must show up — nothing else re-asks p4 while
+  // sitting on that tab) and, when open, the reviews list.
+  function refreshAll() {
+    void browse.refresh();
+    pending.load();
+    if (centerTab === "reviews") void reviews.load();
+  }
+
   // Switch to the Pending tab and (re)load it.
   function openPending() {
     centerTab = "pending";
@@ -631,7 +640,7 @@
     onOptions={() => (optionsOpen = true)}
     onReconnect={() => connection.connect()}
     onExit={exitApp}
-    onRefresh={() => browse.refresh()}
+    onRefresh={refreshAll}
     onSync={() => sync.globalSync()}
     onApplyPatch={() => patches.pickAndPreview()}
     onNewWorkspace={() => (newWorkspaceOpen = true)}
@@ -655,7 +664,7 @@
     onServerContext={(e) => {
       if (conn.port) serverCtx = { x: e.clientX, y: e.clientY };
     }}
-    onRefresh={() => browse.refresh()}
+    onRefresh={refreshAll}
     onSync={() => sync.globalSync()}
     onReconcile={() => sync.reconcile()}
   />

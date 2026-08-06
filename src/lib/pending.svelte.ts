@@ -125,6 +125,10 @@ async function runOfflineLoop() {
   if (offlineStopped) return;
   const ran = await pending.scanOffline();
   if (offlineStopped) return;
+  // Same cadence keeps the OPENED files eventually consistent too: a checkout
+  // made outside the app (editor, p4v) used to stay invisible until a tab or
+  // workspace switch — nothing else ever re-asked p4.
+  if (ran) pending.load();
   // If the scan was skipped (another scan held the lock — e.g. right after a
   // workspace switch), retry soon instead of waiting the full interval.
   const delay = ran ? (offlineFocused ? OFFLINE_MS_FOCUS : OFFLINE_MS_BG) : 5_000;
