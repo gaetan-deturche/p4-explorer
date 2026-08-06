@@ -24,15 +24,7 @@
   import { cmdlog } from "$lib/cmdlog.svelte";
   import { notifications } from "$lib/notifications.svelte";
   import { editor } from "$lib/editor.svelte";
-  import {
-    loadLastServer,
-    loadUserFor,
-    loadCharsetFor,
-    saveView,
-    loadViews,
-    saveViews,
-    type Views,
-  } from "$lib/nav";
+  import { loadLastServer, saveView, loadViews, saveViews, type Views } from "$lib/nav";
   import MenuBar from "$lib/components/MenuBar.svelte";
   import Toolbar from "$lib/components/Toolbar.svelte";
   import StatusBar from "$lib/components/StatusBar.svelte";
@@ -588,15 +580,17 @@
       histSubject: () => history.subject,
       histMode: () => history.mode,
     });
-    // Reconnect to the server used last session (with its remembered user);
-    // connect() then restores that server's last workspace and saved view.
+    // Reconnect to the server used last session. A KNOWN server goes through
+    // switchServerTo's optimistic path: the cached workspace opens immediately —
+    // every pane paints from the store — and the real connect validates in the
+    // background. Booting through the full connect() instead left the whole app
+    // blank for a handshake's worth of round-trips while every cache sat ready.
     const last = loadLastServer();
     if (last) {
-      conn.port = last;
-      conn.user = loadUserFor(last);
-      conn.charset = loadCharsetFor(last);
+      void connection.switchServerTo(last);
+    } else {
+      void connection.connect(); // first run: adopt ambient P4PORT
     }
-    connection.connect();
     getVersion()
       .then((v) => (appVersion = v))
       .catch(() => {});
