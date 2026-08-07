@@ -115,7 +115,10 @@ pub(crate) fn prepare_resolve_merge(conn: &P4Conn, depot_file: &str) -> Result<S
     let get = |k: &str| sub.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
     let (bf, br) = (get("resolveBaseFile"), get("resolveBaseRev"));
     let (ff, fr) = (get("resolveFromFile"), get("resolveEndFromRev"));
-    if bf.is_empty() || ff.is_empty() {
+    // The REVISIONS matter as much as the paths: an empty one builds the spec
+    // "//depot/file#", which p4 rejects outright — but a merge must never be
+    // attempted against a revision we could not name.
+    if bf.is_empty() || ff.is_empty() || br.is_empty() || fr.is_empty() {
         return Err("this file needs a resolve p4 cannot describe (binary or branch)".into());
     }
 
@@ -306,11 +309,34 @@ fn prune_rej(path: &str, hunk: &str) {
     }
 }
 
+/// Print one revision and read it back.
+///
+/// Two properties matter here, because getting them wrong silently corrupts a
+/// merge: `p4 print` EXITS 0 while writing nothing when it cannot produce the
+/// revision (verified: `print -o tmp //f#999` prints "no file(s) at that
+/// revision" and returns 0, leaving the target file untouched), and the temp
+/// path used to be fixed per file name. Together those meant a leftover file
+/// from an earlier resolve could become a side of this merge — and a stale
+/// "theirs" that matches the base makes the merge keep OURS, which quietly
+/// reverts the depot change on save.
+///
+/// So: a fresh unique path per call, deleted before AND after, and the file must
+/// actually exist afterwards.
 fn print_lines(conn: &P4Conn, spec: &str, tag: &str) -> Result<Vec<String>, String> {
-    let tmp = std::env::temp_dir().join(format!("p4gui_{tag}"));
-    let path = tmp.to_str().ok_or("bad temp path")?;
-    p4::run_raw(conn, &["print", "-q", "-o", path, spec])?;
-    read_lines(path)
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = std::env::temp_dir().join(format!("p4gui_{}_{n}_{tag}", std::process::id()));
+    let path = tmp.to_str().ok_or("bad temp path")?.to_string();
+    let _ = std::fs::remove_file(&tmp); // never read a previous run's bytes
+    p4::run_raw(conn, &["print", "-q", "-o", &path, spec])?;
+    if !tmp.is_file() {
+        return Err(format!(
+            "p4 produced nothing for {spec} — refusing to merge against unknown content"
+        ));
+    }
+    let lines = read_lines(&path);
+    let _ = std::fs::remove_file(&tmp); // and leave nothing to be reused
+    lines
 }
 
 fn read_lines(path: &str) -> Result<Vec<String>, String> {
@@ -340,5 +366,60 @@ fn p4_set_var(conn: &P4Conn, key: &str) -> Option<String> {
         None
     } else {
         Some(v.to_string())
+    }
+}
+
+mod resolve_tests {
+    use crate::p4::explode_indexed;
+
+    /// A REAL `p4 -ztag fstat -Ru -Or` record for a file that needs a content
+    /// resolve after a sync (captured live: base #30, incoming #31). The three
+    /// sides of the merge come from these fields, so a parsing slip here is a
+    /// silent wrong merge.
+    fn record() -> crate::p4::Record {
+        let pairs = [
+            ("depotFile", "//d/AI/CYAISubsystem.cpp"),
+            ("clientFile", "H:\\ws\\AI\\CYAISubsystem.cpp"),
+            ("headRev", "31"),
+            ("haveRev", "31"),
+            ("action", "edit"),
+            ("workRev", "31"),
+            ("unresolved", ""),
+            ("resolveAction0", "unresolved"),
+            ("resolveBaseFile0", "//d/AI/CYAISubsystem.cpp"),
+            ("resolveBaseRev0", "30"),
+            ("resolveFromFile0", "//d/AI/CYAISubsystem.cpp"),
+            ("resolveStartFromRev0", "31"),
+            ("resolveEndFromRev0", "31"),
+            ("resolveType0", "content"),
+        ];
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), serde_json::Value::String(v.to_string())))
+            .collect()
+    }
+
+    #[test]
+    fn the_resolve_row_names_base_and_incoming() {
+        let rows = explode_indexed(&record(), "resolveBaseFile");
+        assert_eq!(rows.len(), 1, "one pending resolve => one row");
+        let get = |k: &str| rows[0].get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+        assert_eq!(get("resolveBaseRev"), "30", "base is the revision we edited from");
+        assert_eq!(get("resolveEndFromRev"), "31", "theirs is the new depot revision");
+        assert_eq!(get("resolveBaseFile"), "//d/AI/CYAISubsystem.cpp");
+        assert_eq!(get("resolveFromFile"), "//d/AI/CYAISubsystem.cpp");
+        // The header fields must survive onto the row: the workspace file is read
+        // from clientFile.
+        assert!(get("clientFile").ends_with("CYAISubsystem.cpp"));
+    }
+
+    #[test]
+    fn base_and_incoming_are_different_revisions() {
+        // The bug that reverted a colleague's change looked exactly like this:
+        // both sides resolving to the same content. They are different REVISIONS
+        // here, so any equality downstream can only come from a bad fetch.
+        let rows = explode_indexed(&record(), "resolveBaseFile");
+        let get = |k: &str| rows[0].get(k).and_then(|v| v.as_str()).unwrap_or("");
+        assert_ne!(get("resolveBaseRev"), get("resolveEndFromRev"));
     }
 }
