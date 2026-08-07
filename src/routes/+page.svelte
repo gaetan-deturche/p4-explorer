@@ -1105,22 +1105,24 @@
   {@const offSel = sel.filter((d) => pending.offline.some((o) => o.depotFile === d))}
   {@const co = offSel.length > 1 ? ` (${offSel.length} files)` : ""}
   {@const many = sel.length > 1 ? ` (${sel.length} files)` : ""}
+  <!-- Same grouping as the pending file menu: look at it, copy it, produce
+       something from it, change it, destroy it — Revert was sitting directly
+       above "Open in", which is exactly the adjacency that ordering avoids. -->
   <ContextMenu
     x={offlineCtx.x}
     y={offlineCtx.y}
     items={[
       // Desync entries aren't local edits — offer the record repair (p4 flush).
+      // First, like Resolve in the pending menu: it explains the row.
       ...(f.desync
         ? [
             {
               label: "Repair sync record (file untouched)",
               action: () => pending.repairDesync(f.depotFile),
             },
+            { label: "", sep: true },
           ]
         : []),
-      { label: `Check out${co}`, action: () => pending.checkoutOffline(offSel) },
-      { label: `Generate patch${many}…`, action: () => generatePatch("", sel) },
-      { label: `Revert${many}…`, action: () => pending.revertMixed(sel) },
       {
         label: openInLabel,
         action: () => {
@@ -1130,7 +1132,14 @@
         },
       },
       ...(f.depotFile ? [historyMenu(f.depotFile)] : []),
+      { label: "", sep: true },
       copyMenu(f.depotFile ?? f.clientFile ?? "", f.clientFile),
+      { label: "", sep: true },
+      { label: `Generate patch${many}…`, action: () => generatePatch("", sel) },
+      { label: "", sep: true },
+      { label: `Check out${co}`, action: () => pending.checkoutOffline(offSel) },
+      { label: "", sep: true },
+      { label: `Revert${many}…`, action: () => pending.revertMixed(sel) },
     ]}
     onClose={() => (offlineCtx = null)}
   />
