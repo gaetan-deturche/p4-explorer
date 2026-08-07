@@ -273,11 +273,35 @@
     if (!isDefault) {
       items.push({ label: "Open review in browser", action: () => pending.openReview(cl.change) });
     }
-    if (own && !isDefault) {
+    // Only when there IS one: the entry meant nothing on the (many) changelists
+    // that were never shelved.
+    if (own && !isDefault && pending.hasShelf(cl.change)) {
       items.push({ label: "Delete shelf", action: () => pending.deleteShelf(cl.change) });
     }
     group();
     items.push({ label: "Generate patch…", action: () => generatePatch(cl.change, []) });
+    if (own) {
+      group();
+      // Destructive pair, last and on their own — and each only when it would
+      // do something: nothing to revert in an empty changelist, nothing to
+      // delete in a full one.
+      if ((pending.openCount(cl.change) ?? 0) > 0) {
+        items.push({
+          label: isDefault
+            ? "Revert all default-changelist files…"
+            : `Revert all files in @${cl.change}…`,
+          action: () => pending.revertChangelist(cl.change),
+        });
+      }
+      // Only when p4 would accept it: a changelist still holding files or a
+      // shelf cannot be deleted, and offering it there just produced an error.
+      if (pending.canDelete(cl.change)) {
+        items.push({
+          label: `Delete changelist @${cl.change}…`,
+          action: () => pending.deleteChangelist(cl.change),
+        });
+      }
+    }
     if (items[items.length - 1]?.sep) items.pop();
     return items;
   }
@@ -470,6 +494,17 @@
         { label: "Workspace path", action: () => void copyWorkspacePath(depotPath, clientFile) },
       ],
     };
+  }
+
+  /** Undo a submitted change (whole CL, or one of its files) and land the user
+   *  on the result. A single file goes straight to its diff, because the point
+   *  of undoing one file is usually to keep PART of the change: that window is
+   *  where the unwanted hunks get put back (each block has a revert button). */
+  async function undoSubmitted(change: string, files: string[] = []) {
+    const res = await pending.undoSubmitted(change, files);
+    if (!res) return;
+    openPending();
+    if (files.length === 1 && res.undone === 1) pending.openLocalDiff(files[0]);
   }
 
   // --- history row context menu: "update to this changelist" ----------------
@@ -960,6 +995,9 @@
     y={ctxMenu.y}
     items={[
       { label: `Update to changelist @${change}`, action: () => sync.updateToChange(change) },
+      { label: "", sep: true },
+      // Opens the undo as a pending changelist; nothing reaches the depot here.
+      { label: `Undo changelist @${change}…`, action: () => void undoSubmitted(change) },
     ]}
     onClose={() => (ctxMenu = null)}
   />
@@ -1094,6 +1132,14 @@
         action: () => openSpecInEditor(`${f.depotFile}#${f.rev}`),
       },
       copyMenu(f.depotFile),
+      { label: "", sep: true },
+      // Undo just this file out of the changelist — the one case the whole-CL
+      // undo cannot express, and the one the DefaultEngine.ini loss needed.
+      {
+        label: `Undo this file's change (@${history.selectedChange})…`,
+        disabled: !history.selectedChange,
+        action: () => void undoSubmitted(history.selectedChange, [f.depotFile]),
+      },
     ]}
     onClose={() => (detailsCtx = null)}
   />

@@ -217,6 +217,23 @@ export function writeLocalFile(path: string, text: string): Promise<void> {
   return safe.guard("write_local_file", () => invoke<void>("write_local_file", { path, text }));
 }
 
+/** One file's fate in an undo. */
+export interface UndoFile {
+  depotFile: string;
+  ok: boolean;
+  /** p4's own words — what it did, or why it refused. */
+  message: string;
+}
+/** What `p4 undo` produced: a pending changelist, not a depot change. */
+export interface UndoResult {
+  change: string;
+  files: UndoFile[];
+  undone: number;
+  failed: number;
+  /** At least one file must be resolved before the undo can be submitted. */
+  needsResolve: boolean;
+}
+
 /** Open the in-app side-by-side diff window on a materialized pair. */
 export function openDiffWindow(pair: DiffPair): Promise<void> {
   return invoke<void>("open_diff_window", { pair });
@@ -349,6 +366,20 @@ export const p4 = {
     rightRev: string,
   ) => g<string>("open_unreal_diff", { conn, left, right, name, leftRev, rightRev }),
   revert: (conn: P4Conn, depotFile: string) => call("p4_revert", { conn, depotFile }),
+  /** The client's pending changelists that hold shelved files. */
+  shelvedChanges: (conn: P4Conn) => call("p4_shelved_changes", { conn }),
+  /** Revert every file open in a changelist, discarding their local edits. */
+  revertChange: (conn: P4Conn, change: string) => call("p4_revert_change", { conn, change }),
+  /** Delete an empty pending changelist; p4 refuses if it still holds files. */
+  deleteChange: (conn: P4Conn, change: string) => call("p4_delete_change", { conn, change }),
+  /** Dry-run an undo (`p4 undo -n`): one row per file, `ok` false for the ones
+   *  p4 would refuse. Pass no files to mean the whole changelist. */
+  undoPreview: (conn: P4Conn, change: string, files: string[] = []) =>
+    call("p4_undo_preview", { conn, change, files }),
+  /** Undo a SUBMITTED change into a new pending changelist. Nothing reaches the
+   *  depot until that changelist is submitted. */
+  undoChange: (conn: P4Conn, change: string, files: string[] = []) =>
+    g<UndoResult>("p4_undo_change", { conn, change, files }),
   revertKeep: (conn: P4Conn, depotFile: string) => call("p4_revert_keep", { conn, depotFile }),
   reopen: (conn: P4Conn, depotFile: string, change: string) =>
     call("p4_reopen", { conn, depotFile, change }),

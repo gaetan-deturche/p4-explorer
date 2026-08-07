@@ -3,7 +3,7 @@
 //! file-content providers for PendingList. Shared bits come via `init()`.
 
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { p4, type P4Conn, type P4Record, type ReviewInfo } from "$lib/p4";
+import { p4, type P4Conn, type P4Record, type ReviewInfo, type UndoResult } from "$lib/p4";
 import { openDiff } from "$lib/opendiff";
 import { cacheGet, cacheGetSync, cacheSet, storeGet, hydrate, storeSet, storeSetMem } from "$lib/store.svelte";
 
@@ -22,6 +22,14 @@ let h: Hooks | null = null;
 let swarmBase = "";
 let version = $state(0); // bumps on every (re)load so views refetch file lists
 let reviews = $state<Record<string, ReviewInfo | null>>({}); // change → Swarm review status
+// Open-file count per changelist ("default" included). Undefined until the
+// first `p4 opened` lands — an unknown count must not read as "empty", or an
+// action gated on emptiness gets offered on a changelist full of work.
+let openCounts = $state<Record<string, number> | null>(null);
+// Pending changelists that hold shelved files. One cheap `changes -s shelved`
+// per load answers it for every CL at once — describing each CL instead would
+// cost one command per row.
+let shelved = $state<Set<string>>(new Set());
 // Depot paths p4 is holding a resolve on. `p4 opened` says nothing about resolve
 // state, so a conflicted file is indistinguishable from a plain edit without this.
 let unresolved = $state<Set<string>>(new Set());
@@ -141,6 +149,18 @@ async function runOfflineLoop() {
  *  map, never the persisted layers: the view updates on the next frame, the reload
  *  that follows replaces the guess with the truth, and a failure rolls it back.
  */
+/** Tally `p4 opened` records per changelist. Files with no `change` field sit
+ *  in the default changelist. */
+function countOpen(recs: P4Record[]): void {
+  const next: Record<string, number> = {};
+  for (const r of recs) {
+    if (!r.depotFile) continue;
+    const c = String(r.change ?? "default");
+    next[c] = (next[c] ?? 0) + 1;
+  }
+  openCounts = next;
+}
+
 function forgetFiles(files: string[]): () => void {
   const client = h?.conn().client;
   if (!client || !files.length) return () => {};
@@ -360,6 +380,8 @@ export const pending = {
     version++; // fresh list in; also signals open CLs to refetch their file lists
     pending.loadReviews(); // fire-and-forget: populate Swarm review badges
     pending.loadUnresolved();
+    pending.loadShelved();
+    pending.loadOpenCounts();
   },
 
   /** Cheap change-detection poll, run at keepalive rate: ONE `p4 opened` over
@@ -371,6 +393,7 @@ export const pending = {
     const conn = h.conn();
     const recs = await p4.opened(conn, "").catch(() => null);
     if (recs === null || h.conn().client !== conn.client) return; // error / switched
+    countOpen(recs); // same records the fingerprint uses — no extra command
     const fp = recs
       .filter((r) => r.depotFile)
       .map((r) => `${r.depotFile}|${r.action}|${r.change}`)
@@ -380,6 +403,27 @@ export const pending = {
     const first = openedFingerprint === null;
     openedFingerprint = fp;
     if (!first) pending.load(); // baseline tick just records; changes reload
+  },
+
+  /** One client-wide `p4 opened` → how many files each changelist holds. Also
+   *  refreshed by the change-detection poll, which fetches the same records. */
+  async loadOpenCounts() {
+    if (!h || !h.connected() || !h.conn().client) return;
+    const conn = h.conn();
+    const recs = await p4.opened(conn, "").catch(() => null);
+    if (recs === null || h.conn().client !== conn.client) return;
+    countOpen(recs);
+  },
+  /** Files this changelist holds open; undefined while still unknown. */
+  openCount(change: string): number | undefined {
+    return openCounts ? (openCounts[change] ?? 0) : undefined;
+  },
+  /** Can `p4 change -d` succeed on this changelist? Only when p4 has nothing
+   *  left to refuse over: no open files, no shelf, and not the default CL
+   *  (which cannot be deleted at all). Undefined counts mean "not yet known",
+   *  and answer false — better a missing entry than one that lies. */
+  canDelete(change: string): boolean {
+    return change !== "default" && pending.openCount(change) === 0 && !shelved.has(change);
   },
 
   /** Which opened files still need resolving (server-side filtered, so cheap). */
@@ -394,6 +438,57 @@ export const pending = {
       unresolved = new Set(); // no badge rather than a stale one
     }
   },
+  /** Which pending changelists have a shelf. */
+  async loadShelved() {
+    if (!h || !h.connected() || !h.conn().client) return;
+    const conn = h.conn();
+    try {
+      const recs = await p4.shelvedChanges(conn);
+      if (h.conn().client !== conn.client) return; // switched workspace mid-fetch
+      shelved = new Set(recs.map((r) => String(r.change)));
+    } catch {
+      shelved = new Set(); // no entry rather than a stale one
+    }
+  },
+  /** True when this changelist holds shelved files. */
+  hasShelf(change: string): boolean {
+    return shelved.has(change);
+  },
+
+  /** Revert every file in a changelist. The count in the prompt comes from the
+   *  cached file list, so the user is told how much they are discarding rather
+   *  than agreeing to "the files, whatever they are". */
+  revertChangelist(change: string) {
+    const client = h?.conn().client ?? "";
+    const files = (loadClFilesCache(client, change) ?? []).map((f) => String(f.depotFile));
+    const what = change === "default" ? "the default changelist" : `@${change}`;
+    const count = files.length
+      ? `${files.length} file${files.length === 1 ? "" : "s"} in ${what}`
+      : `every file in ${what}`;
+    pending.action(
+      () => p4.revertChange(h!.conn(), change),
+      `Revert ${count}?\n\nTheir local changes are discarded and cannot be recovered. The changelist itself stays (delete it separately).`,
+      "Revert changelist",
+      "Revert all",
+      "Changelist reverted.",
+      { optimistic: () => forgetFiles(files) },
+    );
+  },
+
+  /** Delete an empty pending changelist. p4 refuses while it still holds opened
+   *  or shelved files and says so — deleting those for the user would throw away
+   *  work they never asked to lose. */
+  deleteChangelist(change: string) {
+    pending.action(
+      () => p4.deleteChange(h!.conn(), change),
+      `Delete changelist @${change}?\n\nIt holds no files; only its description goes away.`,
+      "Delete changelist",
+      "Delete",
+      `Changelist @${change} deleted.`,
+      { refresh: false }, // no synced content changes
+    );
+  },
+
   /** True when p4 is holding a resolve on this depot file. */
   needsResolve(depotFile: string): boolean {
     return unresolved.has(depotFile);
@@ -425,7 +520,9 @@ export const pending = {
    *  update reconciles with the truth on success AND rolls back on error. */
   async mutate(
     runFn: () => Promise<unknown>,
-    okNotice: string,
+    // A function when the message can only be written once the action has run
+    // (an undo names the changelist it just created).
+    okNotice: string | (() => string),
     opts?: { refresh?: boolean; optimistic?: () => () => void },
   ) {
     if (!h || !h.connected() || h.syncing()) return;
@@ -436,7 +533,7 @@ export const pending = {
     try {
       await p4.cancelOfflineScan().catch(() => {}); // free its server locks before writing
       await runFn();
-      h.setNotice(okNotice);
+      h.setNotice(typeof okNotice === "string" ? okNotice : okNotice());
       if (opts?.refresh !== false) await h.refresh();
     } catch (e) {
       rollback?.();
@@ -555,6 +652,70 @@ export const pending = {
       h.setError(String(e));
     }
   },
+  /** Undo a SUBMITTED change, or just some of its files, into a new pending
+   *  changelist. Nothing reaches the depot: the user reviews the result, trims
+   *  it if they only wanted part of it, and submits.
+   *
+   *  Confirms against a real `p4 undo -n`, not against an intention — a file
+   *  that is already open elsewhere or outside this workspace is listed as such
+   *  before anything happens. Returns the result so the caller can take the user
+   *  to it; null when it was refused or cancelled. */
+  async undoSubmitted(change: string, files: string[] = []): Promise<UndoResult | null> {
+    if (!h || !h.connected() || h.syncing()) return null;
+    let preview: P4Record[] = [];
+    try {
+      preview = await p4.undoPreview(h.conn(), change, files);
+    } catch (e) {
+      h.setError(String(e));
+      return null;
+    }
+    const can = preview.filter((r) => r.ok);
+    const blocked = preview.filter((r) => !r.ok);
+    if (!can.length) {
+      h.setError(
+        blocked[0]?.message
+          ? `Nothing of @${change} can be undone here: ${blocked[0].message}`
+          : `Nothing of @${change} can be undone in this workspace.`,
+      );
+      return null;
+    }
+    const name = (f: string) => String(f).split("/").pop() ?? String(f);
+    const show = can.slice(0, 12).map((r) => "  " + name(String(r.depotFile)));
+    if (can.length > show.length) show.push(`  …and ${can.length - show.length} more`);
+    const what = files.length === 1 ? name(files[0]) : `@${change}`;
+    const msg =
+      `Undo ${files.length === 1 ? `${what} from @${change}` : `all of @${change}`}?\n\n` +
+      `${can.length} file${can.length === 1 ? "" : "s"} will be opened in a NEW changelist at the ` +
+      `revision before this change:\n${show.join("\n")}\n\n` +
+      (blocked.length
+        ? `${blocked.length} cannot be undone here and will be skipped:\n` +
+          blocked
+            .slice(0, 5)
+            .map((r) => `  ${name(String(r.depotFile))} — ${r.message}`)
+            .join("\n") +
+          "\n\n"
+        : "") +
+      "Nothing is submitted — review the result and submit it yourself. You can keep part of the " +
+      "change by editing the files before submitting.";
+    if (!(await h.askConfirm(msg, "Undo submitted change", "Undo"))) return null;
+
+    let res: UndoResult | null = null;
+    await pending.mutate(
+      async () => {
+        res = await p4.undoChange(h!.conn(), change, files);
+      },
+      () =>
+        res
+          ? `Undo of @${change} opened in @${res.change} — ${res.undone} file${res.undone === 1 ? "" : "s"}` +
+            (res.failed ? `, ${res.failed} skipped` : "") +
+            (res.needsResolve
+              ? ". Some files need a resolve before submitting."
+              : ". Nothing is submitted yet.")
+          : `Undo of @${change} done.`,
+    );
+    return res;
+  },
+
   revert(file: string) {
     pending.action(
       () => p4.revert(h!.conn(), file),

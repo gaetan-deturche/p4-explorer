@@ -65,6 +65,80 @@ pub async fn p4_submit(conn: P4Conn, change: String) -> Res {
     .map_err(|e| format!("submit task failed: {e}"))?
 }
 
+/// The client's pending changelists that HAVE shelved files
+/// (`p4 changes -s shelved -c <client>`, ~0.1s).
+///
+/// Without this the app cannot tell an empty changelist from a shelved one
+/// without describing each of them, so it offered "Delete shelf" on changelists
+/// that had no shelf.
+#[tauri::command]
+pub async fn p4_shelved_changes(conn: P4Conn) -> Res {
+    if conn.client.is_empty() {
+        return Ok(Vec::new());
+    }
+    let client = conn.client.clone();
+    let mut args = v(&["changes", "-s", "shelved", "-c"]);
+    args.push(client);
+    run(conn, args).await
+}
+
+/// Revert every file open in a changelist (`p4 revert -c <change> //...`),
+/// discarding their local edits. The changelist itself stays — an empty
+/// changelist is deleted separately, so a revert never silently takes the
+/// description with it.
+#[tauri::command]
+pub async fn p4_revert_change(conn: P4Conn, change: String) -> Res {
+    run(conn, v(&["revert", "-c", &change, "//..."])).await
+}
+
+/// Delete an EMPTY pending changelist (`p4 change -d <change>`). p4 refuses
+/// while it still holds opened or shelved files, and says which — that refusal
+/// is the guard, so nothing is reverted or unshelved on the user's behalf here.
+///
+/// The refusal cannot be read from the command's own result: p4 reports it as an
+/// ordinary info line with NO severity and exit status 0 — verified,
+/// `{"data":"Change N has 1 open file(s) ... can't be deleted.","level":0}`
+/// against the same shape as success, `{"data":"Change N deleted.","level":0}`.
+/// Every runner therefore takes it for a data record and reports success, which
+/// is how a refused delete produced a "Changelist @N deleted." notification. So
+/// the outcome is read from the STATE afterwards, not from the message.
+#[tauri::command]
+pub async fn p4_delete_change(conn: P4Conn, change: String) -> Res {
+    tauri::async_runtime::spawn_blocking(move || {
+        let out = p4::run(&conn, &["change", "-d", &change])?;
+        let status = p4::run(&conn, &["change", "-o", &change])
+            .ok()
+            .and_then(|r| {
+                r.first()
+                    .and_then(|r| r.get("Status"))
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
+            });
+        if still_exists(status.as_deref()) {
+            let why: String = out
+                .iter()
+                .filter_map(|r| r.get("data").and_then(|v| v.as_str()))
+                .collect::<Vec<_>>()
+                .join(" ");
+            return Err(if why.trim().is_empty() {
+                format!("changelist @{change} could not be deleted")
+            } else {
+                why.trim().to_string()
+            });
+        }
+        Ok(out)
+    })
+    .await
+    .map_err(|e| format!("delete-changelist task failed: {e}"))?
+}
+
+/// Does `change -o` still describe a real changelist? A deleted (or never-used)
+/// number answers "Change N unknown." — no record, hence no status — while a
+/// surviving one reports `pending` or `shelved`.
+fn still_exists(status: Option<&str>) -> bool {
+    matches!(status, Some(s) if s != "new")
+}
+
 /// Delete the shelved files of a changelist (`p4 shelve -d -c <change>`).
 #[tauri::command]
 pub async fn p4_shelve_delete(conn: P4Conn, change: String) -> Res {
@@ -165,4 +239,23 @@ pub async fn p4_new_changelist(conn: P4Conn, description: String) -> Result<Stri
     })
     .await
     .map_err(|e| format!("new-changelist task failed: {e}"))?
+}
+
+#[cfg(test)]
+mod delete_tests {
+    use super::still_exists;
+
+    #[test]
+    fn a_deleted_changelist_reports_no_status() {
+        // "Change N unknown." yields no record at all.
+        assert!(!still_exists(None));
+        // A number p4 offers as a fresh form is not an existing changelist.
+        assert!(!still_exists(Some("new")));
+    }
+
+    #[test]
+    fn a_surviving_changelist_is_detected() {
+        assert!(still_exists(Some("pending")));
+        assert!(still_exists(Some("shelved")));
+    }
 }

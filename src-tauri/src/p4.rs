@@ -367,6 +367,17 @@ fn parse_records_full(
     success: bool,
     stderr: &[u8],
 ) -> Result<(Vec<Record>, Vec<String>), String> {
+    parse_tagged(stdout, success, stderr, false)
+}
+
+/// The tagged-output parser. `keep_warnings` decides whether severity-2 messages
+/// join the returned message list or are dropped as noise.
+fn parse_tagged(
+    stdout: &[u8],
+    success: bool,
+    stderr: &[u8],
+    keep_warnings: bool,
+) -> Result<(Vec<Record>, Vec<String>), String> {
     let stdout = String::from_utf8_lossy(stdout);
     let mut records: Vec<Record> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
@@ -390,6 +401,11 @@ fn parse_records_full(
                 continue;
             }
             if sev >= E_WARN {
+                if keep_warnings {
+                    if let Some(d) = obj.get("data").and_then(|d| d.as_str()) {
+                        errors.push(d.trim().to_string());
+                    }
+                }
                 continue; // warning, not fatal, not data
             }
         }
@@ -429,10 +445,27 @@ pub fn is_auth_error(msg: &str) -> bool {
 /// connection, and on multi-edge servers the ticket lookup fails at random —
 /// one retry turns a red line + stale pane into an invisible hiccup.
 pub fn run_full(conn: &P4Conn, args: &[&str]) -> Result<(Vec<Record>, Vec<String>), String> {
-    // The auth retry lives in run_output (shared by every entry point); tagged
-    // commands are idempotent reads or single-shot mutations that fail closed on
-    // an auth error, so re-running them is safe.
-    let out = run_output(conn, args, |c| {
+    let out = tagged_output(conn, args)?;
+    parse_records_full(&out.stdout, out.status.success(), &out.stderr)
+}
+
+/// As `run_full`, but the returned messages ALSO include p4's warnings.
+///
+/// A per-file refusal is a warning, not a failure: `undo -n //nope@=123` prints
+/// "no such file(s)." with severity 2 and exit status 0. `run_full` drops those,
+/// which is right for a command read for its data and wrong for one whose
+/// per-file outcome IS the answer — there, a dropped warning turns "p4 refused
+/// this file" into a silent success.
+pub fn run_notes(conn: &P4Conn, args: &[&str]) -> Result<(Vec<Record>, Vec<String>), String> {
+    let out = tagged_output(conn, args)?;
+    parse_tagged(&out.stdout, out.status.success(), &out.stderr, true)
+}
+
+/// `p4 -ztag -Mj <args>` with the shared auth retry. The retry lives in
+/// `run_output`; tagged commands are idempotent reads or single-shot mutations
+/// that fail closed on an auth error, so re-running them is safe.
+fn tagged_output(conn: &P4Conn, args: &[&str]) -> Result<std::process::Output, String> {
+    run_output(conn, args, |c| {
         let mut cmd = Command::new("p4");
         cmd.arg("-ztag").arg("-Mj");
         for g in c.global_args() {
@@ -453,8 +486,7 @@ pub fn run_full(conn: &P4Conn, args: &[&str]) -> Result<(Vec<Record>, Vec<String
             cmd.creation_flags(CREATE_NO_WINDOW);
         }
         cmd.output()
-    })?;
-    parse_records_full(&out.stdout, out.status.success(), &out.stderr)
+    })
 }
 
 /// Like `run`, but spawns the child and records its PID in `pid_slot` so a long

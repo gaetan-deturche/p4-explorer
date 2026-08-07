@@ -21,6 +21,7 @@ mod pending;
 mod server;
 mod swarm;
 mod sync;
+mod undo;
 pub mod unreal_remote; // pub: exercised by the uediscover dev bin
 
 // Re-export every command so the registration in `lib.rs` can keep referring to
@@ -36,6 +37,7 @@ pub use pending::*;
 pub use server::*;
 pub use swarm::*;
 pub use sync::*;
+pub use undo::*;
 
 /// Result of a tagged-record `p4` command.
 pub(crate) type Res = Result<Vec<Record>, String>;
