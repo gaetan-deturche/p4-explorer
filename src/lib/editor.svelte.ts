@@ -12,7 +12,7 @@ import {
   type P4Conn,
 } from "$lib/p4";
 import { localPathFor } from "$lib/cache";
-import { cacheGetSync, cacheSet } from "$lib/store.svelte";
+import { cacheGet, cacheSet } from "$lib/store.svelte";
 
 const CHOICE_KEY = "editor"; // store scope `nav`: the chosen editor id
 const DIFF_KEY = "difftool"; // store scope `nav`: "inapp" | "external"
@@ -44,10 +44,21 @@ export const editor = {
   /** Detect installed editors and pick the initial choice: the saved one, else
    *  the Windows default, else the first detected (Notepad always exists). */
   async init() {
-    diffTool = cacheGetSync("nav", DIFF_KEY) === "external" ? "external" : "inapp";
-  mergeTool = cacheGetSync("nav", MERGE_KEY) === "external" ? "external" : "inapp";
-    editors = await detectEditors().catch(() => []);
-    const saved = cacheGetSync("nav", CHOICE_KEY) ?? "";
+    // Read AUTHORITATIVELY (SQLite), never cacheGetSync. Two things defeat the
+    // synchronous read here: init() runs before the `nav` scope is hydrated, and
+    // localStorage is a bounded mirror whose write fails silently once the cache
+    // fills (see storeSet) — so the preference lived only in SQLite and every
+    // restart answered "nothing saved" and reset the choice to the Windows
+    // default.
+    const [savedDiff, savedMerge, saved, found] = await Promise.all([
+      cacheGet("nav", DIFF_KEY),
+      cacheGet("nav", MERGE_KEY),
+      cacheGet("nav", CHOICE_KEY),
+      detectEditors().catch(() => [] as EditorInfo[]),
+    ]);
+    diffTool = savedDiff === "external" ? "external" : "inapp";
+    mergeTool = savedMerge === "external" ? "external" : "inapp";
+    editors = found;
     if (saved && editors.some((e) => e.id === saved)) {
       chosenId = saved;
       return;

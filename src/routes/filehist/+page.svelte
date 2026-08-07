@@ -18,6 +18,7 @@
   import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
   import ApprovalDialog from "$lib/components/ApprovalDialog.svelte";
   import { history } from "$lib/history.svelte";
+  import { editor } from "$lib/editor.svelte";
   import { openDiff } from "$lib/opendiff";
   import {
     p4,
@@ -65,6 +66,9 @@
       // The store reads the connection through hooks; paths here are already
       // depot paths, so the client-view translation is the identity.
       history.init({ conn: () => conn, setNotice, toQuery: (p: string) => p });
+      // openDiff reads the diff-tool choice from this store; without init it is
+      // never loaded here and every diff would open in-app whatever was chosen.
+      void editor.init();
       await history.selectFile(file);
     } catch (e) {
       error = String(e);
