@@ -223,6 +223,25 @@ fn py_safe(s: &str) -> String {
 /// its mounted /Game package, i.e. the LIVE asset), find the asset by name (an
 /// asset's object name == its file base name), and open the class-specific diff
 /// via IAssetTools::DiffAssets (BlueprintCallable → exposed to Python).
+/// Open ONE asset in the editor: what an added file (no previous revision) or a
+/// deleted one (no current revision) can still usefully show. `unreal` exposes
+/// the subsystem only through get_editor_subsystem — constructing
+/// AssetEditorSubsystem() yields an uninitialised object whose
+/// open_editor_for_assets crashes the editor outright.
+fn single_script(spec: &str, name: &str) -> String {
+    let s = spec.replace('\'', "_");
+    let name = py_safe(name);
+    format!(
+        r#"import unreal
+_p = unreal.load_package(r'{s}')
+_a = unreal.find_object(_p, '{name}') if _p else None
+if not _a:
+    raise RuntimeError('Auger: asset {name} not found in {s}')
+unreal.get_editor_subsystem(unreal.AssetEditorSubsystem).open_editor_for_assets([_a])
+"#
+    )
+}
+
 fn diff_script(left: &str, right: &str, name: &str, left_rev: &str, right_rev: &str) -> String {
     // Paths go through raw strings; quotes/newlines are stripped defensively.
     let (l, r) = (left.replace('\'', "_"), right.replace('\'', "_"));
@@ -332,14 +351,24 @@ pub async fn open_unreal_diff(
 ) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let t0 = std::time::Instant::now();
-        // An added (or deleted) asset has no counterpart: that side was printed
-        // as an EMPTY temp file, which Unreal can't load as a package. Bail before
-        // trying — otherwise the in-place script fails and the fallback launches a
-        // whole new editor just to show nothing.
+        // An added asset has no previous revision, a deleted one has no current
+        // revision: that side was printed as an EMPTY temp file, which Unreal
+        // cannot load as a package. There is nothing to COMPARE, but the asset
+        // itself is still worth looking at — a text add opens in the diff window
+        // as a single pane, so an asset add should not just refuse either. The
+        // solo side is opened in the asset editor instead.
         let empty = |p: &str| std::fs::metadata(p).map(|m| m.len() == 0).unwrap_or(false);
-        if empty(&left) || empty(&right) {
+        let (l_empty, r_empty) = (empty(&left), empty(&right));
+        if l_empty && r_empty {
             return Ok("nocompare".to_string());
         }
+        let solo: Option<String> = if l_empty {
+            Some(right.clone())
+        } else if r_empty {
+            Some(left.clone())
+        } else {
+            None
+        };
         // In-place first: a running editor with remote execution enabled. Its
         // pong tells us WHICH project it runs (its Saved dir backs the /Temp
         // package root the copies load through) — no p4 round trip needed; the
@@ -347,6 +376,7 @@ pub async fn open_unreal_diff(
         let in_place = || -> Result<Option<()>, String> {
             let (left, right) = (left.clone(), right.clone());
             let (name, left_rev, right_rev) = (name.clone(), left_rev.clone(), right_rev.clone());
+            let solo_in = solo.clone();
             super::unreal_remote::run_python_in_editor_with(move |node| {
                 let editor_dir = node
                     .get("project_root")
@@ -360,6 +390,10 @@ pub async fn open_unreal_diff(
                         }
                     })
                     .ok_or("editor pong carried no project_root")?;
+                if let Some(one) = &solo_in {
+                    let s = loadable_spec(&editor_dir, one)?;
+                    return Ok(single_script(&s, &name));
+                }
                 let l = loadable_spec(&editor_dir, &left)?;
                 let r = loadable_spec(&editor_dir, &right)?;
                 Ok(diff_script(&l, &r, &name, &left_rev, &right_rev))
@@ -368,7 +402,7 @@ pub async fn open_unreal_diff(
         match in_place() {
             Ok(Some(())) => {
                 eprintln!("[auger-timing] in-place unreal diff: {:?}", t0.elapsed());
-                return Ok("remote".to_string());
+                return Ok(if solo.is_some() { "single-remote".to_string() } else { "remote".to_string() });
             }
             Ok(None) => {} // no running editor — launch one
             Err(e) => {
@@ -397,9 +431,26 @@ pub async fn open_unreal_diff(
         // build (ALLOW_INI_OVERRIDE_FROM_COMMANDLINE), and skipping the startup
         // map works because UnrealEdMisc::OnInit only loads one when the setting
         // is not ELoadLevelAtStartup::None.
-        c.arg(project);
+        c.arg(&project);
         for flag in DIFF_LAUNCH_OVERRIDES {
             c.arg(flag);
+        }
+        if let Some(one) = &solo {
+            // No counterpart to diff against, so ask the fresh editor to open the
+            // asset: `py "<file>"` is a real console command and -ExecCmds runs
+            // deferred commands once the engine is up. The script lives beside
+            // the copied package under the project's Saved dir (a UE project path
+            // has no spaces, which -ExecCmds could not carry).
+            let proj_dir = project.parent().map(|d| d.to_path_buf()).unwrap_or(root.clone());
+            let spec = loadable_spec(&proj_dir, one)?;
+            let dir = proj_dir.join("Saved").join("Diff");
+            std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+            let py = dir.join("auger_open_asset.py");
+            std::fs::write(&py, single_script(&spec, &name))
+                .map_err(|e| format!("cannot write the open-asset script: {e}"))?;
+            c.arg(format!("-ExecCmds=py {}", py.display()));
+            c.spawn().map_err(|e| format!("failed to launch Unreal: {e}"))?;
+            return Ok("single-launched".to_string());
         }
         c.arg("-diff").arg(&left).arg(&right);
         c.spawn().map_err(|e| format!("failed to launch Unreal diff: {e}"))?;

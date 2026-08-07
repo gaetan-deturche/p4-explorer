@@ -56,7 +56,13 @@ export async function openDiff(
         conn, pair.left, pair.right, unrealAssetName(src.file), pair.leftLabel, pair.rightLabel,
       );
       setNotice(
-        mode === "nocompare"
+        mode === "single-remote" || mode === "single-launched"
+          ? // Nothing to compare against (an add has no previous revision), so
+            // the asset itself was opened instead of refusing outright.
+            mode === "single-remote"
+            ? "No earlier revision — opened the asset in the running Unreal Editor."
+            : "No earlier revision — launching Unreal to open the asset…"
+          : mode === "nocompare"
           ? // Empty counterpart: the asset is new (or gone) in this change, so
             // there is nothing for Unreal's asset diff to compare.
             "No earlier revision of this asset to compare."
