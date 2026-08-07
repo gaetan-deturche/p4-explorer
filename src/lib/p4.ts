@@ -234,6 +234,11 @@ export interface UndoResult {
   needsResolve: boolean;
 }
 
+/** Open the file-history window for a depot file (one window per file). */
+export function openFileHistoryWindow(conn: P4Conn, depotFile: string): Promise<void> {
+  return invoke<void>("open_file_history_window", { conn, depotFile });
+}
+
 /** Open the in-app side-by-side diff window on a materialized pair. */
 export function openDiffWindow(pair: DiffPair): Promise<void> {
   return invoke<void>("open_diff_window", { pair });

@@ -4,7 +4,7 @@
 //! per output record (field-per-key). We parse each stdout line with serde and
 //! split data records from error records (which carry a numeric `severity`).
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::process::Command;
 use std::sync::OnceLock;
@@ -59,7 +59,7 @@ pub type Record = Map<String, Value>;
 
 /// Connection context supplied by the front-end. Empty fields fall back to the
 /// ambient p4 environment (P4PORT/P4USER/P4CLIENT, .p4config, tickets).
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct P4Conn {
     #[serde(default)]

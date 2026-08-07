@@ -76,6 +76,7 @@ export const P4_COMMANDS: P4Cmd[] = [
   { key: "p4_request_review", label: "request review", read: false },
   { key: "p4_revert", label: "revert", read: false },
   { key: "p4_shelved_changes", label: "changes -s shelved", read: true },
+  { key: "open_file_history_window", label: "file history (window)", read: true },
   { key: "p4_revert_change", label: "revert -c (whole changelist)", read: false },
   { key: "p4_delete_change", label: "change -d (delete changelist)", read: false },
   { key: "p4_undo_preview", label: "undo -n (preview)", read: true },

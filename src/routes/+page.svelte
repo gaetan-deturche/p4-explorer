@@ -7,6 +7,7 @@
     emptyConn,
     firstLine,
     setClipboard,
+    openFileHistoryWindow,
     p4,
     type P4Conn,
     type P4Record,
@@ -408,6 +409,7 @@
         ? [{ label: "Resolve…", action: () => merges.resolveFile(file.depotFile) }, { label: "", sep: true }]
         : []),
       { label: "View diff", action: () => pending.openLocalDiff(file.depotFile) },
+      historyMenu(file.depotFile),
       { label: openInLabel, action: () => openLocalInEditor(file.depotFile) },
       { label: "", sep: true },
       copyMenu(file.depotFile, file.clientFile),
@@ -482,6 +484,17 @@
     if (local) copied(local, "workspace path");
     else setError("This file has no workspace path here.");
   }
+  /** This file's revisions, in their own window. A window rather than the
+   *  History tab: the question "what happened to this file" comes up WHILE
+   *  looking at something else, and the tab would take that away. */
+  function fileHistory(depotFile: string) {
+    openFileHistoryWindow(conn, depotFile).catch((e) => setError(String(e)));
+  }
+  /** The "File history" entry, for every list that shows a file. */
+  function historyMenu(depotFile: string) {
+    return { label: "File history…", action: () => fileHistory(depotFile) };
+  }
+
   /** The shared "Copy" submenu for any file/folder path shown in the app.
    *  `clientFile` short-circuits the workspace-path lookup when already known. */
   function copyMenu(depotPath: string, clientFile?: string) {
@@ -1038,6 +1051,7 @@
                   ? openLocalInEditor(p)
                   : openSpecInEditor(browse.source === "depot" ? p : browse.toQuery(p)),
             },
+            historyMenu(p),
             { label: "", sep: true },
           ]),
       copyMenu(p),
@@ -1076,6 +1090,7 @@
     items={[
       // The shelved content lives on the server — download @=change and open.
       { label: `${openInLabel} (shelved)`, action: () => openSpecInEditor(`${f.depotFile}@=${ch}`) },
+      historyMenu(f.depotFile),
       copyMenu(f.depotFile),
     ]}
     onClose={() => (shelvedCtx = null)}
@@ -1114,6 +1129,7 @@
           else if (f.depotFile) openLocalInEditor(f.depotFile);
         },
       },
+      ...(f.depotFile ? [historyMenu(f.depotFile)] : []),
       copyMenu(f.depotFile ?? f.clientFile ?? "", f.clientFile),
     ]}
     onClose={() => (offlineCtx = null)}
@@ -1131,6 +1147,7 @@
         label: `${openInLabel} (revision #${f.rev})`,
         action: () => openSpecInEditor(`${f.depotFile}#${f.rev}`),
       },
+      historyMenu(f.depotFile),
       copyMenu(f.depotFile),
       { label: "", sep: true },
       // Undo just this file out of the changelist — the one case the whole-CL

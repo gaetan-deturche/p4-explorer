@@ -150,6 +150,8 @@ pub fn run() {
             commands::p4_delete_change,
             commands::p4_revert_change,
             commands::p4_undo_change,
+            commands::open_file_history_window,
+            commands::file_history_job,
             commands::p4_undo_preview,
             commands::p4_revert_keep,
             commands::p4_reopen,
