@@ -207,6 +207,9 @@ export interface DiffPair {
   title: string;
   /** True when the right side is the workspace file, so it can be edited. */
   rightEditable?: boolean;
+  /** Set when the file still needs a resolve: which depot revision is missing.
+   *  Empty otherwise. */
+  unresolvedNote?: string;
 }
 /** Write an edited workspace file back (the diff window's editable side). Goes
  *  through the safe-mode gate: it writes to the workspace. */

@@ -21,6 +21,11 @@ pub struct DiffPair {
     /// revision — the only case where editing it in the window means anything.
     #[serde(default)]
     pub right_editable: bool,
+    /// Set when the file still needs a `p4 resolve`: says which depot revision is
+    /// NOT in the file yet. Empty otherwise. The diff window turns it into a
+    /// warning, because in that state a plain diff is actively misleading.
+    #[serde(default)]
+    pub unresolved_note: String,
 }
 
 fn base_name(depot_file: &str) -> &str {
@@ -95,6 +100,7 @@ pub async fn diff_pair_rev(conn: P4Conn, depot_file: String, rev: i64) -> Result
             right_label: format!("{name}#{rev}"),
             title: format!("{name}  #{}{rev}", if rev > 1 { format!("{} → #", rev - 1) } else { String::new() }),
             right_editable: false,
+            unresolved_note: String::new(),
         })
     })
     .await
@@ -121,13 +127,22 @@ pub async fn diff_pair_shelved(
             right_label: format!("{name} (shelved @{change})"),
             title: format!("{name}  shelf @{change}"),
             right_editable: false,
+            unresolved_note: String::new(),
         })
     })
     .await
     .map_err(|e| format!("diff task failed: {e}"))?
 }
 
-/// The live workspace file vs the synced (have) revision.
+/// The live workspace file vs the revision it is based on.
+///
+/// Normally that is `#have`. But a file waiting on a `p4 resolve` is based on the
+/// resolve's BASE, not on `#have`: the sync already moved `have` to the incoming
+/// revision while leaving the workspace file alone. Diffing against `#have` there
+/// shows the incoming change INVERTED — the depot's additions appear as your
+/// deletions — which reads exactly like someone reverting that change, and
+/// "cleaning up" the diff silently drops it. So an unresolved file is compared to
+/// its base, and the window says what is missing.
 #[tauri::command]
 pub async fn diff_pair_local(conn: P4Conn, depot_file: String) -> Result<DiffPair, String> {
     tauri::async_runtime::spawn_blocking(move || {
@@ -140,16 +155,49 @@ pub async fn diff_pair_local(conn: P4Conn, depot_file: String) -> Result<DiffPai
             .to_string();
         let have = first.get("haveRev").and_then(|v| v.as_str()).unwrap_or("").to_string();
         let name = base_name(&depot_file).to_string();
-        // No have revision (add in progress) → empty left side.
-        let spec = if have.is_empty() { String::new() } else { format!("{depot_file}#have") };
-        let left = print_side(&conn, &spec, &sane(&tag_rev(&name, &have)))?;
+
+        // Is a resolve pending? Then the file is based on the resolve base.
+        let (mut base_rev, mut note) = (have.clone(), String::new());
+        if let Ok(rr) = p4::run(&conn, &["fstat", "-Ru", "-Or", &depot_file]) {
+            if let Some(rec) = rr.first() {
+                if let Some(sub) = p4::explode_indexed(rec, "resolveBaseFile").first() {
+                    let g = |k: &str| {
+                        sub.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string()
+                    };
+                    let (br, fr) = (g("resolveBaseRev"), g("resolveEndFromRev"));
+                    if !br.is_empty() && !fr.is_empty() {
+                        base_rev = br.clone();
+                        note = format!(
+                            "Unresolved merge: depot #{fr} is not in this file yet, so it is compared to \
+                             its base #{br} — you are seeing only your own edits. Resolve the file to take \
+                             the depot change."
+                        );
+                    }
+                }
+            }
+        }
+
+        // No revision to compare against (add in progress) → empty left side.
+        let spec = if base_rev.is_empty() {
+            String::new()
+        } else {
+            format!("{depot_file}#{base_rev}")
+        };
+        let left = print_side(&conn, &spec, &sane(&tag_rev(&name, &base_rev)))?;
         Ok(DiffPair {
             left,
             right: local,
-            left_label: if have.is_empty() { format!("{name} (new)") } else { format!("{name}#{have}") },
+            left_label: if base_rev.is_empty() {
+                format!("{name} (new)")
+            } else if note.is_empty() {
+                format!("{name}#{base_rev}")
+            } else {
+                format!("{name}#{base_rev} (pre-merge base)")
+            },
             right_label: format!("{name} (workspace)"),
             title: format!("{name}  local changes"),
             right_editable: true,
+            unresolved_note: note,
         })
     })
     .await
@@ -503,13 +551,14 @@ pub async fn open_diff_window(app: AppHandle, pair: DiffPair) -> Result<(), Stri
     let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let label = format!("diff-{n}");
     let url = format!(
-        "diff?left={}&right={}&ll={}&rl={}&title={}&edit={}",
+        "diff?left={}&right={}&ll={}&rl={}&title={}&edit={}&note={}",
         enc(&pair.left),
         enc(&pair.right),
         enc(&pair.left_label),
         enc(&pair.right_label),
         enc(&pair.title),
         if pair.right_editable { "1" } else { "0" },
+        enc(&pair.unresolved_note),
     );
     let title = format!("Diff — {}", pair.title);
     let win = WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(url.into()))

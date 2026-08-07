@@ -59,6 +59,10 @@
   const title = params.get("title") ?? "";
   /** Only a workspace file can be edited; a printed revision cannot. */
   const editable = params.get("edit") === "1";
+  /** Non-empty when the file still owes a resolve, i.e. this diff does NOT show
+   *  the depot change that is about to land. Loud on purpose: acting on the diff
+   *  in that state is how an incoming change gets deleted by hand. */
+  const note = params.get("note") ?? "";
 
   const LH = 17.4; // one row: 12px * 1.45
   const TOOLBAR = 0; // the diff has no per-region toolbar
@@ -573,6 +577,10 @@ initSplit(leftText.trim() === "");
     {/if}
   </div>
 
+  {#if note}
+    <div class="warn">{note}</div>
+  {/if}
+
   {#if error}
     <div class="err mono">{error}</div>
   {:else if loading || !ds}
@@ -704,6 +712,15 @@ initSplit(leftText.trim() === "");
   }
   .chip.del {
     color: #d9873a;
+  }
+  .warn {
+    flex: none;
+    padding: 6px 10px;
+    font-size: 12px;
+    line-height: 1.4;
+    color: #f0c674;
+    background: color-mix(in srgb, #f0c674 12%, transparent);
+    border-bottom: 1px solid color-mix(in srgb, #f0c674 40%, transparent);
   }
   .err {
     padding: 10px;

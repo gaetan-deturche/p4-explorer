@@ -369,6 +369,7 @@ fn p4_set_var(conn: &P4Conn, key: &str) -> Option<String> {
     }
 }
 
+#[cfg(test)]
 mod resolve_tests {
     use crate::p4::explode_indexed;
 

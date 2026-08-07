@@ -69,6 +69,20 @@
     regions.map((r, i) => (r.kind === "conflict" ? i : -1)).filter((i) => i >= 0),
   );
   const unsettled = $derived(conflicts.filter((i) => origin[i] === undefined));
+  /** Every region the merge touched: what the depot brought, what the workspace
+   *  brought, what both did. */
+  const changed = $derived(
+    regions.map((r, i) => (r.kind === "same" ? -1 : i)).filter((i) => i >= 0),
+  );
+  /** What prev/next and alt+up/down step through. Conflicts when there are any —
+   *  they need a decision — otherwise every change, because a merge with no
+   *  conflicts still MOVED code into this file and the user has to be able to
+   *  find it. Landing on the top of an untouched file and calling it done is how
+   *  an incoming change gets mistaken for junk and deleted later. */
+  const stops = $derived(conflicts.length ? conflicts : changed);
+  const fromDepot = $derived(regions.filter((r) => r.kind === "theirs").length);
+  const fromUs = $derived(regions.filter((r) => r.kind === "ours").length);
+  const fromBoth = $derived(regions.filter((r) => r.kind === "both").length);
 
   /** What a side pane shows: its own text, or the base where it didn't change. */
   function side(r: MergeRegion, which: Side): string[] {
@@ -375,10 +389,10 @@
   }
 
   function goTo(n: number) {
-    if (!conflicts.length) return;
-    current = ((n % conflicts.length) + conflicts.length) % conflicts.length;
+    if (!stops.length) return;
+    current = ((n % stops.length) + stops.length) % stops.length;
     document
-      .querySelector(`[data-region="${conflicts[current]}"]`)
+      .querySelector(`[data-region="${stops[current]}"]`)
       ?.scrollIntoView({ block: "center" });
   }
 
@@ -474,7 +488,9 @@
         caret: { region: 0, line: 0, col: 0 },
       };
       void recolor(data);
-      if (data.conflicts > 0) setTimeout(() => goTo(0), 0);
+      // Land on the first thing the merge touched, conflict or not: a clean
+      // auto-merge still has to SHOW what it brought in.
+      setTimeout(() => goTo(0), 0);
     } catch (e) {
       error = String(e);
     }
@@ -522,17 +538,29 @@
           ? ` · ${emptied.length} resolve${emptied.length === 1 ? "s" : ""} to nothing`
           : ""}
       </span>
+      <!-- What the merge is bringing in. Without this a conflict-free merge looks
+           like an empty window, and the incoming change is invisible until it
+           shows up in the local diff looking like someone else's junk. -->
+      {#if fromDepot}
+        <span class="incoming" title="Lines the merge takes from {data.theirsLabel}. They are part of your file after saving — deleting them later would revert that change.">
+          {fromDepot} block{fromDepot === 1 ? "" : "s"} incoming from {data.theirsLabel}
+        </span>
+      {/if}
+      <span class="dim">
+        {fromUs ? `· ${fromUs} yours` : ""}{fromBoth ? ` · ${fromBoth} identical on both sides` : ""}
+      </span>
       <span class="grow"></span>
       <span class="legend dim">
         <span class="chip add">+ kept</span><span class="chip del">− dropped</span><span
           class="chip vs">! conflict</span
         >
       </span>
-      <!-- Navigation is conflict-only: the auto-merged changes need no visit. -->
-      {#if conflicts.length}
-        <button onclick={() => goTo(current - 1)} title="Previous conflict (alt+up)">▲</button>
-        <span class="dim">{current + 1}/{conflicts.length}</span>
-        <button onclick={() => goTo(current + 1)} title="Next conflict (alt+down)">▼</button>
+      <!-- Navigation walks conflicts when there are any, otherwise the changes
+           the merge brought in — never nothing, or a clean merge cannot be read. -->
+      {#if stops.length}
+        <button onclick={() => goTo(current - 1)} title={conflicts.length ? "Previous conflict (alt+up)" : "Previous change (alt+up)"}>▲</button>
+        <span class="dim">{current + 1}/{stops.length}</span>
+        <button onclick={() => goTo(current + 1)} title={conflicts.length ? "Next conflict (alt+down)" : "Next change (alt+down)"}>▼</button>
       {/if}
       <button onclick={cancel} disabled={saving}>Cancel</button>
       <button
@@ -689,6 +717,18 @@
   }
   .name {
     font-weight: 600;
+  }
+  /* The incoming count is the one thing in this window a user must not miss. */
+  .incoming {
+    flex: none;
+    font-size: 11px;
+    font-weight: 600;
+    line-height: 16px;
+    padding: 0 6px;
+    border: 1px solid currentColor;
+    border-radius: 10px;
+    color: var(--have, #5faf5f);
+    white-space: nowrap;
   }
   .legend {
     display: flex;
