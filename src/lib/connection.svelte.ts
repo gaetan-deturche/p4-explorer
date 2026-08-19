@@ -32,6 +32,9 @@ type Hooks = {
   getSyncing: () => boolean;
   setSyncing: (v: boolean) => void;
   askConfirm: (msg: string, title?: string, ok?: string) => Promise<boolean>;
+  // Reload what the open tabs show (the Refresh button). Needed after a login
+  // that happened AFTER the views were painted — see connect().
+  refreshViews: () => void;
   // Ask for login credentials (user + password); `error` shows why the previous
   // attempt failed (re-prompt loop). Resolves null if cancelled.
   promptLogin: (
@@ -295,6 +298,11 @@ export const connection = {
         }
         authed = st.ok;
       }
+      // Whether this connect had to go through the password prompt. The
+      // optimistic path (switchServerTo, and the boot reconnect) opens the saved
+      // workspace BEFORE calling us, so a login here means every load the UI
+      // already did ran against an expired ticket.
+      const loggedIn = !authed;
       if (!authed && !(await loginLoop(conn))) {
         connected = false;
         return; // user cancelled — stay disconnected, no success toast
@@ -341,6 +349,10 @@ export const connection = {
 
       if (opts?.skipReselect) {
         await refreshClients; // workspace already open — just refresh list + Host marks
+        // Those pre-login loads all failed, and nothing re-asked: the History tab
+        // stayed empty and the file tree greyed out until the user pressed
+        // Refresh by hand. Press it for them.
+        if (loggedIn) h.refreshViews();
       } else {
         const cachedTarget = pick(clients);
         if (cachedTarget) {

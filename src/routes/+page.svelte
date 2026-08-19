@@ -578,6 +578,7 @@
       setSyncing: (v) => (syncing = v),
       askConfirm,
       promptLogin,
+      refreshViews: refreshAll,
     });
     updates.init({
       isRelease: () => isRelease,
