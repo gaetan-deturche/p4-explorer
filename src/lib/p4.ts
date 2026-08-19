@@ -220,6 +220,29 @@ export function writeLocalFile(path: string, text: string): Promise<void> {
   return safe.guard("write_local_file", () => invoke<void>("write_local_file", { path, text }));
 }
 
+/** One holder of a file: someone who has it open, in which workspace. */
+export interface Holder {
+  user: string;
+  client: string;
+  action: string;
+  change: string;
+  /** This holder blocks everyone else — an explicit lock, or an open on a `+l`
+   *  (exclusive) file. */
+  blocking: boolean;
+}
+/** Who has a file, and whether anyone owns it exclusively. */
+export interface FileHolders {
+  depotFile: string;
+  headType: string;
+  /** The type carries `+l`: one open at a time. */
+  exclusiveType: boolean;
+  /** Our own open action ("" when we don't have it open). */
+  ourAction: string;
+  ourLock: boolean;
+  otherLock: boolean;
+  others: Holder[];
+}
+
 /** What an unshelve restored. `needsResolve` is set when p4 left files flagged
  *  unresolved — it does that when the shelf lands on files that were still open. */
 export interface UnshelveResult {
@@ -388,6 +411,9 @@ export const p4 = {
     rightRev: string,
   ) => g<string>("open_unreal_diff", { conn, left, right, name, leftRev, rightRev }),
   revert: (conn: P4Conn, depotFile: string) => call("p4_revert", { conn, depotFile }),
+  /** Who has this file open, and who (if anyone) holds it exclusively. */
+  fileHolders: (conn: P4Conn, depotFile: string) =>
+    g<FileHolders>("p4_file_holders", { conn, depotFile }),
   /** The client's pending changelists that hold shelved files. */
   shelvedChanges: (conn: P4Conn) => call("p4_shelved_changes", { conn }),
   /** Revert every file open in a changelist, discarding their local edits. */

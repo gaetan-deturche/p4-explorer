@@ -306,3 +306,95 @@ mod delete_tests {
         assert!(still_exists(Some("shelved")));
     }
 }
+
+/// Who has a file open, and who — if anyone — holds it exclusively.
+///
+/// Perforce answers this in two different ways and the difference matters:
+///
+/// * an explicit `p4 lock` shows up as `otherLock` (someone else) or `ourLock`;
+/// * a file whose type carries `+l` is exclusive-open, so ANY open on it locks
+///   everyone else out — and fstat reports NO lock field for that case, only
+///   `otherOpen0`. Verified on a live `binary+l` asset held by another user:
+///   `otherOpen0`/`otherAction0`/`otherChange0` came back, `otherLock` did not.
+///
+/// So "who owns the lock" is `otherLock`, else the holder of an open on a `+l`
+/// file. Everything else is a plain shared checkout, which blocks nobody.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Holder {
+    /// User name alone, and the workspace they hold it in.
+    pub user: String,
+    pub client: String,
+    pub action: String,
+    pub change: String,
+    /// This holder blocks everyone else: an explicit lock, or an open on a `+l`
+    /// file.
+    pub blocking: bool,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileHolders {
+    pub depot_file: String,
+    pub head_type: String,
+    /// The type carries `+l`: one open at a time, whoever gets there first.
+    pub exclusive_type: bool,
+    /// We have it open — the reason nobody ELSE can, on an exclusive type.
+    pub our_action: String,
+    /// We hold an explicit `p4 lock`.
+    pub our_lock: bool,
+    /// Someone else holds an explicit `p4 lock`.
+    pub other_lock: bool,
+    /// Everyone else holding it open, in p4's order.
+    pub others: Vec<Holder>,
+}
+
+#[tauri::command]
+pub async fn p4_file_holders(conn: P4Conn, depot_file: String) -> Result<FileHolders, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        // No -T: the other-user fields are indexed (otherOpen0, otherOpen1, …) and
+        // their count is not known in advance, so ask for the whole record.
+        let recs = p4::run(&conn, &["fstat", &depot_file])?;
+        let rec = recs.first().ok_or_else(|| format!("{depot_file} is not in the depot"))?;
+        let get = |k: &str| rec.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+
+        let head_type = get("headType");
+        // A file type's modifiers follow the base type after '+': binary+l, text+lw.
+        let exclusive_type = head_type
+            .split_once('+')
+            .map(|(_, m)| m.contains('l'))
+            .unwrap_or(false);
+        let other_lock = rec.contains_key("otherLock") || rec.contains_key("otherLock0");
+        let our_lock = rec.contains_key("ourLock");
+
+        let others: Vec<Holder> = p4::explode_indexed(rec, "otherOpen")
+            .iter()
+            .map(|r| {
+                let who = r.get("otherOpen").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let (user, client) = match who.split_once('@') {
+                    Some((u, c)) => (u.to_string(), c.to_string()),
+                    None => (who.clone(), String::new()),
+                };
+                Holder {
+                    user,
+                    client,
+                    action: r.get("otherAction").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    change: r.get("otherChange").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    blocking: exclusive_type || other_lock,
+                }
+            })
+            .collect();
+
+        Ok(FileHolders {
+            depot_file: get("depotFile"),
+            head_type,
+            exclusive_type,
+            our_action: get("action"),
+            our_lock,
+            other_lock,
+            others,
+        })
+    })
+    .await
+    .map_err(|e| format!("file-holders task failed: {e}"))?
+}

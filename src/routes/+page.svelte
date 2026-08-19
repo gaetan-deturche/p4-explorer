@@ -12,6 +12,7 @@
     type P4Conn,
     type P4Record,
     type ReviewRow,
+    type FileHolders,
   } from "$lib/p4";
   import { localPathFor } from "$lib/cache";
   import { updates } from "$lib/updates.svelte";
@@ -49,6 +50,7 @@
   import StreamsBrowser from "$lib/components/StreamsBrowser.svelte";
   import ChangeDetails from "$lib/components/ChangeDetails.svelte";
   import ContextMenu from "$lib/components/ContextMenu.svelte";
+  import FileHoldersDialog from "$lib/components/FileHoldersDialog.svelte";
 
   // `conn` stays here (two-way bound by Toolbar/OptionsDialog); all connection
   // logic + derived state (connected/busy/clients/servers) lives in the store.
@@ -458,6 +460,7 @@
         : []),
       { label: "View diff", action: () => pending.openLocalDiff(file.depotFile) },
       historyMenu(file.depotFile),
+      holdersMenu(file.depotFile),
       { label: openInLabel, action: () => openLocalInEditor(file.depotFile) },
       { label: "", sep: true },
       copyMenu(file.depotFile, file.clientFile),
@@ -541,6 +544,25 @@
   /** The "File history" entry, for every list that shows a file. */
   function historyMenu(depotFile: string) {
     return { label: "File history…", action: () => fileHistory(depotFile) };
+  }
+
+  // --- who has a file --------------------------------------------------------
+  // On an exclusive-open (+l) type a single checkout locks everyone else out, and
+  // p4 reports that with the same fields as a harmless shared checkout — so this
+  // asks per file, on demand, and the dialog does the interpreting.
+  let holders = $state<{ loading: boolean; error: string; info: FileHolders | null } | null>(null);
+  async function whoHas(depotFile: string) {
+    holders = { loading: true, error: "", info: null };
+    try {
+      const info = await p4.fileHolders(conn, depotFile);
+      if (holders) holders = { loading: false, error: "", info };
+    } catch (e) {
+      if (holders) holders = { loading: false, error: String(e), info: null };
+    }
+  }
+  /** The "Who has this file?" entry, for every list that shows a file. */
+  function holdersMenu(depotFile: string) {
+    return { label: "Who has this file?…", action: () => void whoHas(depotFile) };
   }
 
   /** The shared "Copy" submenu for any file/folder path shown in the app.
@@ -1015,6 +1037,16 @@
   />
 {/if}
 
+{#if holders}
+  <FileHoldersDialog
+    info={holders.info}
+    loading={holders.loading}
+    error={holders.error}
+    me={conn.user}
+    onClose={() => (holders = null)}
+  />
+{/if}
+
 {#if confirmState}
   <ConfirmDialog
     title={confirmState.title}
@@ -1106,6 +1138,7 @@
                   : openSpecInEditor(browse.source === "depot" ? p : browse.toQuery(p)),
             },
             historyMenu(p),
+            holdersMenu(p),
             { label: "", sep: true },
           ]),
       copyMenu(p),
@@ -1145,6 +1178,7 @@
       // The shelved content lives on the server — download @=change and open.
       { label: `${openInLabel} (shelved)`, action: () => openSpecInEditor(`${f.depotFile}@=${ch}`) },
       historyMenu(f.depotFile),
+      holdersMenu(f.depotFile),
       copyMenu(f.depotFile),
     ]}
     onClose={() => (shelvedCtx = null)}
@@ -1185,7 +1219,7 @@
           else if (f.depotFile) openLocalInEditor(f.depotFile);
         },
       },
-      ...(f.depotFile ? [historyMenu(f.depotFile)] : []),
+      ...(f.depotFile ? [historyMenu(f.depotFile), holdersMenu(f.depotFile)] : []),
       { label: "", sep: true },
       copyMenu(f.depotFile ?? f.clientFile ?? "", f.clientFile),
       { label: "", sep: true },
@@ -1211,6 +1245,7 @@
         action: () => openSpecInEditor(`${f.depotFile}#${f.rev}`),
       },
       historyMenu(f.depotFile),
+      holdersMenu(f.depotFile),
       copyMenu(f.depotFile),
       { label: "", sep: true },
       // Undo just this file out of the changelist — the one case the whole-CL
