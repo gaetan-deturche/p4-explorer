@@ -70,6 +70,35 @@
 
   // Custom hover popup showing the full path (fixed-positioned, escapes clipping).
   let tip = $state<{ x: number; y: number; text: string } | null>(null);
+  // Measured so the tip can be kept inside the window without changing shape.
+  let tipEl = $state<HTMLDivElement>();
+  let tipW = $state(0);
+  let tipH = $state(0);
+  const tipText = $derived(tip?.text ?? "");
+  $effect(() => {
+    void tipText;
+    if (tipEl) {
+      tipW = tipEl.offsetWidth;
+      tipH = tipEl.offsetHeight;
+    }
+  });
+  /** Where the tip actually sits: the cursor, clamped so the whole box fits.
+   *
+   *  It is placed with a TRANSFORM rather than left/top on purpose. A fixed box
+   *  with `left` set and `width:auto` is shrink-to-fit — its width is capped by
+   *  the space left of the viewport edge — so approaching the right edge made the
+   *  box narrow and the path rewrap while being read. A transform moves it after
+   *  layout, so the width no longer depends on the position at all. */
+  const tipAt = $derived.by(() => {
+    if (!tip) return { x: 0, y: 0 };
+    const pad = 8;
+    const w = tipW || 320;
+    const h = tipH || 40;
+    return {
+      x: Math.max(pad, Math.min(tip.x + 14, window.innerWidth - w - pad)),
+      y: Math.max(pad, Math.min(tip.y + 16, window.innerHeight - h - pad)),
+    };
+  });
   function showTip(e: PointerEvent, text: string) {
     tip = { x: e.clientX, y: e.clientY, text };
   }
@@ -181,7 +210,11 @@
   </div>
 
   {#if tip}
-    <div class="tip mono" style="left:{tip.x + 14}px; top:{tip.y + 16}px">
+    <div
+      class="tip mono"
+      bind:this={tipEl}
+      style="transform: translate({tipAt.x}px, {tipAt.y}px)"
+    >
       {tip.text}
       <div class="tiphint">Double-click to open in external diff</div>
     </div>
@@ -343,9 +376,14 @@
   }
   .tip {
     position: fixed;
+    /* The transform does the placing (see tipAt); these anchor its origin. */
+    left: 0;
+    top: 0;
     z-index: 100;
     pointer-events: none;
-    max-width: 60vw;
+    /* A px cap, not vw: the wrap width must not depend on the window either, or
+       the text reflows as the window is resized under the cursor. */
+    max-width: 560px;
     padding: 4px 8px;
     font-size: 11px;
     background: var(--bg-alt);
