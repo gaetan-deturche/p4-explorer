@@ -16,6 +16,11 @@ use crate::p4::{self, P4Conn};
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReviewRow {
+    /// "review" for a Swarm review, "shelf" for a shelved changelist that has no
+    /// review at all. Both are things you might want to read before they land, so
+    /// the tab lists them together — but only one of them has a state, reviewers
+    /// or a Swarm page.
+    pub kind: String,
     pub id: u64,
     pub state: String,
     pub state_label: String,
@@ -145,6 +150,129 @@ fn changes_under(conn: &P4Conn, path: &str) -> std::collections::HashSet<u64> {
     out
 }
 
+/// Shelved changelists under `stream_path` that NO review covers.
+///
+/// Two things make this cheap enough to sit next to the review list. Almost
+/// every shelf in a stream belongs to Swarm — measured on this depot, 375 of the
+/// 400 most recent were `swarm`-owned shadow changelists, two per review — so
+/// dropping that user removes 94% of the rows before anything else runs. And
+/// Swarm's `change[]` filter takes a LIST, so one HTTP request says which of the
+/// survivors are already in review (each returned review names the changelists
+/// it covers), instead of one round-trip per changelist.
+///
+/// `scan` bounds the `p4 changes` window, not the result.
+#[tauri::command]
+pub async fn swarm_shelved_no_review(
+    conn: P4Conn,
+    stream_path: String,
+    scan: u32,
+) -> Result<Vec<ReviewRow>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let scan = scan.clamp(1, 2000).to_string();
+        let spec = if stream_path.trim().is_empty() {
+            "//...".to_string()
+        } else {
+            format!("{}/...", stream_path.trim_end_matches('/'))
+        };
+        // -l: without it p4 truncates the description to ~31 characters.
+        let recs = p4::run(&conn, &["changes", "-l", "-s", "shelved", "-m", &scan, &spec])?;
+
+        struct Shelf {
+            change: u64,
+            user: String,
+            desc: String,
+            time: i64,
+        }
+        let mut shelves: Vec<Shelf> = Vec::new();
+        for r in &recs {
+            let user = r.get("user").and_then(|v| v.as_str()).unwrap_or("");
+            // Swarm's own shadow changelists are the review versions themselves;
+            // the review list already represents those.
+            if user.is_empty() || user == "swarm" {
+                continue;
+            }
+            let Some(change) = r
+                .get("change")
+                .and_then(|v| v.as_str())
+                .and_then(|c| c.parse::<u64>().ok())
+            else {
+                continue;
+            };
+            shelves.push(Shelf {
+                change,
+                user: user.to_string(),
+                desc: r.get("desc").and_then(|v| v.as_str()).unwrap_or("").trim().to_string(),
+                time: r
+                    .get("time")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| s.parse::<i64>().ok())
+                    .unwrap_or(0),
+            });
+        }
+        if shelves.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Which of them Swarm already knows about.
+        let mut in_review: std::collections::HashSet<u64> = std::collections::HashSet::new();
+        let base = swarm_base(&conn);
+        if let (false, Some(ticket)) = (base.is_empty(), p4::ticket(&conn)) {
+            if let Ok(client) = reqwest::blocking::Client::builder()
+                .timeout(std::time::Duration::from_secs(10))
+                .build()
+            {
+                for batch in shelves.chunks(50) {
+                    let mut url = format!("{base}/api/v9/reviews?max=200&fields=id,changes,commits");
+                    for s in batch {
+                        url.push_str(&format!("&change[]={}", s.change));
+                    }
+                    let Ok(resp) = client.get(&url).basic_auth(&conn.user, Some(&ticket)).send()
+                    else {
+                        continue; // Swarm unreachable → treat these as unknown
+                    };
+                    if !resp.status().is_success() {
+                        continue;
+                    }
+                    let Ok(body) = resp.json::<serde_json::Value>() else { continue };
+                    for rv in body.get("reviews").and_then(|r| r.as_array()).into_iter().flatten() {
+                        if let Some(id) = rv.get("id").and_then(|v| v.as_u64()) {
+                            in_review.insert(id);
+                        }
+                        for key in ["changes", "commits"] {
+                            for c in rv.get(key).and_then(|v| v.as_array()).into_iter().flatten() {
+                                if let Some(n) = c.as_u64() {
+                                    in_review.insert(n);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(shelves
+            .into_iter()
+            .filter(|s| !in_review.contains(&s.change))
+            .map(|s| ReviewRow {
+                kind: "shelf".to_string(),
+                id: s.change, // no review id; the changelist identifies the row
+                state: String::new(),
+                state_label: "Shelved".to_string(),
+                author: s.user,
+                description: s.desc,
+                created: s.time,
+                updated: s.time,
+                change: s.change,
+                pending: true,
+                commits: Vec::new(),
+                reviewers: Vec::new(),
+            })
+            .collect())
+    })
+    .await
+    .map_err(|e| format!("shelved-changelist scan failed: {e}"))?
+}
+
 /// A page of reviews matching `query`. Errors are reported in the page rather
 /// than thrown, so the tab can say *why* it is empty.
 #[tauri::command]
@@ -268,6 +396,7 @@ pub async fn swarm_reviews(conn: P4Conn, query: ReviewQuery) -> Result<ReviewPag
             reviewers.sort();
             reviewers.dedup();
             Some(ReviewRow {
+                kind: "review".to_string(),
                 id,
                 state_label: state_label(&state),
                 state,

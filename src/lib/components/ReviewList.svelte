@@ -23,6 +23,7 @@
     streamOnly,
     streamPath,
     hideSubmitted,
+    onlyInReview,
     me,
     refreshKey,
     contextReview,
@@ -32,6 +33,7 @@
     onSearch,
     onStreamOnly,
     onHideSubmitted,
+    onOnlyInReview,
     onLoadMore,
     onContent,
     onContentCached,
@@ -52,6 +54,7 @@
     streamOnly: boolean;
     streamPath: string; // the stream being scoped to ("" = workspace has none)
     hideSubmitted: boolean;
+    onlyInReview: boolean;
     me: string; // the connected user, for the "me" shortcut
     refreshKey: number; // bumps when the list reloads → drop per-review caches
     contextReview: number; // id of the review whose context menu is open
@@ -61,6 +64,7 @@
     onSearch: (q: string) => void;
     onStreamOnly: (v: boolean) => void;
     onHideSubmitted: (v: boolean) => void;
+    onOnlyInReview: (v: boolean) => void;
     onLoadMore: () => void;
     onContent: (r: ReviewRow) => Promise<ReviewContent>;
     /** Cached content (all cache layers, ~ms); undefined = never fetched. */
@@ -303,6 +307,18 @@
       hide submitted
     </label>
 
+    <label
+      class="scope"
+      title="Off, the list also shows shelved changelists nobody has asked a review for — work in progress that is otherwise invisible here. Swarm's own shadow changelists are never listed."
+    >
+      <input
+        type="checkbox"
+        checked={onlyInReview}
+        onchange={(e) => onOnlyInReview(e.currentTarget.checked)}
+      />
+      only in review
+    </label>
+
     <select
       class="pick"
       title="Whether the user below is the review's author or one of its reviewers"
@@ -378,11 +394,15 @@
             class:contextsel={contextReview === r.id}
             onclick={() => toggle(r)}
             oncontextmenu={(e) => onContext(r, e)}
-            title={`Review ${r.id}\n${r.description}\n\nshelf: @${r.change}`}
+            title={r.kind === "shelf"
+              ? `Shelved changelist @${r.change} — no review has been asked for it\n${r.description}`
+              : `Review ${r.id}\n${r.description}\n\nshelf: @${r.change}`}
           >
             <span class="tw">{s?.open ? "▾" : "▸"}</span>
-            <span class="cnum mono">#{r.id}</span>
-            <span class="state st-{r.state}">{r.stateLabel}</span>
+            <!-- A shelf has no review number, so its changelist identifies the
+                 row; the @ says which of the two you are looking at. -->
+            <span class="cnum mono">{r.kind === "shelf" ? `@${r.change}` : `#${r.id}`}</span>
+            <span class="state st-{r.state || 'shelfOnly'}">{r.stateLabel}</span>
             <span class="desc">{firstLine(r.description) || "(no description)"}</span>
             {#if r.commits.length}
               <span
@@ -679,6 +699,10 @@
   .st-needsRevision,
   .st-rejected {
     color: var(--warn);
+  }
+  /* A shelved changelist with no review: present, but not claiming a state. */
+  .st-shelfOnly {
+    opacity: 0.75;
   }
   .st-archived {
     color: var(--text-dim);

@@ -84,6 +84,7 @@ pub fn run() {
             commands::p4_clients,
             commands::p4_new_client,
             commands::swarm_reviews,
+            commands::swarm_shelved_no_review,
             commands::review_patch,
             commands::review_copy_files,
             commands::export_patch,

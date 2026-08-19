@@ -359,17 +359,24 @@
     // when nothing maps. The content changelist is resolved first — a review that
     // was submitted without approval has no shelf, and its content is the
     // submitted change instead.
+    // A shelved changelist with no review has no Swarm page and no review
+    // number — everything else here works the same, because a review's content
+    // IS a shelved changelist.
+    const shelfOnly = r.kind === "shelf";
     items.push({
       label: "Apply to workspace…",
       disabled: !r.change,
       action: async () => {
         const c = await reviews.content(r);
         const from = c.files.length ? c.change : r.change;
-        patches.previewReview(String(from), `Review #${r.id} (@${from})`);
+        patches.previewReview(
+          String(from),
+          shelfOnly ? `Shelved @${from}` : `Review #${r.id} (@${from})`,
+        );
       },
     });
     items.push({ label: "", sep: true });
-    items.push({ label: "Open in Swarm", action: () => openReviewPage(r.id) });
+    if (!shelfOnly) items.push({ label: "Open in Swarm", action: () => openReviewPage(r.id) });
     items.push({
       label: `Copy @${r.change}`,
       disabled: !r.change,
@@ -879,6 +886,7 @@
           search={reviews.search}
           streamOnly={reviews.streamOnly}
           hideSubmitted={reviews.hideSubmitted}
+          onlyInReview={reviews.onlyInReview}
           streamPath={reviews.streamPath}
           me={conn.user}
           refreshKey={reviews.version}
@@ -889,6 +897,7 @@
           onSearch={(q: string) => reviews.setSearch(q)}
           onStreamOnly={(v: boolean) => reviews.setStreamOnly(v)}
           onHideSubmitted={(v: boolean) => reviews.setHideSubmitted(v)}
+          onOnlyInReview={(v: boolean) => reviews.setOnlyInReview(v)}
           onLoadMore={() => void reviews.loadMore()}
           onContent={(r) => reviews.content(r)}
           onContentCached={(r) => reviews.contentCached(r)}

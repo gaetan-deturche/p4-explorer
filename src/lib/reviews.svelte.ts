@@ -59,6 +59,15 @@ let streamOnly = $state(true);
 // Also on by default: a submitted review is settled in practice, whatever state
 // Swarm still shows, and here most open reviews are in that position.
 let hideSubmitted = $state(true);
+// Reviews only, or reviews AND shelved changelists nobody has asked a review for.
+// Off by default: a shelf with no review is work in progress you may well want to
+// look at, and it was invisible everywhere in the app before this.
+let onlyInReview = $state(false);
+// The bare shelves, kept apart from `rows` so the review paging, caching and
+// provisional-paint logic stays exactly as it was. They are a bounded list (one
+// `p4 changes` window, minus everything Swarm owns), so they need no cursor.
+let shelfRows = $state<ReviewRow[]>([]);
+const SHELF_SCAN = 400;
 let version = $state(0); // bumps when rows change, so children refetch files
 let seq = 0; // discards the answer of a superseded request
 
@@ -139,8 +148,21 @@ export const reviews = {
   init(hooks: Hooks) {
     h = hooks;
   },
+  /** Reviews and (unless narrowed) bare shelves, newest first. Merging happens
+   *  here rather than in `rows` so the paging above never has to know about the
+   *  shelves. The state filter deliberately does not apply to them — a shelf has
+   *  no review state, and the checkbox is the control that governs them. */
   get rows() {
-    return rows;
+    if (onlyInReview || shelfRows.length === 0) return rows;
+    const q = search.trim().toLowerCase();
+    const keep = shelfRows.filter((r) => {
+      if (user && role !== "reviewer" && r.author !== user) return false;
+      if (user && role === "reviewer") return false; // nobody reviews a bare shelf
+      if (q && !String(r.change).includes(q) && !r.description.toLowerCase().includes(q)) return false;
+      return true;
+    });
+    if (!keep.length) return rows;
+    return [...rows, ...keep].sort((a, b) => (b.updated || b.created) - (a.updated || a.created));
   },
   get loading() {
     return loading;
@@ -176,6 +198,9 @@ export const reviews = {
   get hideSubmitted() {
     return hideSubmitted;
   },
+  get onlyInReview() {
+    return onlyInReview;
+  },
   /** The stream the filter is scoping to ("" when the workspace has none). */
   get streamPath() {
     return h?.rootPath() ?? "";
@@ -206,12 +231,40 @@ export const reviews = {
   setStreamOnly(next: boolean) {
     if (next === streamOnly) return;
     streamOnly = next;
+    shelfRows = []; // scoped differently now — load() refetches
     void reviews.load();
   },
   setHideSubmitted(next: boolean) {
     if (next === hideSubmitted) return;
     hideSubmitted = next;
     void reviews.load();
+  },
+  setOnlyInReview(next: boolean) {
+    if (next === onlyInReview) return;
+    onlyInReview = next;
+    version++; // the merged getter re-reads; no refetch needed to narrow
+    if (!onlyInReview) void reviews.loadShelved(); // widening may need the data
+  },
+
+  /** The shelved changelists no review covers. One command: a bounded
+   *  `p4 changes` window minus Swarm's own shadow changelists, then a single
+   *  batched Swarm lookup. Failures leave the list empty rather than breaking the
+   *  reviews beside them. */
+  async loadShelved() {
+    if (!h || !h.connected() || onlyInReview) return;
+    const mine = seq;
+    try {
+      const found = await p4.shelvedNoReview(
+        h.conn(),
+        streamOnly ? (h.rootPath() ?? "") : "",
+        SHELF_SCAN,
+      );
+      if (mine !== seq) return; // a newer query already asked
+      shelfRows = found;
+      version++;
+    } catch {
+      shelfRows = [];
+    }
   },
 
   /** Fetch the first page for the current filters. */
@@ -232,6 +285,7 @@ export const reviews = {
       return;
     }
     const mine = ++seq;
+    void reviews.loadShelved(); // alongside, not before: neither blocks the other
     // Paint the cached list for this exact filter set before the round-trip —
     // Swarm answers in ~100ms but p4-backed setups deserve the same instant
     // paint every other tab gets; the fetch below reconciles.

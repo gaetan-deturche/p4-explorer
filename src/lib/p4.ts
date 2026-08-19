@@ -47,6 +47,9 @@ export interface LocalDir {
 
 /** One row of the Swarm review list. */
 export interface ReviewRow {
+  /** "review" for a Swarm review, "shelf" for a shelved changelist with no
+   *  review at all — the latter has no state, reviewers or Swarm page. */
+  kind: "review" | "shelf";
   id: number;
   state: string;
   stateLabel: string;
@@ -321,6 +324,10 @@ export const p4 = {
   /** Copy a review's binary/added files verbatim (p4 print of the shelved rev). */
   reviewCopyFiles: (conn: P4Conn, change: string, files: string[], mode: "edit" | "offline") =>
     g<CopyResult[]>("review_copy_files", { conn, change, files, mode }),
+  /** Shelved changelists under a stream that no review covers (empty path = the
+   *  whole depot). `scan` bounds the `p4 changes` window, not the result. */
+  shelvedNoReview: (conn: P4Conn, streamPath: string, scan: number) =>
+    g<ReviewRow[]>("swarm_shelved_no_review", { conn, streamPath, scan }),
   swarmReview: (conn: P4Conn, change: string) =>
     g<ReviewInfo | null>("swarm_review", { conn, change }),
   /** Authenticated? `error` carries the p4 text when not (charset vs ticket). */

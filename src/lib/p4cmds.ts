@@ -43,6 +43,7 @@ export const P4_COMMANDS: P4Cmd[] = [
   { key: "swarm_url", label: "swarm url", read: true },
   { key: "swarm_review", label: "swarm review", read: true },
   { key: "swarm_reviews", label: "swarm reviews", read: true },
+  { key: "swarm_shelved_no_review", label: "swarm reviews", read: true },
   { key: "review_patch", label: "describe -S (review patch)", read: true },
   { key: "sync_cancel", label: "cancel sync", read: true },
   { key: "export_patch", label: "diff (export patch)", read: true },
