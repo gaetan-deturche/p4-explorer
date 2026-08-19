@@ -10,6 +10,7 @@ import {
   type ReviewInfo,
   type UndoResult,
   type UnshelveResult,
+  type OpenResult,
 } from "$lib/p4";
 import { openDiff } from "$lib/opendiff";
 import { cacheGet, cacheGetSync, cacheSet, storeGet, hydrate, storeSet, storeSetMem } from "$lib/store.svelte";
@@ -752,6 +753,59 @@ export const pending = {
       h.setError(String(e));
     }
   },
+  /** Check out, mark for add, or mark for delete. Reports what p4 actually did
+   *  per file: a refusal on an exclusive file names whoever holds it, which is
+   *  the whole reason to attempt the checkout in the first place. */
+  async openFiles(verb: "edit" | "add" | "delete", files: string[]) {
+    if (!h || !h.connected() || h.syncing() || !files.length) return;
+    const what =
+      verb === "edit" ? "Checked out" : verb === "add" ? "Marked for add" : "Marked for delete";
+    if (verb === "delete") {
+      const list =
+        files.slice(0, 8).join("\n") +
+        (files.length > 8 ? `\n…and ${files.length - 8} more` : "");
+      const go = await h.askConfirm(
+        `${list}\n\nMark ${files.length === 1 ? "this file" : `these ${files.length} files`} ` +
+          `for delete? The local cop${files.length === 1 ? "y" : "ies"} will be removed; ` +
+          `nothing leaves the depot until you submit.`,
+        "Mark for delete",
+        "Mark for delete",
+      );
+      if (!go) return;
+    }
+    let done = 0;
+    let failed: OpenResult[] = [];
+    await pending.mutate(
+      async () => {
+        const res = await p4.openFiles(h!.conn(), verb, files);
+        done = res.filter((r) => r.ok).length;
+        failed = res.filter((r) => !r.ok);
+      },
+      () =>
+        `${what} ${done} file${done === 1 ? "" : "s"}` +
+        (failed.length ? ` · ${failed.length} refused: ${failed[0].message}` : "."),
+    );
+    // A refusal is the interesting outcome, so it gets the error line too — the
+    // notice above is transient and a blocked checkout is worth reading twice.
+    if (failed.length && !done) h.setError(`${failed[0].file}\n${failed[0].message}`);
+  },
+
+  /** Rename or move a file, keeping its history. */
+  async moveFile(from: string, to: string) {
+    if (!h || !h.connected() || h.syncing()) return;
+    const out: { res: OpenResult | null } = { res: null };
+    await pending.mutate(
+      async () => {
+        out.res = await p4.moveFile(h!.conn(), from, to);
+      },
+      () =>
+        out.res?.ok
+          ? `Moved to ${to.split("/").pop()} — submit the change to make it stick.`
+          : `Move refused: ${out.res?.message ?? "unknown reason"}`,
+    );
+    if (out.res && !out.res.ok) h.setError(`${from}\n${out.res.message}`);
+  },
+
   /** Undo a SUBMITTED change, or just some of its files, into a new pending
    *  changelist. Nothing reaches the depot: the user reviews the result, trims
    *  it if they only wanted part of it, and submits.

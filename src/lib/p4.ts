@@ -220,6 +220,15 @@ export function writeLocalFile(path: string, text: string): Promise<void> {
   return safe.guard("write_local_file", () => invoke<void>("write_local_file", { path, text }));
 }
 
+/** One file's outcome from check out / add / delete / move. */
+export interface OpenResult {
+  file: string;
+  ok: boolean;
+  /** The action p4 opened it for, or why it refused — including the
+   *  "also opened by <user>" line that names whoever is in the way. */
+  message: string;
+}
+
 /** One holder of a file: someone who has it open, in which workspace. */
 export interface Holder {
   user: string;
@@ -411,6 +420,13 @@ export const p4 = {
     rightRev: string,
   ) => g<string>("open_unreal_diff", { conn, left, right, name, leftRev, rightRev }),
   revert: (conn: P4Conn, depotFile: string) => call("p4_revert", { conn, depotFile }),
+  /** Check out / mark for add / mark for delete. One p4 call per file so a
+   *  refusal can be attributed; `change` empty = the default changelist. */
+  openFiles: (conn: P4Conn, verb: "edit" | "add" | "delete", files: string[], change = "") =>
+    g<OpenResult[]>("p4_open_files", { conn, verb, files, change }),
+  /** Rename/move a file, keeping its history (p4 edit + p4 move). */
+  moveFile: (conn: P4Conn, from: string, to: string, change = "") =>
+    g<OpenResult>("p4_move_file", { conn, from, to, change }),
   /** Who has this file open, and who (if anyone) holds it exclusively. */
   fileHolders: (conn: P4Conn, depotFile: string) =>
     g<FileHolders>("p4_file_holders", { conn, depotFile }),

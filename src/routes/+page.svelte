@@ -560,6 +560,34 @@
       if (holders) holders = { loading: false, error: String(e), info: null };
     }
   }
+  // --- claiming a file: check out / add / delete / move ----------------------
+  // The four verbs that open a file BEFORE it is edited. Until these, the only
+  // way into a changelist was to change something on disk and let reconcile
+  // notice — which cannot reserve a `+l` asset, and cannot express a rename at
+  // all (reconcile sees delete + add and the history stops at the new name).
+  let moveFrom = $state<string | null>(null); // file awaiting its new path
+
+  /** Files out of a tree selection (folders have no per-file action). */
+  function filesOf(targets: SyncTarget[]): string[] {
+    return targets.filter((x) => !x.isDir).map((x) => x.path);
+  }
+  function openMenu(targets: SyncTarget[]) {
+    const files = filesOf(targets);
+    const n = files.length;
+    if (!n) return [] as { label: string; action?: () => void; sep?: boolean }[];
+    const many = n > 1 ? ` (${n} files)` : "";
+    return [
+      { label: `Check out${many}`, action: () => void pending.openFiles("edit", files) },
+      // p4 refuses an add for anything already in the depot, and says so per
+      // file, so the entry does not have to guess which of these are new.
+      { label: `Mark for add${many}`, action: () => void pending.openFiles("add", files) },
+      { label: `Mark for delete${many}…`, action: () => void pending.openFiles("delete", files) },
+      ...(n === 1
+        ? [{ label: "Rename / move…", action: () => (moveFrom = files[0]) }]
+        : []),
+    ];
+  }
+
   /** The "Who has this file?" entry, for every list that shows a file. */
   function holdersMenu(depotFile: string) {
     return { label: "Who has this file?…", action: () => void whoHas(depotFile) };
@@ -1037,6 +1065,21 @@
   />
 {/if}
 
+{#if moveFrom !== null}
+  <InputDialog
+    title="Rename / move"
+    label="New depot path"
+    initial={moveFrom}
+    okLabel="Move"
+    onSubmit={(to) => {
+      const from = moveFrom!;
+      moveFrom = null;
+      void pending.moveFile(from, to);
+    }}
+    onCancel={() => (moveFrom = null)}
+  />
+{/if}
+
 {#if holders}
   <FileHoldersDialog
     info={holders.info}
@@ -1143,6 +1186,7 @@
           ]),
       copyMenu(p),
       { label: "", sep: true },
+      ...(openMenu(tgts).length ? [...openMenu(tgts), { label: "", sep: true }] : []),
       { label: `Sync ${what}`, action: () => sync.syncPath(tgts) },
       // The inverse of sync: drop the local copy, keep the depot untouched.
       { label: `Unsync ${what}…`, action: () => sync.unsyncPath(tgts) },

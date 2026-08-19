@@ -79,6 +79,8 @@ export const P4_COMMANDS: P4Cmd[] = [
   { key: "p4_revert", label: "revert", read: false },
   { key: "p4_shelved_changes", label: "changes -s shelved", read: true },
   { key: "p4_file_holders", label: "fstat (who has it)", read: true },
+  { key: "p4_open_files", label: "edit / add / delete", read: false },
+  { key: "p4_move_file", label: "move (rename)", read: false },
   { key: "open_file_history_window", label: "file history (window)", read: true },
   { key: "p4_revert_change", label: "revert -c (whole changelist)", read: false },
   { key: "p4_delete_change", label: "change -d (delete changelist)", read: false },
