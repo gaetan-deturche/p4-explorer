@@ -131,7 +131,6 @@
               <td class="act act-{f.action}">{f.action ?? ""}</td>
               <td
                 class="filecell mono"
-                title="Double-click to open in external diff"
                 ondblclick={() => onOpenDiff(f.depotFile, Number(f.rev))}
                 oncontextmenu={(e) => {
                   if (onFileContext) {
@@ -182,7 +181,10 @@
   </div>
 
   {#if tip}
-    <div class="tip mono" style="left:{tip.x + 14}px; top:{tip.y + 16}px">{tip.text}</div>
+    <div class="tip mono" style="left:{tip.x + 14}px; top:{tip.y + 16}px">
+      {tip.text}
+      <div class="tiphint">Double-click to open in external diff</div>
+    </div>
   {/if}
 </div>
 
@@ -352,6 +354,14 @@
     border-radius: 5px;
     box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
     word-break: break-all;
+  }
+  /* Secondary line of the path tip: this hint used to be the cell's native
+     `title`, which the browser drew over the tip and hid the path. */
+  .tiphint {
+    margin-top: 3px;
+    font-family: "Segoe UI", Inter, system-ui, sans-serif;
+    opacity: 0.65;
+    word-break: normal;
   }
   .msg {
     padding: 12px;
