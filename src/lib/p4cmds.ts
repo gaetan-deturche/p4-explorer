@@ -73,6 +73,7 @@ export const P4_COMMANDS: P4Cmd[] = [
   { key: "p4_submit", label: "submit", read: false },
   { key: "p4_shelve", label: "shelve", read: false },
   { key: "p4_shelve_delete", label: "shelve -d", read: false },
+  { key: "p4_unshelve", label: "unshelve", read: false },
   { key: "p4_request_review", label: "request review", read: false },
   { key: "p4_revert", label: "revert", read: false },
   { key: "p4_shelved_changes", label: "changes -s shelved", read: true },

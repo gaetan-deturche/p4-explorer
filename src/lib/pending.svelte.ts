@@ -3,7 +3,14 @@
 //! file-content providers for PendingList. Shared bits come via `init()`.
 
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { p4, type P4Conn, type P4Record, type ReviewInfo, type UndoResult } from "$lib/p4";
+import {
+  p4,
+  type P4Conn,
+  type P4Record,
+  type ReviewInfo,
+  type UndoResult,
+  type UnshelveResult,
+} from "$lib/p4";
 import { openDiff } from "$lib/opendiff";
 import { cacheGet, cacheGetSync, cacheSet, storeGet, hydrate, storeSet, storeSetMem } from "$lib/store.svelte";
 
@@ -15,6 +22,14 @@ type Hooks = {
   setNotice: (m: string, ms?: number) => void;
   setError: (m: string) => void;
   askConfirm: (msg: string, title?: string, ok?: string) => Promise<boolean>;
+  // A confirmation carrying one tick-box (unshelve's "leave the files offline").
+  askOption: (
+    msg: string,
+    title: string,
+    ok: string,
+    optionLabel: string,
+    optionChecked?: boolean,
+  ) => Promise<{ ok: boolean; option: boolean }>;
   refresh: () => Promise<void>;
 };
 
@@ -30,6 +45,9 @@ let openCounts = $state<Record<string, number> | null>(null);
 // per load answers it for every CL at once — describing each CL instead would
 // cost one command per row.
 let shelved = $state<Set<string>>(new Set());
+// The last unshelve's result, handed from the action callback to the notice that
+// reports it — `mutate` can only take a message, not the outcome it describes.
+let lastUnshelve: UnshelveResult | null = null;
 // Depot paths p4 is holding a resolve on. `p4 opened` says nothing about resolve
 // state, so a conflicted file is indistinguishable from a plain edit without this.
 let unresolved = $state<Set<string>>(new Set());
@@ -549,7 +567,8 @@ export const pending = {
     msg: string,
     title: string,
     ok: string,
-    note: string,
+    // A function when only the completed action can describe itself (see mutate).
+    note: string | (() => string),
     opts?: { refresh?: boolean; optimistic?: () => () => void },
   ) {
     if (!h || !h.connected() || h.syncing()) return;
@@ -627,6 +646,87 @@ export const pending = {
       { refresh: false }, // shelving changes no synced content
     );
   },
+  /** Copy this changelist's open files to the server shelf. The files stay open
+   *  and the workspace is untouched — shelving is a server-side copy, so this
+   *  needs no confirmation. `-f` replaces an existing shelf. */
+  shelveChangelist(change: string) {
+    const replacing = shelved.has(change);
+    pending.mutate(
+      () => p4.shelveUpdate(h!.conn(), change),
+      replacing ? `Shelf of @${change} replaced.` : `Files of @${change} shelved.`,
+      { refresh: false }, // shelving changes no synced content
+    );
+  },
+
+  /** Restore this changelist's shelf into the workspace.
+   *
+   *  Two ways, the same choice the patch dialog offers and defaulting the same
+   *  way. OFFLINE writes the shelved content to disk and opens nothing, so no
+   *  file is checked out and no `+l` asset is exclusive-locked — it is
+   *  `review_copy_files`, which exists for exactly this and handles adds and
+   *  deletes. CHECKED OUT is `p4 unshelve`, which opens every file it restores;
+   *  that also brings the pending integration history a later submit records as a
+   *  merge, which the offline copy cannot.
+   *
+   *  p4 can only merge a shelf onto files that are still open, leaving them to
+   *  resolve, so the dialog says so when that applies. */
+  async unshelveChangelist(change: string) {
+    if (!h || !h.connected() || h.syncing()) return;
+    const open = pending.openCount(change) ?? 0;
+    const answer = await h.askOption(
+      `Unshelve the files of @${change} into your workspace?
+
+` +
+        (open
+          ? `@${change} still has ${open} file${open === 1 ? "" : "s"} open. Checked out, p4 can ` +
+            `only merge the shelf onto those, which leaves them needing a resolve.
+
+`
+          : "") +
+        "The shelf stays on the server — delete it separately when you no longer need it.",
+      "Unshelve changelist",
+      "Unshelve",
+      "Leave the files offline (write to disk only, no checkout)",
+      true,
+    );
+    if (!answer.ok) return;
+
+    if (!answer.option) {
+      lastUnshelve = null;
+      await pending.mutate(
+        async () => {
+          lastUnshelve = await p4.unshelve(h!.conn(), change);
+        },
+        // A resolve left behind must not be silent, and only the finished command
+        // knows whether there is one.
+        () =>
+          lastUnshelve
+            ? `Restored ${lastUnshelve.restored} file${lastUnshelve.restored === 1 ? "" : "s"} from the shelf of @${change}` +
+              (lastUnshelve.needsResolve ? " — some need a resolve before they can be submitted." : ".")
+            : `Unshelved @${change}.`,
+      );
+      return;
+    }
+
+    const files = (await pending.shelvedFiles(change)).map((f) => String(f.depotFile));
+    if (!files.length) {
+      h.setError(`@${change} has no shelved files.`);
+      return;
+    }
+    let copied = 0;
+    let failed: string[] = [];
+    await pending.mutate(
+      async () => {
+        const res = await p4.reviewCopyFiles(h!.conn(), change, files, "offline");
+        copied = res.filter((r) => r.status === "copied").length;
+        failed = res.filter((r) => r.status === "failed" || r.status === "skipped").map((r) => r.message);
+      },
+      () =>
+        `Wrote ${copied} file${copied === 1 ? "" : "s"} from the shelf of @${change} to disk` +
+        (failed.length ? `, ${failed.length} skipped: ${failed[0]}` : " — nothing is checked out."),
+    );
+  },
+
   deleteShelf(change: string) {
     // Removing a shelf changes no synced content — skip the full tree/index
     // refresh (it was making this feel slow); just reload the pending list.

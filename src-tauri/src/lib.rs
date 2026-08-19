@@ -147,6 +147,7 @@ pub fn run() {
             commands::p4_set_description,
             commands::p4_revert,
             commands::p4_shelved_changes,
+            commands::p4_unshelve,
             commands::p4_delete_change,
             commands::p4_revert_change,
             commands::p4_undo_change,

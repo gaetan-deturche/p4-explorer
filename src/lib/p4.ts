@@ -217,6 +217,14 @@ export function writeLocalFile(path: string, text: string): Promise<void> {
   return safe.guard("write_local_file", () => invoke<void>("write_local_file", { path, text }));
 }
 
+/** What an unshelve restored. `needsResolve` is set when p4 left files flagged
+ *  unresolved — it does that when the shelf lands on files that were still open. */
+export interface UnshelveResult {
+  restored: number;
+  needsResolve: boolean;
+  notes: string[];
+}
+
 /** One file's fate in an undo. */
 export interface UndoFile {
   depotFile: string;
@@ -301,6 +309,8 @@ export const p4 = {
   submit: (conn: P4Conn, change: string) => call("p4_submit", { conn, change }),
   shelveDelete: (conn: P4Conn, change: string) => call("p4_shelve_delete", { conn, change }),
   shelveUpdate: (conn: P4Conn, change: string) => call("p4_shelve", { conn, change }),
+  /** Restore a changelist's shelved files into the workspace; the shelf stays. */
+  unshelve: (conn: P4Conn, change: string) => g<UnshelveResult>("p4_unshelve", { conn, change }),
   requestReview: (conn: P4Conn, change: string) =>
     g<void>("p4_request_review", { conn, change }),
   swarmUrl: (conn: P4Conn) => g<string>("swarm_url", { conn }),

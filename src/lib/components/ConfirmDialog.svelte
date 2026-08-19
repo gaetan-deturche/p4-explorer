@@ -1,23 +1,33 @@
 <script lang="ts">
+  import { untrack } from "svelte";
   let {
     title,
     message,
     okLabel = "OK",
+    // An optional tick-box carried by the confirmation itself, for a choice that
+    // belongs to the action rather than to a separate dialog (the patch dialog's
+    // "leave the files offline" is the same idea).
+    optionLabel = "",
+    optionChecked = false,
     onOk,
     onCancel,
   }: {
     title: string;
     message: string;
     okLabel?: string;
-    onOk: () => void;
+    optionLabel?: string;
+    optionChecked?: boolean;
+    onOk: (option: boolean) => void;
     onCancel: () => void;
   } = $props();
+
+  let option = $state(untrack(() => optionChecked));
 </script>
 
 <svelte:window
   onkeydown={(e) => {
     if (e.key === "Escape") onCancel();
-    else if (e.key === "Enter") onOk();
+    else if (e.key === "Enter") onOk(option);
   }}
 />
 
@@ -26,9 +36,15 @@
   <div class="dialog" role="dialog" aria-modal="true" tabindex="-1">
     {#if title}<div class="dtitle">{title}</div>{/if}
     <p class="msg">{message}</p>
+    {#if optionLabel}
+      <label class="opt">
+        <input type="checkbox" bind:checked={option} />
+        {optionLabel}
+      </label>
+    {/if}
     <div class="actions">
       <button onclick={onCancel}>Cancel</button>
-      <button class="primary" onclick={onOk}>{okLabel}</button>
+      <button class="primary" onclick={() => onOk(option)}>{okLabel}</button>
     </div>
   </div>
 </div>
@@ -77,6 +93,13 @@
     max-height: 50vh;
     overflow-y: auto;
     color: var(--text);
+  }
+  .opt {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 0 0 10px;
+    font-size: 12px;
   }
   .actions {
     display: flex;

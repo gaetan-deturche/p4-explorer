@@ -72,13 +72,38 @@
     title: string;
     message: string;
     okLabel: string;
-    resolve: (v: boolean) => void;
+    optionLabel: string;
+    optionChecked: boolean;
+    resolve: (v: { ok: boolean; option: boolean }) => void;
   } | null>(null);
   function askConfirm(message: string, title = "Confirm", okLabel = "OK"): Promise<boolean> {
-    return new Promise((resolve) => (confirmState = { title, message, okLabel, resolve }));
+    return new Promise((resolve) => {
+      confirmState = {
+        title,
+        message,
+        okLabel,
+        optionLabel: "",
+        optionChecked: false,
+        resolve: (v) => resolve(v.ok),
+      };
+    });
   }
-  function resolveConfirm(v: boolean) {
-    confirmState?.resolve(v);
+  /** As askConfirm, plus one tick-box whose state comes back with the answer —
+   *  for a choice that belongs to the action itself (unshelve's "leave the files
+   *  offline"), rather than a dialog of its own. */
+  function askOption(
+    message: string,
+    title: string,
+    okLabel: string,
+    optionLabel: string,
+    optionChecked = false,
+  ): Promise<{ ok: boolean; option: boolean }> {
+    return new Promise((resolve) => {
+      confirmState = { title, message, okLabel, optionLabel, optionChecked, resolve };
+    });
+  }
+  function resolveConfirm(ok: boolean, option = false) {
+    confirmState?.resolve({ ok, option });
     confirmState = null;
   }
 
@@ -267,17 +292,33 @@
         action: () => (renameCl = { change: cl.change, desc: (cl.desc ?? "").trim() }),
       });
     }
+    // Every shelf action in one group: put the work on the server, take it back,
+    // throw the server copy away. Each appears only when p4 would accept it —
+    // nothing to shelve without open files, nothing to unshelve or delete
+    // without a shelf. The default changelist has no shelf of its own.
+    const shelf = own && !isDefault;
+    const hasShelf = pending.hasShelf(cl.change);
+    group();
+    if (shelf && (pending.openCount(cl.change) ?? 0) > 0) {
+      items.push({
+        label: hasShelf ? "Re-shelve files (replace the shelf)" : "Shelve files",
+        action: () => pending.shelveChangelist(cl.change),
+      });
+    }
+    if (shelf && hasShelf) {
+      items.push({
+        label: "Unshelve files…",
+        action: () => pending.unshelveChangelist(cl.change),
+      });
+      items.push({ label: "Delete shelf", action: () => pending.deleteShelf(cl.change) });
+    }
+    group();
     if (own && !isDefault) {
       if (hasReview) items.push({ label: "Update review", action: () => pending.updateReview(cl.change) });
       else items.push({ label: "Request review", action: () => pending.requestReview(cl.change) });
     }
     if (!isDefault) {
       items.push({ label: "Open review in browser", action: () => pending.openReview(cl.change) });
-    }
-    // Only when there IS one: the entry meant nothing on the (many) changelists
-    // that were never shelved.
-    if (own && !isDefault && pending.hasShelf(cl.change)) {
-      items.push({ label: "Delete shelf", action: () => pending.deleteShelf(cl.change) });
     }
     group();
     items.push({ label: "Generate patch…", action: () => generatePatch(cl.change, []) });
@@ -594,6 +635,7 @@
       setNotice,
       setError,
       askConfirm,
+      askOption,
       refresh: () => browse.refresh(),
     });
     merges.init({
@@ -969,7 +1011,9 @@
     title={confirmState.title}
     message={confirmState.message}
     okLabel={confirmState.okLabel}
-    onOk={() => resolveConfirm(true)}
+    optionLabel={confirmState.optionLabel}
+    optionChecked={confirmState.optionChecked}
+    onOk={(option) => resolveConfirm(true, option)}
     onCancel={() => resolveConfirm(false)}
   />
 {/if}

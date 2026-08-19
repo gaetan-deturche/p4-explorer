@@ -145,6 +145,53 @@ pub async fn p4_shelve_delete(conn: P4Conn, change: String) -> Res {
     run(conn, v(&["shelve", "-d", "-c", &change])).await
 }
 
+/// Restore a changelist's shelved files into the workspace
+/// (`p4 unshelve -s <change> -c <change>`), leaving the shelf in place — the
+/// server copy stays as a safety net until "Delete shelf" removes it.
+///
+/// The result is reported rather than assumed. p4 permits unshelving over an
+/// already-open file only when both sides are `edit`, and then flags the file
+/// UNRESOLVED (`p4 resolve` required); unshelving an `add` over an open file is
+/// not supported at all. So the notice has to be able to say "restored, and some
+/// of it needs a resolve" instead of a flat success.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnshelveResult {
+    pub restored: u32,
+    pub needs_resolve: bool,
+    /// p4's own remarks (warnings included) — shown when there is something to say.
+    pub notes: Vec<String>,
+}
+
+#[tauri::command]
+pub async fn p4_unshelve(conn: P4Conn, change: String) -> Result<UnshelveResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        // run_notes, not run: a per-file refusal is a WARNING with exit status 0
+        // (see commands/undo.rs), so `run` would drop the reason and report a
+        // success that never happened.
+        let (recs, notes) = p4::run_notes(&conn, &["unshelve", "-s", &change, "-c", &change])?;
+        if recs.is_empty() {
+            return Err(if notes.is_empty() {
+                format!("nothing was unshelved from @{change}")
+            } else {
+                notes.join("; ")
+            });
+        }
+        // Ask the STATE, never the message. p4 reports an unshelve as
+        // "...#10 - unshelved, opened for edit" whether or not it left a merge to
+        // settle, and it says nothing about a resolve — verified live. `resolve -n
+        // -c <change>` is exact and scoped to this changelist: files to resolve
+        // come back as records, and "No file(s) to resolve." is a severity-2
+        // warning that `run` drops, so an empty result means genuinely nothing.
+        let needs_resolve = p4::run(&conn, &["resolve", "-n", "-c", &change])
+            .map(|r| !r.is_empty())
+            .unwrap_or(false);
+        Ok(UnshelveResult { restored: recs.len() as u32, needs_resolve, notes })
+    })
+    .await
+    .map_err(|e| format!("unshelve task failed: {e}"))?
+}
+
 /// (Re)shelve a changelist's files (`p4 shelve -f -c <change>`) — used to update
 /// an existing Swarm review (Swarm picks up the new shelf).
 #[tauri::command]
