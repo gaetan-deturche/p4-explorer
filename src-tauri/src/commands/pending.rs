@@ -289,6 +289,39 @@ pub async fn p4_new_changelist(conn: P4Conn, description: String) -> Result<Stri
 }
 
 #[cfg(test)]
+mod type_tests {
+    use super::is_exclusive;
+
+    #[test]
+    fn exclusive_types_are_recognised() {
+        // Live: every .uasset on this depot is binary+l, and an open on one of
+        // them locks everyone else out.
+        assert!(is_exclusive("binary+l"));
+        assert!(is_exclusive("text+lw"));
+        assert!(is_exclusive("text+Cl"));
+    }
+
+    #[test]
+    fn shared_types_are_not() {
+        // Live: DefaultEditorPerProjectUserSettings.ini is text+w and was open by
+        // two people at once, blocking nobody.
+        assert!(!is_exclusive("text+w"));
+        assert!(!is_exclusive("text"));
+        assert!(!is_exclusive("binary"));
+        assert!(!is_exclusive(""));
+    }
+
+    #[test]
+    fn only_the_modifiers_are_searched() {
+        // The whole reason this is a function: an `l` in the BASE type must not
+        // count. Anything before the '+' is a name, not a permission.
+        assert!(!is_exclusive("apple+w"));
+        assert!(!is_exclusive("symlink"));
+        assert!(!is_exclusive("symlink+w"));
+    }
+}
+
+#[cfg(test)]
 mod delete_tests {
     use super::still_exists;
 
@@ -349,6 +382,16 @@ pub struct FileHolders {
     pub others: Vec<Holder>,
 }
 
+/// Does this file type take an exclusive lock on open?
+///
+/// The `l` modifier follows the base type after `+` — `binary+l`, `text+lw`.
+/// Only the MODIFIERS may be searched: base types and other modifiers contain
+/// `l` too (`text+Cl` is exclusive, but a naive contains() on the whole string
+/// would also call `apple`-ish or `+C`-with-l-in-the-base types exclusive).
+fn is_exclusive(head_type: &str) -> bool {
+    head_type.split_once('+').map(|(_, m)| m.contains('l')).unwrap_or(false)
+}
+
 #[tauri::command]
 pub async fn p4_file_holders(conn: P4Conn, depot_file: String) -> Result<FileHolders, String> {
     tauri::async_runtime::spawn_blocking(move || {
@@ -359,11 +402,7 @@ pub async fn p4_file_holders(conn: P4Conn, depot_file: String) -> Result<FileHol
         let get = |k: &str| rec.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
 
         let head_type = get("headType");
-        // A file type's modifiers follow the base type after '+': binary+l, text+lw.
-        let exclusive_type = head_type
-            .split_once('+')
-            .map(|(_, m)| m.contains('l'))
-            .unwrap_or(false);
+        let exclusive_type = is_exclusive(&head_type);
         let other_lock = rec.contains_key("otherLock") || rec.contains_key("otherLock0");
         let our_lock = rec.contains_key("ourLock");
 

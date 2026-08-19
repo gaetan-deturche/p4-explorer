@@ -37,6 +37,11 @@ jobs:
       - name: Type-check (svelte-check)
         run: npm run check
 
+      # Before the build so a broken parser fails in seconds rather than after a
+      # full Tauri bundle. Shares the rust-cache workspace above.
+      - name: Rust tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
       - name: Build app
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}

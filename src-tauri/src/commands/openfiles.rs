@@ -35,44 +35,41 @@ pub struct OpenResult {
     pub message: String,
 }
 
+/// Decide what p4's answer means for one file. Split out from `open_one` so it
+/// can be tested against captured output — it is pure record-reading, and the
+/// records are the part that is easy to misread.
+fn classify(recs: &[p4::Record], notes: Vec<String>, file: &str) -> OpenResult {
+    // A real open reports an action; everything else is commentary.
+    if let Some(r) = recs.iter().find(|r| r.contains_key("action")) {
+        return OpenResult {
+            file: file.to_string(),
+            ok: true,
+            message: r.get("action").and_then(|v| v.as_str()).unwrap_or("opened").to_string(),
+        };
+    }
+    // Messages that arrived as records because they carry no severity — the
+    // "also opened by <user>" line is one, and it is the useful one.
+    let asides = recs
+        .iter()
+        .filter_map(|r| r.get("data").and_then(|v| v.as_str()))
+        .map(|s| s.trim().to_string());
+    let mut why: Vec<String> = notes;
+    why.extend(asides);
+    OpenResult {
+        file: file.to_string(),
+        ok: false,
+        message: if why.is_empty() {
+            "p4 did not open this file".to_string()
+        } else {
+            why.join(" — ")
+        },
+    }
+}
+
 /// Run one file operation and report whether THAT FILE was opened.
 fn open_one(conn: &P4Conn, args: &[&str], file: &str) -> OpenResult {
     match p4::run_notes(conn, args) {
-        Ok((recs, notes)) => {
-            // A real open reports an action; the rest is commentary.
-            let opened = recs.iter().find(|r| r.contains_key("action"));
-            // Messages that arrived as records (no severity) — "also opened by …".
-            let asides: Vec<String> = recs
-                .iter()
-                .filter(|r| !r.contains_key("action"))
-                .filter_map(|r| r.get("data").and_then(|v| v.as_str()))
-                .map(|s| s.trim().to_string())
-                .collect();
-            match opened {
-                Some(r) => OpenResult {
-                    file: file.to_string(),
-                    ok: true,
-                    message: r
-                        .get("action")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("opened")
-                        .to_string(),
-                },
-                None => {
-                    let mut why: Vec<String> = notes;
-                    why.extend(asides);
-                    OpenResult {
-                        file: file.to_string(),
-                        ok: false,
-                        message: if why.is_empty() {
-                            "p4 did not open this file".to_string()
-                        } else {
-                            why.join(" — ")
-                        },
-                    }
-                }
-            }
-        }
+        Ok((recs, notes)) => classify(&recs, notes, file),
         Err(e) => OpenResult { file: file.to_string(), ok: false, message: e },
     }
 }
@@ -157,4 +154,68 @@ pub async fn p4_move_file(
     })
     .await
     .map_err(|e| format!("move task failed: {e}"))?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::classify;
+    use crate::p4::Record;
+
+    fn rec(pairs: &[(&str, &str)]) -> Record {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), serde_json::Value::String(v.to_string())))
+            .collect()
+    }
+
+    #[test]
+    fn an_action_record_is_a_real_open() {
+        // `p4 -ztag -Mj edit -n <free file>`, captured live.
+        let recs = [rec(&[
+            ("action", "edit"),
+            ("clientFile", "H:/ws/NavigationModeComponent.cpp"),
+            ("depotFile", "//d/NavigationModeComponent.cpp"),
+            ("type", "text+D"),
+            ("workRev", "10"),
+        ])];
+        let r = classify(&recs, vec![], "//d/NavigationModeComponent.cpp");
+        assert!(r.ok);
+        assert_eq!(r.message, "edit");
+    }
+
+    #[test]
+    fn an_exclusive_refusal_names_the_holder() {
+        // The trap this test exists for. `p4 edit` on a binary+l file another
+        // user holds EXITS 0 and answers with two messages: a severity-2 warning
+        // (which run_notes hands over as a note) and a `level:1` line with NO
+        // severity — so that one arrives as a data RECORD. Reading "records came
+        // back" as success would call this refusal an open.
+        let recs = [rec(&[(
+            "data",
+            "//d/AM_LazerPlant.uasset - also opened by thomas.bardet@thomas.bardet_SLOCLAP-167",
+        )])];
+        let notes = vec!["//d/AM_LazerPlant.uasset - can't edit exclusive file already opened".to_string()];
+        let r = classify(&recs, notes, "//d/AM_LazerPlant.uasset");
+        assert!(!r.ok, "a data-only record is not an open");
+        assert!(r.message.contains("can't edit exclusive file"), "keeps p4's reason");
+        assert!(r.message.contains("thomas.bardet"), "and names who is in the way");
+    }
+
+    #[test]
+    fn add_on_an_existing_file_is_a_refusal() {
+        // `p4 add -n` on a file already in the depot: a level-0 data record, no
+        // severity, no action — same shape as success apart from the missing
+        // action, and no warning to fall back on.
+        let recs = [rec(&[("data", "//d/f.cpp - can't add existing file")])];
+        let r = classify(&recs, vec![], "//d/f.cpp");
+        assert!(!r.ok);
+        assert_eq!(r.message, "//d/f.cpp - can't add existing file");
+    }
+
+    #[test]
+    fn silence_still_reports_a_failure() {
+        let r = classify(&[], vec![], "//d/f.cpp");
+        assert!(!r.ok);
+        assert!(!r.message.is_empty(), "never a blank reason");
+    }
 }
