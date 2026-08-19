@@ -107,6 +107,32 @@ pub async fn diff_pair_rev(conn: P4Conn, depot_file: String, rev: i64) -> Result
     .map_err(|e| format!("diff task failed: {e}"))?
 }
 
+/// Does this action have a previous revision to diff against?
+///
+/// It cannot be decided from the revision number. `p4 describe -S` reports
+/// `rev=1` for a shelved ADD — the revision the shelf would create — while the
+/// file has no revisions in the depot at all, so printing `#1` yields nothing.
+/// Verified on a real review shelf: an added .uasset came back `action=add
+/// rev=1` with `p4 files` answering "no such file(s)", next to an edit whose
+/// `rev=14` matched the depot head exactly.
+fn has_base(action: &str) -> bool {
+    !matches!(action, "add" | "branch" | "import" | "move/add")
+}
+
+/// What a shelf does to one file ("add", "edit", "delete", ...); "" if unknown.
+fn shelved_action(conn: &P4Conn, change: &str, depot_file: &str) -> String {
+    p4::run(conn, &["describe", "-S", "-s", change])
+        .ok()
+        .and_then(|recs| recs.first().map(|r| p4::explode_indexed(r, "depotFile")))
+        .and_then(|rows| {
+            rows.into_iter().find(|r| {
+                r.get("depotFile").and_then(|v| v.as_str()) == Some(depot_file)
+            })
+        })
+        .and_then(|r| r.get("action").and_then(|v| v.as_str()).map(String::from))
+        .unwrap_or_default()
+}
+
 /// A shelved file vs its base revision.
 #[tauri::command]
 pub async fn diff_pair_shelved(
@@ -117,13 +143,22 @@ pub async fn diff_pair_shelved(
 ) -> Result<DiffPair, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let name = base_name(&depot_file).to_string();
-        let base = if rev >= 1 { format!("{depot_file}#{rev}") } else { String::new() };
-        let left = print_side(&conn, &base, &sane(&tag_rev(&name, &if rev >= 1 { rev.to_string() } else { String::new() })))?;
+        // An add has nothing before it, whatever revision the shelf claims. The
+        // empty side is then written as a 0-byte file, which the in-app diff
+        // shows as a single pane and Unreal opens as the asset itself.
+        let action = shelved_action(&conn, &change, &depot_file);
+        let based = rev >= 1 && has_base(&action);
+        let base = if based { format!("{depot_file}#{rev}") } else { String::new() };
+        let left = print_side(
+            &conn,
+            &base,
+            &sane(&tag_rev(&name, &if based { rev.to_string() } else { String::new() })),
+        )?;
         let right = print_side(&conn, &format!("{depot_file}@={change}"), &sane(&tag_rev(&name, &format!("shelf-{change}"))))?;
         Ok(DiffPair {
             left,
             right,
-            left_label: if rev >= 1 { format!("{name}#{rev}") } else { format!("{name} (added)") },
+            left_label: if based { format!("{name}#{rev}") } else { format!("{name} (added)") },
             right_label: format!("{name} (shelved @{change})"),
             title: format!("{name}  shelf @{change}"),
             right_editable: false,
@@ -572,4 +607,36 @@ pub async fn open_diff_window(app: AppHandle, pair: DiffPair) -> Result<(), Stri
     // per-window state could never be restored.
     crate::wingeom::apply(&win, "diff");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::has_base;
+
+    #[test]
+    fn an_added_file_has_nothing_before_it() {
+        // The bug: `describe -S` says rev=1 for a shelved add, and #1 does not
+        // exist, so printing it failed the whole diff instead of showing the new
+        // asset on its own.
+        assert!(!has_base("add"));
+        assert!(!has_base("branch"));
+        assert!(!has_base("import"));
+        assert!(!has_base("move/add"));
+    }
+
+    #[test]
+    fn an_edit_or_delete_diffs_against_its_revision() {
+        // Live: a shelved edit reported rev=14 and the depot head WAS #14.
+        assert!(has_base("edit"));
+        assert!(has_base("delete"));
+        assert!(has_base("integrate"));
+        assert!(has_base("move/delete"));
+    }
+
+    #[test]
+    fn an_unknown_action_still_tries_its_revision() {
+        // Unknown means describe told us nothing; the revision is the better
+        // guess, and a genuine failure to print it should still be reported.
+        assert!(has_base(""));
+    }
 }
