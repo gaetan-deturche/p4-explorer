@@ -8,6 +8,7 @@
     firstLine,
     setClipboard,
     openFileHistoryWindow,
+    openBlameWindow,
     p4,
     type P4Conn,
     type P4Record,
@@ -461,6 +462,7 @@
       { label: "View diff", action: () => pending.openLocalDiff(file.depotFile) },
       historyMenu(file.depotFile),
       holdersMenu(file.depotFile),
+      blameMenu(file.depotFile),
       { label: openInLabel, action: () => openLocalInEditor(file.depotFile) },
       { label: "", sep: true },
       copyMenu(file.depotFile, file.clientFile),
@@ -591,6 +593,14 @@
   /** The "Who has this file?" entry, for every list that shows a file. */
   function holdersMenu(depotFile: string) {
     return { label: "Who has this file?…", action: () => void whoHas(depotFile) };
+  }
+  /** The "Blame" entry: who put each line there. Head revision from a file list;
+   *  the file-history window blames a chosen revision instead. */
+  function blameMenu(depotFile: string) {
+    return {
+      label: "Blame…",
+      action: () => void openBlameWindow(conn, depotFile).catch((e) => setError(String(e))),
+    };
   }
 
   /** The shared "Copy" submenu for any file/folder path shown in the app.
@@ -1182,6 +1192,7 @@
             },
             historyMenu(p),
             holdersMenu(p),
+            blameMenu(p),
             { label: "", sep: true },
           ]),
       copyMenu(p),
@@ -1223,6 +1234,7 @@
       { label: `${openInLabel} (shelved)`, action: () => openSpecInEditor(`${f.depotFile}@=${ch}`) },
       historyMenu(f.depotFile),
       holdersMenu(f.depotFile),
+      blameMenu(f.depotFile),
       copyMenu(f.depotFile),
     ]}
     onClose={() => (shelvedCtx = null)}
@@ -1263,7 +1275,7 @@
           else if (f.depotFile) openLocalInEditor(f.depotFile);
         },
       },
-      ...(f.depotFile ? [historyMenu(f.depotFile), holdersMenu(f.depotFile)] : []),
+      ...(f.depotFile ? [historyMenu(f.depotFile), holdersMenu(f.depotFile), blameMenu(f.depotFile)] : []),
       { label: "", sep: true },
       copyMenu(f.depotFile ?? f.clientFile ?? "", f.clientFile),
       { label: "", sep: true },
@@ -1290,6 +1302,7 @@
       },
       historyMenu(f.depotFile),
       holdersMenu(f.depotFile),
+      blameMenu(f.depotFile),
       copyMenu(f.depotFile),
       { label: "", sep: true },
       // Undo just this file out of the changelist — the one case the whole-CL

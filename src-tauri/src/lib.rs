@@ -151,6 +151,8 @@ pub fn run() {
             commands::p4_file_holders,
             commands::p4_open_files,
             commands::p4_move_file,
+            commands::p4_annotate,
+            commands::open_blame_window,
             commands::p4_unshelve,
             commands::p4_delete_change,
             commands::p4_revert_change,

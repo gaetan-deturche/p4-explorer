@@ -22,6 +22,9 @@ use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 pub struct HistJob {
     pub conn: P4Conn,
     pub depot_file: String,
+    /// Revision spec for a blame window ("#8", "@=1234", "" = head). The history
+    /// window ignores it — it lists every revision anyway.
+    pub rev_spec: String,
 }
 
 fn registry() -> &'static Mutex<HashMap<String, HistJob>> {
@@ -40,12 +43,12 @@ pub async fn open_file_history_window(
     depot_file: String,
 ) -> Result<(), String> {
     let name = depot_file.rsplit('/').next().unwrap_or(&depot_file).to_string();
-    let id = slug(&depot_file);
+    let id = format!("h{}", slug(&depot_file));
     let label = format!("filehist-{id}");
-    registry()
-        .lock()
-        .unwrap()
-        .insert(id.clone(), HistJob { conn, depot_file: depot_file.clone() });
+    registry().lock().unwrap().insert(
+        id.clone(),
+        HistJob { conn, depot_file: depot_file.clone(), rev_spec: String::new() },
+    );
 
     if let Some(win) = app.get_webview_window(&label) {
         let _ = win.unminimize();
@@ -62,6 +65,46 @@ pub async fn open_file_history_window(
     // One geometry for every history window, as for diffs: their labels are
     // per-file, so per-window state could never be restored.
     crate::wingeom::apply(&win, "filehist");
+    Ok(())
+}
+
+/// Open (or re-focus) the blame window for a file, at `rev_spec` ("" = head).
+///
+/// A sibling of the diff window rather than a mode of it: blame has one text and
+/// nothing editable, so it shares the chrome, the syntax highlighting and the
+/// geometry, and none of the diff's block/caret/edit model.
+#[tauri::command]
+pub async fn open_blame_window(
+    app: AppHandle,
+    conn: P4Conn,
+    depot_file: String,
+    rev_spec: String,
+) -> Result<(), String> {
+    let name = depot_file.rsplit('/').next().unwrap_or(&depot_file).to_string();
+    // Keyed by file AND revision, apart from the history window. Both windows can
+    // be open on one file, and "blame before this change" must open the EARLIER
+    // revision rather than re-focus the one it was launched from — which also
+    // lets the two be compared side by side.
+    let id = format!("b{}{}", slug(&depot_file), slug(&rev_spec));
+    let label = format!("blame-{id}");
+    registry().lock().unwrap().insert(
+        id.clone(),
+        HistJob { conn, depot_file: depot_file.clone(), rev_spec: rev_spec.clone() },
+    );
+
+    if let Some(win) = app.get_webview_window(&label) {
+        let _ = win.unminimize();
+        let _ = win.set_focus();
+        return Ok(());
+    }
+    let win = WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(format!("blame?id={id}").into()))
+        .title(format!("Blame — {name}{rev_spec}"))
+        .inner_size(1100.0, 760.0)
+        .min_inner_size(600.0, 300.0)
+        .visible(false) // shown by wingeom::apply, already at its remembered spot
+        .build()
+        .map_err(|e| format!("failed to open the blame window: {e}"))?;
+    crate::wingeom::apply(&win, "blame");
     Ok(())
 }
 

@@ -9,6 +9,7 @@
 
 use crate::p4::{self, P4Conn, Record};
 
+mod annotate;
 mod browse;
 mod clipboard;
 mod diff;
@@ -28,6 +29,7 @@ pub mod unreal_remote; // pub: exercised by the uediscover dev bin
 
 // Re-export every command so the registration in `lib.rs` can keep referring to
 // them as `commands::<name>` regardless of which submodule they live in.
+pub use annotate::*;
 pub use browse::*;
 pub use clipboard::*;
 pub use diff::*;

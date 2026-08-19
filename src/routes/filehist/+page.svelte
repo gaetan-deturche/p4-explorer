@@ -25,6 +25,7 @@
     emptyConn,
     setClipboard,
     openFileHistoryWindow,
+    openBlameWindow,
     type P4Conn,
     type UndoResult,
   } from "$lib/p4";
@@ -153,6 +154,8 @@
     return [
       { label: "Diff against previous revision", action: () => diffRev(change) },
       { label: "", sep: true },
+      { label: "Blame at this revision…", action: () => void blameAt(change) },
+      { label: "", sep: true },
       { label: `Sync file to @${change}…`, action: () => void syncTo(change) },
       { label: "", sep: true },
       { label: `Undo what @${change} did to this file…`, action: () => void undoFile(change, file) },
@@ -199,6 +202,13 @@
     };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
+  }
+
+  /** Blame the file as it stood at this change — the revision, not the change,
+   *  because annotate wants a revision spec. */
+  function blameAt(change: string) {
+    const rev = revOf(change);
+    void openBlameWindow(conn, file, rev ? `#${rev}` : "").catch((e) => (error = String(e)));
   }
 
   function close() {

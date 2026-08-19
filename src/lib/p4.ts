@@ -220,6 +220,21 @@ export function writeLocalFile(path: string, text: string): Promise<void> {
   return safe.guard("write_local_file", () => invoke<void>("write_local_file", { path, text }));
 }
 
+/** One line of a file, with the change that introduced it. */
+export interface BlameLine {
+  change: string;
+  /** The revision that change produced; empty when filelog didn't reach it. */
+  rev: string;
+  user: string;
+  date: string;
+  text: string;
+}
+export interface Blame {
+  depotFile: string;
+  rev: string;
+  lines: BlameLine[];
+}
+
 /** One file's outcome from check out / add / delete / move. */
 export interface OpenResult {
   file: string;
@@ -275,6 +290,11 @@ export interface UndoResult {
   failed: number;
   /** At least one file must be resolved before the undo can be submitted. */
   needsResolve: boolean;
+}
+
+/** Open the blame window for a depot file at `revSpec` ("" = head). */
+export function openBlameWindow(conn: P4Conn, depotFile: string, revSpec = ""): Promise<void> {
+  return invoke<void>("open_blame_window", { conn, depotFile, revSpec });
 }
 
 /** Open the file-history window for a depot file (one window per file). */
@@ -420,6 +440,10 @@ export const p4 = {
     rightRev: string,
   ) => g<string>("open_unreal_diff", { conn, left, right, name, leftRev, rightRev }),
   revert: (conn: P4Conn, depotFile: string) => call("p4_revert", { conn, depotFile }),
+  /** Blame: every line with the changelist that introduced it. `revSpec` is a
+   *  p4 suffix ("#8", "@=1234") or "" for the head revision. */
+  annotate: (conn: P4Conn, depotFile: string, revSpec = "") =>
+    g<Blame>("p4_annotate", { conn, depotFile, revSpec }),
   /** Check out / mark for add / mark for delete. One p4 call per file so a
    *  refusal can be attributed; `change` empty = the default changelist. */
   openFiles: (conn: P4Conn, verb: "edit" | "add" | "delete", files: string[], change = "") =>
