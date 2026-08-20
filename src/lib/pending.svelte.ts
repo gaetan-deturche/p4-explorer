@@ -659,6 +659,34 @@ export const pending = {
     );
   },
 
+  /** Shelve just these files of a changelist. Additive: it adds them to
+   *  whatever the shelf already holds rather than trimming the shelf to this
+   *  set, which is p4's behaviour and the useful one — you can build a shelf up
+   *  a file at a time. */
+  shelveSome(change: string, files: string[]) {
+    if (!files.length) return;
+    const n = files.length;
+    pending.mutate(
+      () => p4.shelveUpdate(h!.conn(), change, files),
+      `Shelved ${n} file${n === 1 ? "" : "s"} of @${change}.`,
+      { refresh: false }, // a server-side copy; the workspace is untouched
+    );
+  },
+
+  /** Take files back out of a changelist's shelf, leaving the rest shelved. */
+  unshelveSome(change: string, files: string[]) {
+    if (!files.length) return;
+    const n = files.length;
+    pending.action(
+      () => p4.shelveDelete(h!.conn(), change, files),
+      `Remove ${n === 1 ? "this file" : `these ${n} files`} from the shelf of @${change}?\n\nThe shelved copy goes; the file stays open with your edits.`,
+      "Remove from shelf",
+      "Remove",
+      `Removed ${n} file${n === 1 ? "" : "s"} from the shelf.`,
+      { refresh: false },
+    );
+  },
+
   /** Restore this changelist's shelf into the workspace.
    *
    *  Two ways, the same choice the patch dialog offers and defaulting the same
@@ -756,7 +784,12 @@ export const pending = {
   /** Check out, mark for add, or mark for delete. Reports what p4 actually did
    *  per file: a refusal on an exclusive file names whoever holds it, which is
    *  the whole reason to attempt the checkout in the first place. */
-  async openFiles(verb: "edit" | "add" | "delete", files: string[]) {
+  async openFiles(
+    verb: "edit" | "add" | "delete",
+    files: string[],
+    change = "",
+    newDesc = "",
+  ) {
     if (!h || !h.connected() || h.syncing() || !files.length) return;
     const what =
       verb === "edit" ? "Checked out" : verb === "add" ? "Marked for add" : "Marked for delete";
@@ -777,7 +810,10 @@ export const pending = {
     let failed: OpenResult[] = [];
     await pending.mutate(
       async () => {
-        const res = await p4.openFiles(h!.conn(), verb, files);
+        // A named changelist is created first, so the files never pass through
+        // Default on their way to it.
+        const into = newDesc ? await p4.newChangelist(h!.conn(), newDesc) : change;
+        const res = await p4.openFiles(h!.conn(), verb, files, into);
         done = res.filter((r) => r.ok).length;
         failed = res.filter((r) => !r.ok);
       },
@@ -989,16 +1025,34 @@ export const pending = {
     );
     void pending.scanOffline();
   },
-  /** Check out offline-modified files (exact reconcile → opened in Default). */
-  async checkoutOffline(files: string[]) {
+  /** Check out offline-modified files into `change` ("" = the default
+   *  changelist, or a description to create a new one for them).
+   *
+   *  The rows are dropped from Offline immediately. They used to linger there
+   *  until the next workspace-wide offline scan finished — a ~30s job — so a
+   *  freshly checked-out file sat in a changelist AND in Offline at the same
+   *  time. The reload that follows brings the truth either way; the scan is
+   *  still kicked off, it just no longer decides when the UI stops lying. */
+  async checkoutOffline(files: string[], target: { change?: string; newDesc?: string } = {}) {
     if (!files.length) return;
     const n = files.length;
+    let where = "the default changelist";
+    if (target.change && target.change !== "default") where = "@" + target.change;
+    if (target.newDesc) where = "a new changelist";
     await pending.mutate(
-      () => p4.reconcileFiles(h!.conn(), files),
-      `Checked out ${n} file${n === 1 ? "" : "s"} into the default changelist.`,
-      { refresh: false }, // no synced content changes — just opened
+      async () => {
+        const change = target.newDesc
+          ? await p4.newChangelist(h!.conn(), target.newDesc)
+          : (target.change ?? "");
+        await p4.reconcileFiles(h!.conn(), files, change);
+      },
+      `Checked out ${n} file${n === 1 ? "" : "s"} into ${where}.`,
+      {
+        refresh: false, // no synced content changes — just opened
+        optimistic: () => forgetFiles(files), // leaves Offline now, not in 30s
+      },
     );
-    void pending.scanOffline(); // the entries move from Offline to Default
+    void pending.scanOffline(); // reconciles the guess with a real scan
   },
   /** Revert a selection that may mix OPENED and OFFLINE files: opened files are
    *  `p4 revert`ed, offline ones restored to depot state (`p4 clean`) — one

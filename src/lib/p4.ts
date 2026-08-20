@@ -334,7 +334,9 @@ export const p4 = {
   sync: (conn: P4Conn, path?: string) => call("p4_sync", { conn, path: path ?? null }),
   reconcile: (conn: P4Conn, path: string) => call("p4_reconcile", { conn, path }),
   /** Check out specific offline-modified files (exact-path reconcile). */
-  reconcileFiles: (conn: P4Conn, files: string[]) => call("p4_reconcile_files", { conn, files }),
+  /** Check out offline files; `change` empty = the default changelist. */
+  reconcileFiles: (conn: P4Conn, files: string[], change = "") =>
+    call("p4_reconcile_files", { conn, files, change }),
   /** Revert offline changes: restore files to their depot state (p4 clean). */
   clean: (conn: P4Conn, files: string[]) => call("p4_clean", { conn, files }),
   /** Repair have/disk desyncs: update the have record to #head, disk untouched. */
@@ -362,8 +364,13 @@ export const p4 = {
   depots: (conn: P4Conn) => call("p4_depots", { conn }),
   switch: (conn: P4Conn, stream: string) => call("p4_switch", { conn, stream }),
   submit: (conn: P4Conn, change: string) => call("p4_submit", { conn, change }),
-  shelveDelete: (conn: P4Conn, change: string) => call("p4_shelve_delete", { conn, change }),
-  shelveUpdate: (conn: P4Conn, change: string) => call("p4_shelve", { conn, change }),
+  /** Remove shelved files: the whole shelf, or just `files`. */
+  shelveDelete: (conn: P4Conn, change: string, files: string[] = []) =>
+    call("p4_shelve_delete", { conn, change, files }),
+  /** (Re)shelve a changelist, or just `files` of it — naming files ADDS to the
+   *  shelf, it does not trim it to that set. */
+  shelveUpdate: (conn: P4Conn, change: string, files: string[] = []) =>
+    call("p4_shelve", { conn, change, files }),
   /** Restore a changelist's shelved files into the workspace; the shelf stays. */
   unshelve: (conn: P4Conn, change: string) => g<UnshelveResult>("p4_unshelve", { conn, change }),
   requestReview: (conn: P4Conn, change: string) =>

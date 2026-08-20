@@ -338,13 +338,19 @@ pub async fn p4_reconcile(conn: P4Conn, path: String) -> Res {
 }
 
 /// Check out specific offline-modified files: `p4 reconcile <files…>` (exact
-/// paths, no wildcard) opens each as edit/add/delete in the default changelist.
+/// paths, no wildcard) opens each as edit/add/delete — reconcile picks the action
+/// per file, which is why this and not `p4 edit`. `change` targets a changelist;
+/// empty means the default one.
 #[tauri::command]
-pub async fn p4_reconcile_files(conn: P4Conn, files: Vec<String>) -> Res {
+pub async fn p4_reconcile_files(conn: P4Conn, files: Vec<String>, change: String) -> Res {
     if files.is_empty() {
         return Ok(Vec::new());
     }
     let mut args = vec!["reconcile".to_string()];
+    if !change.is_empty() && change != "default" {
+        args.push("-c".to_string());
+        args.push(change);
+    }
     args.extend(files);
     run(conn, args).await
 }

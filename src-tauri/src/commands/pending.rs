@@ -139,10 +139,14 @@ fn still_exists(status: Option<&str>) -> bool {
     matches!(status, Some(s) if s != "new")
 }
 
-/// Delete the shelved files of a changelist (`p4 shelve -d -c <change>`).
+/// Delete shelved files (`p4 shelve -d -c <change> [files…]`): the whole shelf
+/// with no files, or just the ones named — p4 answers the partial case with
+/// "Shelved change N partially deleted, still contains 1 file(s)".
 #[tauri::command]
-pub async fn p4_shelve_delete(conn: P4Conn, change: String) -> Res {
-    run(conn, v(&["shelve", "-d", "-c", &change])).await
+pub async fn p4_shelve_delete(conn: P4Conn, change: String, files: Vec<String>) -> Res {
+    let mut args = v(&["shelve", "-d", "-c", &change]);
+    args.extend(files);
+    run(conn, args).await
 }
 
 /// Restore a changelist's shelved files into the workspace
@@ -192,11 +196,19 @@ pub async fn p4_unshelve(conn: P4Conn, change: String) -> Result<UnshelveResult,
     .map_err(|e| format!("unshelve task failed: {e}"))?
 }
 
-/// (Re)shelve a changelist's files (`p4 shelve -f -c <change>`) — used to update
-/// an existing Swarm review (Swarm picks up the new shelf).
+/// (Re)shelve a changelist's files (`p4 shelve -f -c <change> [files…]`) — used
+/// to update an existing Swarm review (Swarm picks up the new shelf), and to
+/// shelve part of a changelist.
+///
+/// Naming files is ADDITIVE, not a replacement: verified live, shelving one file
+/// of a two-file changelist and then the other left both in the shelf. So a
+/// partial shelve adds to whatever is already there rather than trimming it,
+/// which is why the counterpart below removes files one at a time instead.
 #[tauri::command]
-pub async fn p4_shelve(conn: P4Conn, change: String) -> Res {
-    run(conn, v(&["shelve", "-f", "-c", &change])).await
+pub async fn p4_shelve(conn: P4Conn, change: String, files: Vec<String>) -> Res {
+    let mut args = v(&["shelve", "-f", "-c", &change]);
+    args.extend(files);
+    run(conn, args).await
 }
 
 /// Request a Swarm review: ensure `#review` is in the changelist description,

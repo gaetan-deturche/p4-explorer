@@ -427,6 +427,14 @@
     newClFile = null;
     if (file) pending.moveToNew(file, desc);
   }
+  /** Name given: create the changelist and open the files straight into it. */
+  function submitNewClFor(desc: string) {
+    const job = newClFor;
+    newClFor = null;
+    if (!job) return;
+    if (job.how === "checkout") void pending.checkoutOffline(job.files, { newDesc: desc });
+    else void pending.openFiles("edit", job.files, "", desc);
+  }
   function submitRename(desc: string) {
     const target = renameCl;
     renameCl = null;
@@ -468,6 +476,13 @@
       copyMenu(file.depotFile, file.clientFile),
       { label: "", sep: true },
       { label: patchLabel, action: () => generatePatch("", sel) },
+      // Part of a changelist can be shelved on its own — p4 adds the named files
+      // to the shelf rather than trimming it, so a shelf can be built up file by
+      // file. Not destructive: the files stay open and the workspace untouched.
+      {
+        label: sel.length > 1 ? `Shelve (${sel.length} files)` : "Shelve",
+        action: () => pending.shelveSome(change, sel),
+      },
       { label: "", sep: true },
       {
         label: sel.length > 1 ? `Revert (${sel.length} files)…` : "Revert file…",
@@ -569,6 +584,34 @@
   // all (reconcile sees delete + add and the history stops at the new name).
   let moveFrom = $state<string | null>(null); // file awaiting its new path
 
+  /** A file set waiting for a new changelist's name: what to do once it has one. */
+  let newClFor = $state<{ files: string[]; how: "checkout" | "edit" } | null>(null);
+
+  /** The changelists a checkout can land in: Default, each existing one, or a new
+   *  named one. Checking out straight into the right changelist saves opening
+   *  into Default and moving afterwards. */
+  function intoChangelist(files: string[], how: "checkout" | "edit") {
+    const run = (change: string) =>
+      how === "checkout"
+        ? pending.checkoutOffline(files, { change })
+        : pending.openFiles("edit", files, change);
+    const items: { label: string; action: () => void }[] = pending.rows.map((cl) => {
+      const desc = firstLine(cl.desc);
+      const short = desc.length > 32 ? desc.slice(0, 31) + "…" : desc;
+      return {
+        label: cl.change === "default" ? "Default" : short ? `@${cl.change}  ${short}` : "@" + cl.change,
+        action: () => void run(cl.change),
+      };
+    });
+    items.push({
+      label: "New changelist…",
+      action: () => {
+        newClFor = { files, how };
+      },
+    });
+    return items;
+  }
+
   /** Files out of a tree selection (folders have no per-file action). */
   function filesOf(targets: SyncTarget[]): string[] {
     return targets.filter((x) => !x.isDir).map((x) => x.path);
@@ -579,7 +622,7 @@
     if (!n) return [] as { label: string; action?: () => void; sep?: boolean }[];
     const many = n > 1 ? ` (${n} files)` : "";
     return [
-      { label: `Check out${many}`, action: () => void pending.openFiles("edit", files) },
+      { label: `Check out${many}`, submenu: intoChangelist(files, "edit") },
       // p4 refuses an add for anything already in the depot, and says so per
       // file, so the entry does not have to guess which of these are new.
       { label: `Mark for add${many}`, action: () => void pending.openFiles("add", files) },
@@ -1236,6 +1279,13 @@
       holdersMenu(f.depotFile),
       blameMenu(f.depotFile),
       copyMenu(f.depotFile),
+      { label: "", sep: true },
+      // The counterpart of a partial shelve: without this, one file shelved by
+      // mistake could only be cleared by deleting the whole shelf.
+      {
+        label: "Remove from shelf…",
+        action: () => pending.unshelveSome(ch, [f.depotFile]),
+      },
     ]}
     onClose={() => (shelvedCtx = null)}
   />
@@ -1281,7 +1331,7 @@
       { label: "", sep: true },
       { label: `Generate patch${many}…`, action: () => generatePatch("", sel) },
       { label: "", sep: true },
-      { label: `Check out${co}`, action: () => pending.checkoutOffline(offSel) },
+      { label: `Check out${co}`, submenu: intoChangelist(offSel, "checkout") },
       { label: "", sep: true },
       { label: `Revert${many}…`, action: () => pending.revertMixed(sel) },
     ]}
@@ -1314,6 +1364,19 @@
       },
     ]}
     onClose={() => (detailsCtx = null)}
+  />
+{/if}
+
+{#if newClFor}
+  <InputDialog
+    title={newClFor.files.length > 1
+      ? `Check out ${newClFor.files.length} files into a new changelist`
+      : "Check out into a new changelist"}
+    label="Description"
+    placeholder="Describe the change…"
+    okLabel="Create & check out"
+    onSubmit={submitNewClFor}
+    onCancel={() => (newClFor = null)}
   />
 {/if}
 
