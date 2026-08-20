@@ -17,6 +17,7 @@
   import { langForFile, tokenizeLines, type TokenRun } from "$lib/syntax";
   import { openDiff } from "$lib/opendiff";
   import { editor } from "$lib/editor.svelte";
+  import { shortcuts } from "$lib/shortcuts.svelte";
   import {
     p4,
     emptyConn,
@@ -52,6 +53,7 @@
       file = job.depotFile;
       revSpec = job.revSpec ?? "";
       void editor.init(); // openDiff reads the diff-tool choice from this store
+      void shortcuts.init(); // honour rebindings here too
       const b = await p4.annotate(conn, file, revSpec);
       blame = b;
       const lang = langForFile(file);
@@ -206,9 +208,18 @@
   function close() {
     void getCurrentWindow().close();
   }
+  /** Escape always closes; the bindable shortcut is honoured too, so a rebound
+   *  "Close the window" works in the child windows as well as the main one. */
+  function onWinKey(e: KeyboardEvent) {
+    if (e.key === "Escape") return close();
+    if (shortcuts.match(e, ["app"]) === "closeWindow") {
+      e.preventDefault();
+      close();
+    }
+  }
 </script>
 
-<svelte:window onkeydown={(e) => e.key === "Escape" && close()} />
+<svelte:window onkeydown={onWinKey} />
 
 <div class="wrap">
   <div class="bar">

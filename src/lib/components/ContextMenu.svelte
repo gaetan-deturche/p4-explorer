@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { shortcuts } from "$lib/shortcuts.svelte";
   export type MenuItem = {
     label: string;
     action?: () => void;
@@ -6,6 +7,9 @@
     submenu?: MenuItem[];
     /** A divider between groups; needs no label. */
     sep?: boolean;
+    /** Shortcut id: the key is read from the registry, so what is advertised
+     *  here is always what actually fires. */
+    accel?: string;
   };
 
   let {
@@ -65,12 +69,31 @@
         {/if}
       </div>
     {:else}
-      <button class="item" disabled={it.disabled} onclick={() => run(it)}>{it.label}</button>
+      <button class="item" disabled={it.disabled} onclick={() => run(it)}>
+        <span class="ilabel">{it.label}</span>
+        {#if it.accel && shortcuts.accel(it.accel)}
+          <span class="accel mono">{shortcuts.accel(it.accel)}</span>
+        {/if}
+      </button>
     {/if}
   {/each}
 </div>
 
 <style>
+  /* Right-aligned and dimmed, like the menu bar's. */
+  .ilabel {
+    flex: 1;
+    text-align: left;
+  }
+  .accel {
+    opacity: 0.55;
+    font-size: 11px;
+    white-space: nowrap;
+    padding-left: 10px;
+  }
+  .mono {
+    font-family: var(--mono);
+  }
   .scrim {
     position: fixed;
     inset: 0;

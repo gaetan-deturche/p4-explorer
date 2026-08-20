@@ -225,6 +225,7 @@
   {#if onSearch}
     <div class="search">
       <input
+        data-role="search"
         placeholder={indexing ? "Building index…" : "Search files"}
         bind:value={query}
         oninput={onInput}

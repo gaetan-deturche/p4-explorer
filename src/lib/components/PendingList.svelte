@@ -201,6 +201,21 @@
   // file record), then fire the p4 command. The reload it triggers reconciles —
   // and rolls back — once p4 answers, so a failed move snaps back on its own.
   // Exported so the right-click "Move to changelist" menu shares this one path.
+  /** The selected depot files, for the window's keyboard shortcuts. */
+  export function selection(): string[] {
+    return [...selected];
+  }
+  /** The changelist the selection sits in ("" when nothing is selected, or the
+   *  selection spans several). A shortcut that acts on a changelist needs one
+   *  unambiguous answer. */
+  export function selectedChange(): string {
+    const owners = new Set<string>();
+    for (const [change, cl] of Object.entries(cls)) {
+      for (const f of cl.local) if (selected.has(String(f.depotFile))) owners.add(change);
+    }
+    return owners.size === 1 ? [...owners][0] : "";
+  }
+
   export function moveFile(file: string, from: string, to: string) {
     const src = cls[from];
     const rec = src?.local.find((f) => f.depotFile === file);

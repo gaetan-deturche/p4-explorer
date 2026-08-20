@@ -31,6 +31,7 @@
   import { loadLastServer, saveView, loadViews, saveViews, type Views } from "$lib/nav";
   import MenuBar from "$lib/components/MenuBar.svelte";
   import Toolbar from "$lib/components/Toolbar.svelte";
+  import { shortcuts, typingInto, type Scope } from "$lib/shortcuts.svelte";
   import StatusBar from "$lib/components/StatusBar.svelte";
   import OptionsDialog from "$lib/components/OptionsDialog.svelte";
   import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
@@ -276,6 +277,7 @@
       disabled?: boolean;
       submenu?: MenuItem[];
       sep?: boolean;
+      accel?: string; // shortcut id; the key comes from the registry
     };
     const items: MenuItem[] = [];
     /** Start a new group: only ever between two real entries. */
@@ -285,6 +287,7 @@
     if (own) {
       items.push({
         label: isDefault ? "Submit default changelist…" : `Submit @${cl.change}…`,
+        accel: "submit",
         action: () => pending.submit(cl.change),
       });
     }
@@ -292,6 +295,7 @@
     if (own && !isDefault) {
       items.push({
         label: "Rename…",
+        accel: "rename",
         action: () => (renameCl = { change: cl.change, desc: (cl.desc ?? "").trim() }),
       });
     }
@@ -410,7 +414,11 @@
   let renameCl = $state<{ change: string; desc: string } | null>(null); // CL being renamed
 
   // PendingList instance, for the optimistic file move shared with drag-and-drop.
-  let pendingList = $state<{ moveFile: (file: string, from: string, to: string) => void }>();
+  let pendingList = $state<{
+    moveFile: (file: string, from: string, to: string) => void;
+    selection: () => string[];
+    selectedChange: () => string;
+  }>();
 
   function onPendingFileContext(file: P4Record, change: string, e: MouseEvent, files: string[]) {
     fileCtx = { x: e.clientX, y: e.clientY, file, change, files };
@@ -445,7 +453,7 @@
   // `files` is the current selection (≥1); single-file actions use the clicked
   // file, the patch action uses the whole selection.
   function fileMenuItems(file: P4Record, change: string, files: string[]) {
-    const targets = pending.rows
+    const targets: { label: string; accel?: string; action: () => void }[] = pending.rows
       .filter((cl) => cl.change !== change)
       .map((cl) => {
         const desc = firstLine(cl.desc);
@@ -454,7 +462,7 @@
           cl.change === "default" ? "Default" : short ? `@${cl.change}  ${short}` : "@" + cl.change;
         return { label, action: () => moveFileTo(file.depotFile, change, cl.change) };
       });
-    targets.push({ label: "New changelist…", action: () => (newClFile = file.depotFile) });
+    targets.push({ label: "New changelist…", accel: "newChange", action: () => (newClFile = file.depotFile) });
     const patchLabel = files.length > 1 ? `Generate patch (${files.length} files)…` : "Generate patch…";
     const sel = files.length ? files : [file.depotFile];
     // Grouped by what an entry does — look at it, copy it, produce something from
@@ -467,8 +475,8 @@
       ...(pending.needsResolve(file.depotFile)
         ? [{ label: "Resolve…", action: () => merges.resolveFile(file.depotFile) }, { label: "", sep: true }]
         : []),
-      { label: "View diff", action: () => pending.openLocalDiff(file.depotFile) },
-      historyMenu(file.depotFile),
+      { label: "View diff", accel: "diff", action: () => pending.openLocalDiff(file.depotFile) },
+      { ...historyMenu(file.depotFile), accel: "fileHistory" },
       holdersMenu(file.depotFile),
       blameMenu(file.depotFile),
       { label: openInLabel, action: () => openLocalInEditor(file.depotFile) },
@@ -486,6 +494,7 @@
       { label: "", sep: true },
       {
         label: sel.length > 1 ? `Revert (${sel.length} files)…` : "Revert file…",
+        accel: "revert",
         action: () => pending.revertMixed(sel),
       },
       {
@@ -501,6 +510,88 @@
   // Refresh means the WHOLE view of the server, not just the tree: pending
   // too (an external checkout must show up — nothing else re-asks p4 while
   // sitting on that tab) and, when open, the reviews list.
+  // --- keyboard shortcuts ----------------------------------------------------
+  // One window-level dispatcher, so every binding lives in $lib/shortcuts and
+  // the menu bar can advertise the same key that actually fires. Scopes keep a
+  // binding from being dead weight where it means nothing: Ctrl+N is "new
+  // changelist" on the Pending tab, and free elsewhere.
+  const scopes = $derived<Scope[]>(
+    centerTab === "pending" ? ["app", "pending", "files"] : ["app", "files"],
+  );
+  /** The file the file-scoped actions act on: whatever the pending list has
+   *  selected. Without a selection those actions simply do not fire. */
+  function selectedFile(): string {
+    return pendingList?.selection()[0] ?? "";
+  }
+  function onAppKey(e: KeyboardEvent) {
+    // Never steal a keystroke from a text box, and never fight a dialog: a modal
+    // owns the keyboard while it is up.
+    if (typingInto(e.target)) return;
+    if (confirmState || loginState || optionsOpen || renameCl || newClFile !== null || newClFor) return;
+    const id = shortcuts.match(e, scopes);
+    if (!id) return;
+    const sel = pendingList?.selection() ?? [];
+    const file = selectedFile();
+    const change = pendingList?.selectedChange() ?? "";
+    // Only swallow the key once something is actually going to happen.
+    const act = (fn: () => void) => {
+      e.preventDefault();
+      fn();
+    };
+    switch (id) {
+      case "refresh":
+        return act(refreshAll);
+      case "sync":
+        return act(() => sync.globalSync());
+      case "applyPatch":
+        return act(() => patches.pickAndPreview());
+      case "options":
+        return act(() => (optionsOpen = true));
+      case "search":
+        return act(() => {
+          const el = document.querySelector<HTMLInputElement>('input[data-role="search"]');
+          el?.focus();
+          el?.select();
+        });
+      case "tabHistory":
+        return act(() => showTab("history"));
+      case "tabPending":
+        return act(() => showTab("pending"));
+      case "tabReviews":
+        return act(() => showTab("reviews"));
+      case "tabStreams":
+        return act(() => showTab("streams"));
+      case "tabLog":
+        return act(() => showTab("log"));
+      case "newChange":
+        return act(() => (newClFile = file || ""));
+      case "rename":
+        if (change && change !== "default") {
+          const cl = pending.rows.find((r) => r.change === change);
+          return act(() => (renameCl = { change, desc: (cl?.desc ?? "").trim() }));
+        }
+        return;
+      case "diff":
+        if (file) return act(() => pending.openLocalDiff(file));
+        return;
+      case "copyPath":
+        if (sel.length) return act(() => copied(sel.join("\n"), sel.length > 1 ? "depot paths" : "depot path"));
+        return;
+      case "blame":
+        if (file) return act(() => void openBlameWindow(conn, file).catch((err) => setError(String(err))));
+        return;
+      case "fileHistory":
+        if (file) return act(() => fileHistory(file));
+        return;
+      case "submit":
+        if (change) return act(() => pending.submit(change));
+        return;
+      case "revert":
+        if (sel.length) return act(() => pending.revertMixed(sel));
+        return;
+    }
+  }
+
   function refreshAll() {
     void browse.refresh();
     pending.load();
@@ -642,6 +733,7 @@
   function blameMenu(depotFile: string) {
     return {
       label: "Blame…",
+      accel: "blame",
       action: () => void openBlameWindow(conn, depotFile).catch((e) => setError(String(e))),
     };
   }
@@ -704,6 +796,7 @@
 
   onMount(() => {
     cmdlog.start(); // record p4 commands for the Commands view
+    void shortcuts.init(); // the user's rebindings, from SQLite
     editor.init(); // detect editors + resolve the preferred one (background)
     history.init({
       conn: () => conn,
@@ -831,6 +924,8 @@
       .catch(() => {});
   });
 </script>
+
+<svelte:window onkeydown={onAppKey} />
 
 <div class="app">
   <MenuBar

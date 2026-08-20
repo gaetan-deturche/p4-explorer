@@ -1,4 +1,5 @@
 <script lang="ts">
+  import ShortcutsOptions from "$lib/components/ShortcutsOptions.svelte";
   import type { P4Conn } from "$lib/p4";
   import { safe } from "$lib/safe.svelte";
   import { editor } from "$lib/editor.svelte";
@@ -26,7 +27,7 @@
     onClose: () => void;
   } = $props();
 
-  let tab = $state<"servers" | "connection" | "editor" | "safe">("servers");
+  let tab = $state<"servers" | "connection" | "editor" | "safe" | "keys">("servers");
   let newServer = $state("");
   function add() {
     const v = newServer.trim();
@@ -49,9 +50,12 @@
       </button>
       <button class:active={tab === "editor"} onclick={() => (tab = "editor")}>Editor</button>
       <button class:active={tab === "safe"} onclick={() => (tab = "safe")}>Safe</button>
+      <button class:active={tab === "keys"} onclick={() => (tab = "keys")}>Shortcuts</button>
     </div>
 
-    {#if tab === "servers"}
+    {#if tab === "keys"}
+      <ShortcutsOptions />
+    {:else if tab === "servers"}
       {#if servers.length}
         <div class="srvlist">
           {#each servers as s (s)}

@@ -19,6 +19,7 @@
   import ApprovalDialog from "$lib/components/ApprovalDialog.svelte";
   import { history } from "$lib/history.svelte";
   import { editor } from "$lib/editor.svelte";
+  import { shortcuts } from "$lib/shortcuts.svelte";
   import { openDiff } from "$lib/opendiff";
   import {
     p4,
@@ -70,6 +71,7 @@
       // openDiff reads the diff-tool choice from this store; without init it is
       // never loaded here and every diff would open in-app whatever was chosen.
       void editor.init();
+      void shortcuts.init();
       await history.selectFile(file);
     } catch (e) {
       error = String(e);
@@ -215,7 +217,12 @@
     void getCurrentWindow().close();
   }
   function onWindowKey(e: KeyboardEvent) {
-    if (e.key === "Escape" && !confirmState && !ctx) close();
+    if (e.key === "Escape" && !confirmState && !ctx) return close();
+    // The bindable "Close the window", so a rebinding applies here too.
+    if (shortcuts.match(e, ["app"]) === "closeWindow") {
+      e.preventDefault();
+      close();
+    }
   }
 </script>
 

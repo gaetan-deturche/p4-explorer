@@ -351,6 +351,7 @@
     {/if}
 
     <input
+      data-role="search"
       class="search"
       placeholder="Search reviews (id / message)"
       value={draft}

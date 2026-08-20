@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { Views } from "$lib/nav";
+  import { shortcuts } from "$lib/shortcuts.svelte";
 
   let {
     connected,
@@ -39,6 +40,9 @@
     disabled?: boolean;
     sep?: boolean;
     checked?: boolean;
+    /** Shortcut id: the key is read from the registry, so a rebinding shows here
+     *  without this file knowing anything about which key it is. */
+    accel?: string;
   };
 
   let open = $state<string | null>(null);
@@ -48,7 +52,7 @@
     {
       name: "File",
       items: [
-        { label: "Options…", action: onOptions },
+        { label: "Options…", action: onOptions, accel: "options" },
         { label: "Reconnect", action: onReconnect },
         { label: "", sep: true },
         { label: "Exit", action: onExit },
@@ -59,10 +63,10 @@
       items: [
         { label: "New workspace…", action: onNewWorkspace, disabled: !connected },
         { label: "", sep: true },
-        { label: "Refresh", action: onRefresh, disabled: busy },
-        { label: "Sync workspace…", action: onSync, disabled: busy },
+        { label: "Refresh", action: onRefresh, disabled: busy, accel: "refresh" },
+        { label: "Sync workspace…", action: onSync, disabled: busy, accel: "sync" },
         { label: "", sep: true },
-        { label: "Apply patch…", action: onApplyPatch, disabled: busy },
+        { label: "Apply patch…", action: onApplyPatch, disabled: busy, accel: "applyPatch" },
       ],
     },
     {
@@ -119,7 +123,14 @@
               <div class="msep"></div>
             {:else}
               <button class="item" disabled={it.disabled} onclick={() => run(it)}>
-                {#if it.checked !== undefined}<span class="chk">{it.checked ? "✓" : ""}</span>{/if}{it.label}
+                {#if it.checked !== undefined}<span class="chk">{it.checked ? "✓" : ""}</span>{/if}<span
+                  class="ilabel">{it.label}</span
+                >
+                <!-- The key comes from the registry, so a rebinding is reflected
+                     here without touching this file. -->
+                {#if it.accel && shortcuts.accel(it.accel)}
+                  <span class="accel mono">{shortcuts.accel(it.accel)}</span>
+                {/if}
               </button>
             {/if}
           {/each}
@@ -134,6 +145,21 @@
 {/if}
 
 <style>
+  /* An accelerator sits right-aligned, dimmed: findable when looked for, quiet
+     when not. */
+  .ilabel {
+    flex: 1;
+    text-align: left;
+    white-space: nowrap;
+  }
+  .accel {
+    opacity: 0.55;
+    font-size: 11px;
+    white-space: nowrap;
+  }
+  .mono {
+    font-family: var(--mono);
+  }
   .menubar {
     position: relative;
     z-index: 40;
@@ -168,6 +194,8 @@
     left: 0;
     z-index: 41;
     min-width: 12rem;
+    width: max-content;
+    max-width: 90vw;
     background: var(--bg-panel);
     border: 1px solid var(--border);
     border-radius: 0 0 6px 6px;
@@ -175,7 +203,11 @@
     padding: 4px 0;
   }
   .item {
-    display: block;
+    /* flex, not block: the label takes the slack so the accelerator lands on the
+       right edge. */
+    display: flex;
+    align-items: center;
+    gap: 10px;
     width: 100%;
     text-align: left;
     border: none;

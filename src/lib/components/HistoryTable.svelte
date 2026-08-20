@@ -227,6 +227,7 @@
   <div class="head">
     <span class="title mono" title={subject}>{subject || "History"}</span>
     <input
+      data-role="search"
       class="search"
       placeholder="Search @cl / user / message"
       bind:value={query}
