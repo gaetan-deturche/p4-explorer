@@ -372,7 +372,8 @@ export const p4 = {
   shelveUpdate: (conn: P4Conn, change: string, files: string[] = []) =>
     call("p4_shelve", { conn, change, files }),
   /** Restore a changelist's shelved files into the workspace; the shelf stays. */
-  unshelve: (conn: P4Conn, change: string) => g<UnshelveResult>("p4_unshelve", { conn, change }),
+  unshelve: (conn: P4Conn, change: string, files: string[] = []) =>
+    g<UnshelveResult>("p4_unshelve", { conn, change, files }),
   requestReview: (conn: P4Conn, change: string) =>
     g<void>("p4_request_review", { conn, change }),
   swarmUrl: (conn: P4Conn) => g<string>("swarm_url", { conn }),

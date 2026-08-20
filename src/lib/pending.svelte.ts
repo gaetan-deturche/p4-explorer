@@ -699,21 +699,31 @@ export const pending = {
    *
    *  p4 can only merge a shelf onto files that are still open, leaving them to
    *  resolve, so the dialog says so when that applies. */
-  async unshelveChangelist(change: string) {
+  async unshelveChangelist(change: string, only: string[] = []) {
     if (!h || !h.connected() || h.syncing()) return;
-    const open = pending.openCount(change) ?? 0;
+    // Only the files being restored matter for the merge warning: unshelving one
+    // file onto a changelist where a DIFFERENT file is open costs nothing.
+    const cached = loadClFilesCache(h.conn().client, change) ?? [];
+    const openPaths = new Set(cached.map((f) => String(f.depotFile)));
+    const open = only.length
+      ? only.filter((f) => openPaths.has(f)).length
+      : (pending.openCount(change) ?? 0);
+    const what = only.length
+      ? only.length === 1
+        ? (only[0].split("/").pop() ?? "this file")
+        : `${only.length} files of @${change}`
+      : `the files of @${change}`;
     const answer = await h.askOption(
-      `Unshelve the files of @${change} into your workspace?
-
-` +
+      `Unshelve ${what} into your workspace?\n\n` +
         (open
-          ? `@${change} still has ${open} file${open === 1 ? "" : "s"} open. Checked out, p4 can ` +
-            `only merge the shelf onto those, which leaves them needing a resolve.
-
-`
+          ? `${open === 1 ? "It is" : `${open} of them are`} still open. Checked out, p4 can only ` +
+            `merge the shelf onto ${open === 1 ? "it" : "those"}, which leaves ` +
+            `${open === 1 ? "it" : "them"} needing a resolve.\n\n`
           : "") +
-        "The shelf stays on the server — delete it separately when you no longer need it.",
-      "Unshelve changelist",
+        (only.length
+          ? "The rest of the shelf is untouched, and the shelved copy of these stays too."
+          : "The shelf stays on the server — delete it separately when you no longer need it."),
+      only.length ? "Unshelve files" : "Unshelve changelist",
       "Unshelve",
       "Leave the files offline (write to disk only, no checkout)",
       true,
@@ -724,7 +734,7 @@ export const pending = {
       lastUnshelve = null;
       await pending.mutate(
         async () => {
-          lastUnshelve = await p4.unshelve(h!.conn(), change);
+          lastUnshelve = await p4.unshelve(h!.conn(), change, only);
         },
         // A resolve left behind must not be silent, and only the finished command
         // knows whether there is one.
@@ -737,7 +747,9 @@ export const pending = {
       return;
     }
 
-    const files = (await pending.shelvedFiles(change)).map((f) => String(f.depotFile));
+    const files = only.length
+      ? only
+      : (await pending.shelvedFiles(change)).map((f) => String(f.depotFile));
     if (!files.length) {
       h.setError(`@${change} has no shelved files.`);
       return;

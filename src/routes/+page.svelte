@@ -1377,6 +1377,12 @@
       { label: "", sep: true },
       // The counterpart of a partial shelve: without this, one file shelved by
       // mistake could only be cleared by deleting the whole shelf.
+      // Restore just this file, or drop just this file — the shelf-wide pair of
+      // both lives on the changelist row.
+      {
+        label: "Unshelve this file…",
+        action: () => void pending.unshelveChangelist(ch, [f.depotFile]),
+      },
       {
         label: "Remove from shelf…",
         action: () => pending.unshelveSome(ch, [f.depotFile]),

@@ -167,13 +167,21 @@ pub struct UnshelveResult {
     pub notes: Vec<String>,
 }
 
+/// `files` empty restores the whole shelf; naming files restores only those,
+/// leaving the rest shelved (`p4 unshelve -s <change> [-c <change>] [file…]`).
 #[tauri::command]
-pub async fn p4_unshelve(conn: P4Conn, change: String) -> Result<UnshelveResult, String> {
+pub async fn p4_unshelve(
+    conn: P4Conn,
+    change: String,
+    files: Vec<String>,
+) -> Result<UnshelveResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
         // run_notes, not run: a per-file refusal is a WARNING with exit status 0
         // (see commands/undo.rs), so `run` would drop the reason and report a
         // success that never happened.
-        let (recs, notes) = p4::run_notes(&conn, &["unshelve", "-s", &change, "-c", &change])?;
+        let mut args: Vec<&str> = vec!["unshelve", "-s", &change, "-c", &change];
+        args.extend(files.iter().map(String::as_str));
+        let (recs, notes) = p4::run_notes(&conn, &args)?;
         if recs.is_empty() {
             return Err(if notes.is_empty() {
                 format!("nothing was unshelved from @{change}")
@@ -187,7 +195,9 @@ pub async fn p4_unshelve(conn: P4Conn, change: String) -> Result<UnshelveResult,
         // -c <change>` is exact and scoped to this changelist: files to resolve
         // come back as records, and "No file(s) to resolve." is a severity-2
         // warning that `run` drops, so an empty result means genuinely nothing.
-        let needs_resolve = p4::run(&conn, &["resolve", "-n", "-c", &change])
+        let mut resolve_args: Vec<&str> = vec!["resolve", "-n", "-c", &change];
+        resolve_args.extend(files.iter().map(String::as_str));
+        let needs_resolve = p4::run(&conn, &resolve_args)
             .map(|r| !r.is_empty())
             .unwrap_or(false);
         Ok(UnshelveResult { restored: recs.len() as u32, needs_resolve, notes })
