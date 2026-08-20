@@ -189,8 +189,11 @@
     return rootNode;
   });
 
-  // File sync marker. Tooltip is changelist-based (synced CL, or have/head CL
-  // when behind); the have CL fills in asynchronously for stale files.
+  // Files and folders share ONE vocabulary: ● current, ↓ behind, nothing when
+  // not synced. The detail differs (a file has revisions, a folder only
+  // changelists) so it lives in the tooltip rather than in two different-looking
+  // labels — a stale file used to read "#3629/3641" beside a stale folder's dot,
+  // which made the same state look like two unrelated things.
   function sync(node: TreeNode): { cls: string; label: string; title: string } {
     const rec = node.rec;
     if (!rec) return { cls: "prov", label: "", title: "local (not yet confirmed)" };
@@ -200,10 +203,11 @@
     if (have === head) {
       return { cls: "synced", label: "●", title: node.headCl ? `synced (CL ${node.headCl})` : "synced" };
     }
-    const title = node.headCl
-      ? `have CL ${node.haveCl ?? "…"} / head CL ${node.headCl}`
-      : `have #${have}, head #${head}`;
-    return { cls: "stale", label: `#${have}/${head}`, title };
+    // Revisions AND changelists when both are known: the revision pair says how
+    // far behind, the changelist pair says which sync would fix it.
+    const revs = `have #${have} / head #${head}`;
+    const title = node.headCl ? `${revs} · CL ${node.haveCl ?? "…"} / ${node.headCl}` : revs;
+    return { cls: "stale", label: "↓", title };
   }
   // Folder sync marker: have-change vs head-change under the folder.
   function folderSync(node: TreeNode): { cls: string; label: string; title: string } {
@@ -213,9 +217,13 @@
     }
     if (s === "stale") {
       const title = node.headCl
-        ? `have CL ${node.haveCl ?? "…"} / head CL ${node.headCl}`
+        ? `some files behind head · CL ${node.haveCl ?? "…"} / ${node.headCl}`
         : "some files behind head";
-      return { cls: "stale", label: "●", title };
+      // A different GLYPH, not just a different colour: at 10px an amber dot and
+      // a green dot are the same dot, which is how a folder hundreds of
+      // changelists behind read as up to date. ↓ says "there is something to
+      // pull", and survives being colour-blind or on a washed-out screen.
+      return { cls: "stale", label: "↓", title };
     }
     return { cls: "nosync", label: "", title: "" };
   }

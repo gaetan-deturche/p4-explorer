@@ -17,7 +17,6 @@ import { pending } from "$lib/pending.svelte";
 import {
   cacheGet,
   cacheSet,
-  cacheClearScope,
   storeGet,
   storeSet,
   storeSetMem,
@@ -72,7 +71,6 @@ const treeScope = (client: string) => `p4tree:${client}`; // workspace stream fo
 const depotScope = (port: string) => `p4depot:${port}`; // whole-depot folder contents
 const localScope = (client: string) => `p4local:${client}`; // on-disk structure
 const markScope = (client: string) => `p4localmark:${client}`; // server listing → local sync markers
-const syncScope = (client: string) => `p4foldersync:${client}`; // folder sync markers
 
 function parseJson<T>(s: string | undefined | null): T | null {
   if (s === undefined || s === null) return null;
@@ -172,13 +170,12 @@ async function computeFolderSync(path: string): Promise<void> {
   if (!h) return;
   const cacheKey = path.toLowerCase();
   if (folderSyncCache.has(cacheKey) || markersInflight.has(cacheKey)) return;
-  const client = h.conn().client;
-  const stored = parseJson<FolderSync>(await cacheGet(syncScope(client), path));
-  if (stored) {
-    folderSyncCache.set(cacheKey, stored);
-    treeVer++;
-    return;
-  }
+  // Deliberately NOT read from the store. A marker persisted across sessions
+  // says what was true when it was computed, and nothing invalidates it when the
+  // depot moves on — so a workspace hundreds of changelists behind kept showing
+  // green folders while the History tab said "synced @199718" against a head of
+  // @200333. In-memory only: still instant while browsing, never a lie from
+  // yesterday. It is written for Refresh's benefit and read by nothing.
   markersInflight.add(cacheKey);
   try {
     const conn = h.conn();
@@ -198,7 +195,6 @@ async function computeFolderSync(path: string): Promise<void> {
       return { status, have: haveCl, head: headCl };
     });
     folderSyncCache.set(cacheKey, res);
-    cacheSet(syncScope(client), path, JSON.stringify(res));
     treeVer++;
   } finally {
     markersInflight.delete(cacheKey);
@@ -727,7 +723,7 @@ export const browse = {
     sessionFetched.clear();
     folderSyncCache.clear();
     fileHaveClCache.clear();
-    cacheClearScope(syncScope(h.conn().client)); // persisted folder-sync markers
+    folderSyncCache.clear(); // markers live for the session; Refresh recomputes
     history.clearMemCache();
     treeVer++; // drop the marker dots until they recompute
     // Re-fetch the expanded folders + history in the BACKGROUND so a caller (e.g.
