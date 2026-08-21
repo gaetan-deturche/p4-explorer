@@ -479,8 +479,9 @@ export const p4 = {
   undoChange: (conn: P4Conn, change: string, files: string[] = []) =>
     g<UndoResult>("p4_undo_change", { conn, change, files }),
   revertKeep: (conn: P4Conn, depotFile: string) => call("p4_revert_keep", { conn, depotFile }),
-  reopen: (conn: P4Conn, depotFile: string, change: string) =>
-    call("p4_reopen", { conn, depotFile, change }),
+  /** Move opened files to another changelist — one command for the set. */
+  reopen: (conn: P4Conn, depotFiles: string[], change: string) =>
+    call("p4_reopen", { conn, depotFiles, change }),
   newChangelist: (conn: P4Conn, description: string) =>
     g<string>("p4_new_changelist", { conn, description }),
   envPort: (conn: P4Conn) => g<string>("p4_env_port", { conn }),

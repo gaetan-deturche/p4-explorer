@@ -410,12 +410,13 @@
     change: string;
     files: string[];
   } | null>(null);
-  let newClFile = $state<string | null>(null); // a file awaiting a new-changelist name
+  let newClFiles = $state<string[] | null>(null); // files awaiting a new-changelist name
   let renameCl = $state<{ change: string; desc: string } | null>(null); // CL being renamed
 
   // PendingList instance, for the optimistic file move shared with drag-and-drop.
   let pendingList = $state<{
     moveFile: (file: string, from: string, to: string) => void;
+    moveFiles: (files: string[], from: string, to: string) => void;
     selection: () => string[];
     selectedChange: () => string;
   }>();
@@ -426,14 +427,17 @@
   const generatePatch = (change: string, files: string[]) => pending.generatePatch(change, files);
   // Move via the context menu, optimistically (falls back to a plain reopen if
   // the list isn't mounted for some reason).
-  function moveFileTo(file: string, from: string, to: string) {
-    if (pendingList) pendingList.moveFile(file, from, to);
-    else pending.reopen(file, to);
+  /** Move a set between changelists. The context menu passes the selection, so a
+   *  right-click move behaves like a drag of the same rows. */
+  function moveFilesTo(files: string[], from: string, to: string) {
+    if (!files.length) return;
+    if (pendingList) pendingList.moveFiles(files, from, to);
+    else pending.reopen(files, to);
   }
   function submitNewChangelist(desc: string) {
-    const file = newClFile;
-    newClFile = null;
-    if (file) pending.moveToNew(file, desc);
+    const files = newClFiles;
+    newClFiles = null;
+    if (files?.length) pending.moveToNew(files, desc);
   }
   /** Name given: create the changelist and open the files straight into it. */
   function submitNewClFor(desc: string) {
@@ -460,9 +464,13 @@
         const short = desc.length > 32 ? desc.slice(0, 31) + "…" : desc;
         const label =
           cl.change === "default" ? "Default" : short ? `@${cl.change}  ${short}` : "@" + cl.change;
-        return { label, action: () => moveFileTo(file.depotFile, change, cl.change) };
+        return { label, action: () => moveFilesTo(sel, change, cl.change) };
       });
-    targets.push({ label: "New changelist…", accel: "newChange", action: () => (newClFile = file.depotFile) });
+    targets.push({
+      label: "New changelist…",
+      accel: "newChange",
+      action: () => (newClFiles = sel),
+    });
     const patchLabel = files.length > 1 ? `Generate patch (${files.length} files)…` : "Generate patch…";
     const sel = files.length ? files : [file.depotFile];
     // Grouped by what an entry does — look at it, copy it, produce something from
@@ -527,7 +535,7 @@
     // Never steal a keystroke from a text box, and never fight a dialog: a modal
     // owns the keyboard while it is up.
     if (typingInto(e.target)) return;
-    if (confirmState || loginState || optionsOpen || renameCl || newClFile !== null || newClFor) return;
+    if (confirmState || loginState || optionsOpen || renameCl || newClFiles || newClFor) return;
     const id = shortcuts.match(e, scopes);
     if (!id) return;
     const sel = pendingList?.selection() ?? [];
@@ -564,7 +572,7 @@
       case "tabLog":
         return act(() => showTab("log"));
       case "newChange":
-        return act(() => (newClFile = file || ""));
+        return act(() => (newClFiles = sel.length ? sel : file ? [file] : []));
       case "rename":
         if (change && change !== "default") {
           const cl = pending.rows.find((r) => r.change === change);
@@ -622,7 +630,15 @@
   }
 
   // Context state for the two file lists that had no menu before.
-  let shelvedCtx = $state<{ x: number; y: number; file: P4Record; change: string } | null>(null);
+  // `files` = the shelved selection the right-clicked row belongs to (the review
+  // list has no selection of its own, so it passes the single file).
+  let shelvedCtx = $state<{
+    x: number;
+    y: number;
+    file: P4Record;
+    change: string;
+    files: string[];
+  } | null>(null);
   let offlineCtx = $state<{ x: number; y: number; file: P4Record; files: string[] } | null>(null);
   let detailsCtx = $state<{ x: number; y: number; file: P4Record } | null>(null);
 
@@ -1105,7 +1121,14 @@
             e.preventDefault();
             reviewCtx = { x: e.clientX, y: e.clientY, r };
           }}
-          onFileContext={(f, r, e) => (shelvedCtx = { x: e.clientX, y: e.clientY, file: f, change: String(r.change) })}
+          onFileContext={(f, r, e) =>
+            (shelvedCtx = {
+              x: e.clientX,
+              y: e.clientY,
+              file: f,
+              change: String(r.change),
+              files: [String(f.depotFile)],
+            })}
         />
       {:else if centerTab === "pending"}
         <PendingList
@@ -1133,11 +1156,11 @@
           onOpenShelvedDiff={pending.openShelvedDiff}
           onContext={onPendingContext}
           onFileContext={onPendingFileContext}
-          onShelvedContext={(f, change, e) =>
-            (shelvedCtx = { x: e.clientX, y: e.clientY, file: f, change })}
+          onShelvedContext={(f, change, e, files) =>
+            (shelvedCtx = { x: e.clientX, y: e.clientY, file: f, change, files })}
           onOfflineContext={(f, e, files) =>
             (offlineCtx = { x: e.clientX, y: e.clientY, file: f, files })}
-          onMoveFile={pending.reopen}
+          onMoveFile={(files: string[], to: string) => pending.reopen(files, to)}
         />
       {:else}
         <div class="hsplit">
@@ -1364,6 +1387,7 @@
 {#if shelvedCtx}
   {@const f = shelvedCtx.file}
   {@const ch = shelvedCtx.change}
+  {@const shelvedSel = shelvedCtx.files.length ? shelvedCtx.files : [String(f.depotFile)]}
   <ContextMenu
     x={shelvedCtx.x}
     y={shelvedCtx.y}
@@ -1380,12 +1404,15 @@
       // Restore just this file, or drop just this file — the shelf-wide pair of
       // both lives on the changelist row.
       {
-        label: "Unshelve this file…",
-        action: () => void pending.unshelveChangelist(ch, [f.depotFile]),
+        label: shelvedSel.length > 1 ? `Unshelve ${shelvedSel.length} files…` : "Unshelve this file…",
+        action: () => void pending.unshelveChangelist(ch, shelvedSel),
       },
       {
-        label: "Remove from shelf…",
-        action: () => pending.unshelveSome(ch, [f.depotFile]),
+        label:
+          shelvedSel.length > 1
+            ? `Remove ${shelvedSel.length} files from shelf…`
+            : "Remove from shelf…",
+        action: () => pending.unshelveSome(ch, shelvedSel),
       },
     ]}
     onClose={() => (shelvedCtx = null)}
@@ -1481,14 +1508,14 @@
   />
 {/if}
 
-{#if newClFile !== null}
+{#if newClFiles}
   <InputDialog
     title="New changelist"
     label="Description"
     placeholder="Describe the change…"
     okLabel="Create & move"
     onSubmit={submitNewChangelist}
-    onCancel={() => (newClFile = null)}
+    onCancel={() => (newClFiles = null)}
   />
 {/if}
 

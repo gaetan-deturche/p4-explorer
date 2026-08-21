@@ -974,21 +974,32 @@ export const pending = {
       },
     );
   },
-  reopen(file: string, change: string) {
+  /** Move files into `change`. One p4 command whatever the count, so a dragged
+   *  selection of twenty is one move — and one optimistic update. */
+  reopen(files: string[], change: string) {
+    if (!files.length) return;
     const label = change === "default" ? "Default" : "@" + change;
+    const n = files.length;
     // CL move only — no synced content changes, so skip the tree/history refresh.
-    pending.mutate(() => p4.reopen(h!.conn(), file, change), `Moved to ${label}.`, {
-      refresh: false,
-      optimistic: () => moveFileNow(file, currentChangeOf(file), change),
-    });
+    pending.mutate(
+      () => p4.reopen(h!.conn(), files, change),
+      n === 1 ? `Moved to ${label}.` : `Moved ${n} files to ${label}.`,
+      {
+        refresh: false,
+        optimistic: () => {
+          const undos = files.map((f) => moveFileNow(f, currentChangeOf(f), change));
+          return () => undos.forEach((u) => u());
+        },
+      },
+    );
   },
-  moveToNew(file: string, desc: string) {
+  moveToNew(files: string[], desc: string) {
     pending.mutate(
       async () => {
         const ch = await p4.newChangelist(h!.conn(), desc);
-        await p4.reopen(h!.conn(), file, ch);
+        await p4.reopen(h!.conn(), files, ch);
       },
-      "Moved to a new changelist.",
+      files.length === 1 ? "Moved to a new changelist." : `Moved ${files.length} files to a new changelist.`,
       { refresh: false },
     );
   },

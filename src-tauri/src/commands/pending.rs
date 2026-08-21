@@ -278,11 +278,17 @@ pub async fn p4_revert_keep(conn: P4Conn, depot_file: String) -> Res {
     run(conn, v(&["revert", "-k", &depot_file])).await
 }
 
-/// Move an opened file to another pending changelist (`p4 reopen -c <change>`);
-/// `change` may be "default".
+/// Move opened files to another pending changelist (`p4 reopen -c <change>
+/// <files…>`); `change` may be "default". One command for the whole set: a
+/// dragged multi-selection is one move, not N.
 #[tauri::command]
-pub async fn p4_reopen(conn: P4Conn, depot_file: String, change: String) -> Res {
-    run(conn, v(&["reopen", "-c", &change, &depot_file])).await
+pub async fn p4_reopen(conn: P4Conn, depot_files: Vec<String>, change: String) -> Res {
+    if depot_files.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut args = v(&["reopen", "-c", &change]);
+    args.extend(depot_files);
+    run(conn, args).await
 }
 
 /// Create a new empty pending changelist with `description`; returns its number.

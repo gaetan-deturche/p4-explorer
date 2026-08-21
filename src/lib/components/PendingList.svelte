@@ -56,10 +56,11 @@
     onContext: (cl: P4Record, e: MouseEvent) => void; // right-click a changelist
     // right-click a file → (file, change, event, selected depot files)
     onFileContext: (file: P4Record, change: string, e: MouseEvent, files: string[]) => void;
-    onShelvedContext?: (file: P4Record, change: string, e: MouseEvent) => void; // right-click a shelved file
+    // right-click a shelved file; `files` is the shelved selection it belongs to
+    onShelvedContext?: (file: P4Record, change: string, e: MouseEvent, files: string[]) => void;
     // right-click an offline file → (file, event, selected depot files)
     onOfflineContext?: (file: P4Record, e: MouseEvent, files: string[]) => void;
-    onMoveFile: (file: string, toChange: string) => void; // drag a file onto another CL
+    onMoveFile: (files: string[], toChange: string) => void; // drag files onto another CL
   } = $props();
 
   // Multi-select of local (opened) AND offline files via click / Ctrl+click /
@@ -99,6 +100,49 @@
   function clearSelection() {
     selected = new Set();
     anchor = null;
+  }
+
+  // --- shelved selection -----------------------------------------------------
+  // Kept apart from the opened-file selection: the same path can be open AND
+  // shelved in one changelist, and the actions differ completely (revert a file
+  // vs remove its shelved copy). Scoped to ONE shelf, because shelve and
+  // unshelve are per-changelist — clicking into another changelist's shelf
+  // starts a new selection there rather than building a set no action can take.
+  let shelvedOf = $state(""); // which changelist's shelf the selection is in
+  let shelvedSel = $state<Set<string>>(new Set());
+  let shelvedAnchor: string | null = null;
+
+  /** The shelved rows of `change`, in display order — the range a shift-click
+   *  spans. */
+  function shelvedOrder(change: string): string[] {
+    return (cls[change]?.shelved ?? []).map((f) => String(f.depotFile));
+  }
+  function clickShelved(change: string, file: string, e: MouseEvent | KeyboardEvent) {
+    if (change !== shelvedOf) {
+      // A different shelf: start over there.
+      shelvedOf = change;
+      shelvedSel = new Set([file]);
+      shelvedAnchor = file;
+      return;
+    }
+    const order = shelvedOrder(change);
+    if (e.shiftKey && shelvedAnchor) {
+      const a = order.indexOf(shelvedAnchor);
+      const b = order.indexOf(file);
+      if (a >= 0 && b >= 0) {
+        const [lo, hi] = a < b ? [a, b] : [b, a];
+        shelvedSel = new Set(order.slice(lo, hi + 1));
+      }
+    } else if (e.ctrlKey || e.metaKey) {
+      const n = new Set(shelvedSel);
+      if (n.has(file)) n.delete(file);
+      else n.add(file);
+      shelvedSel = n;
+      shelvedAnchor = file;
+    } else {
+      shelvedSel = new Set([file]);
+      shelvedAnchor = file;
+    }
   }
 
   // Rubber-band (marquee) selection: drag over empty space to box-select local
@@ -145,7 +189,7 @@
   }
 
   // Drag-and-drop: move an opened file from one changelist to another.
-  let drag = $state<{ file: string; from: string } | null>(null);
+  let drag = $state<{ files: string[]; from: string } | null>(null);
   let dragOver = $state<string | null>(null); // CL currently hovered as a drop target
 
   type CL = {
@@ -216,15 +260,22 @@
     return owners.size === 1 ? [...owners][0] : "";
   }
 
-  export function moveFile(file: string, from: string, to: string) {
+  /** Move files between changelists, updating the expanded lists at once so the
+   *  rows jump immediately; the reload that follows reconciles. */
+  export function moveFiles(files: string[], from: string, to: string) {
+    const gone = new Set(files);
     const src = cls[from];
-    const rec = src?.local.find((f) => f.depotFile === file);
-    if (src && rec) {
-      cls[from] = { ...src, local: src.local.filter((f) => f.depotFile !== file) };
+    const recs = src?.local.filter((f) => gone.has(String(f.depotFile))) ?? [];
+    if (src && recs.length) {
+      cls[from] = { ...src, local: src.local.filter((f) => !gone.has(String(f.depotFile))) };
       const dst = cls[to];
-      if (dst) cls[to] = { ...dst, local: [...dst.local, { ...rec }] };
+      if (dst) cls[to] = { ...dst, local: [...dst.local, ...recs.map((r) => ({ ...r }))] };
     }
-    onMoveFile(file, to);
+    onMoveFile(files, to);
+  }
+  /** One file — the context menu's "Move to changelist" for a single row. */
+  export function moveFile(file: string, from: string, to: string) {
+    moveFiles([file], from, to);
   }
 
   function toggleCL(change: string) {
@@ -326,28 +377,38 @@
         <!-- Section wrapper = the sticky header's containing block, so the pinned
              CL row is pushed out by its own section's end (clean hand-off to the
              next CL) instead of being painted over mid-overlap. -->
-        <div class="clsec">
-        <button
-          class="cl"
+        <!-- The drop target is the whole SECTION — title row and file list
+             alike. Aiming at the title alone meant an expanded changelist was
+             mostly a dead zone, and the obvious place to drop a file is among the
+             files it will join. -->
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <div
+          class="clsec"
           class:dropinto={dragOver === r.change}
-          class:contextsel={contextChange === r.change}
-          onclick={() => toggleCL(r.change)}
-          oncontextmenu={(e) => onContext(r, e)}
           ondragover={(e) => {
             if (drag && drag.from !== r.change) {
               e.preventDefault();
               dragOver = r.change;
             }
           }}
-          ondragleave={() => {
-            if (dragOver === r.change) dragOver = null;
+          ondragleave={(e) => {
+            // Only when the pointer actually leaves the section: moving between
+            // its own rows fires dragleave on each of them.
+            const to = e.relatedTarget as Node | null;
+            if (dragOver === r.change && (!to || !e.currentTarget.contains(to))) dragOver = null;
           }}
           ondrop={(e) => {
             e.preventDefault();
-            if (drag && drag.from !== r.change) moveFile(drag.file, drag.from, r.change);
+            if (drag && drag.from !== r.change) moveFiles(drag.files, drag.from, r.change);
             drag = null;
             dragOver = null;
           }}
+        >
+        <button
+          class="cl"
+          class:contextsel={contextChange === r.change}
+          onclick={() => toggleCL(r.change)}
+          oncontextmenu={(e) => onContext(r, e)}
         >
           <span class="tw">{empty ? "" : s?.open ? "▾" : "▸"}</span>
           <span class="cnum mono">{r.change === "default" ? "Default" : "@" + r.change}</span>
@@ -494,17 +555,20 @@
   <div
     class="frow mono"
     data-file={kind === "local" ? f.depotFile : undefined}
-    class:dragging={drag?.file === f.depotFile}
-    class:selected={kind === "local" && selected.has(f.depotFile)}
+    class:dragging={drag?.files.includes(f.depotFile)}
+    class:selected={kind === "local"
+      ? selected.has(f.depotFile)
+      : shelvedOf === change && shelvedSel.has(f.depotFile)}
     style="padding-left:{depth * 16 + 4}px"
     title={"Double-click to open in external diff\n" + f.depotFile}
     draggable={kind === "local"}
-    onclick={(e) => kind === "local" && clickFile(f.depotFile, e)}
+    onclick={(e) =>
+      kind === "local" ? clickFile(f.depotFile, e) : clickShelved(change, f.depotFile, e)}
     onkeydown={(e) => {
-      if (kind === "local" && (e.key === "Enter" || e.key === " ")) {
-        e.preventDefault();
-        clickFile(f.depotFile, e);
-      }
+      if (e.key !== "Enter" && e.key !== " ") return;
+      e.preventDefault();
+      if (kind === "local") clickFile(f.depotFile, e);
+      else clickShelved(change, f.depotFile, e);
     }}
     ondblclick={() => openExt(change, kind, f)}
     oncontextmenu={(e) => {
@@ -518,15 +582,34 @@
         onFileContext(f, change, e, [...selected]);
       } else if (onShelvedContext) {
         e.preventDefault();
-        onShelvedContext(f, change, e);
+        // Right-click selects the row unless it is already in the selection —
+        // same rule as the opened files, so a menu never acts on something
+        // invisible.
+        if (shelvedOf !== change || !shelvedSel.has(f.depotFile)) {
+          shelvedOf = change;
+          shelvedSel = new Set([f.depotFile]);
+          shelvedAnchor = f.depotFile;
+        }
+        onShelvedContext(f, change, e, [...shelvedSel]);
       }
     }}
     ondragstart={(e) => {
       if (kind !== "local") return;
-      drag = { file: f.depotFile, from: change };
+      // Dragging a row that is part of the selection drags the SELECTION;
+      // grabbing an unselected row drags (and selects) just that one, which is
+      // what makes a stray drag predictable.
+      let files: string[];
+      if (selected.has(f.depotFile)) {
+        files = [...selected];
+      } else {
+        files = [f.depotFile];
+        selected = new Set(files);
+        anchor = f.depotFile;
+      }
+      drag = { files, from: change };
       if (e.dataTransfer) {
         e.dataTransfer.effectAllowed = "move";
-        e.dataTransfer.setData("text/plain", f.depotFile);
+        e.dataTransfer.setData("text/plain", files.join("\n"));
       }
     }}
     ondragend={() => {
@@ -613,7 +696,7 @@
   .cl:hover {
     background: var(--bg-hover);
   }
-  .cl.dropinto {
+  .clsec.dropinto {
     background: var(--bg-sel);
     outline: 1px dashed var(--accent);
     outline-offset: -2px;
