@@ -164,7 +164,7 @@ pub fn run() {
             commands::p4_reopen,
             commands::p4_new_changelist,
             commands::swarm_url,
-            commands::swarm_review,
+            commands::swarm_reviews_for,
             commands::p4_login_status,
             commands::p4_login,
             commands::p4_ticket_user,

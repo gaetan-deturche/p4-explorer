@@ -49,61 +49,87 @@ fn state_label(state: &str) -> String {
     .to_string()
 }
 
-/// The Swarm review associated with a changelist, or None when there is none
-/// (or Swarm/ticket is unavailable). Queries `GET /api/v9/reviews?change[]=<cl>`
-/// authenticated with the user's P4 ticket — the review is linked by change, not
-/// by any `#review` marker in the description (Swarm doesn't rewrite the pending
-/// CL). Network/HTTP errors return None so a missing badge never breaks the list.
+
+/// The review status of MANY changelists in one request.
+///
+/// Swarm's `change[]` filter takes a list, and each returned review names the
+/// changelists it covers — so N changelists cost one HTTP round trip instead of
+/// N. That is what makes it cheap enough to poll: the badges used to need a
+/// manual refresh because nothing re-asked, and re-asking per changelist on a
+/// timer would have meant a request per changelist every tick.
+///
+/// One record per changelist that HAS a review: `change`, `id`, `state`,
+/// `stateLabel`. Changelists with no review are simply absent.
 #[tauri::command]
-pub async fn swarm_review(conn: P4Conn, change: String) -> Result<Option<ReviewInfo>, String> {
+pub async fn swarm_reviews_for(conn: P4Conn, changes: Vec<String>) -> Res {
     tauri::async_runtime::spawn_blocking(move || {
+        if changes.is_empty() {
+            return Ok(Vec::new());
+        }
         let base = swarm_base(&conn);
         if base.is_empty() {
-            return Ok(None);
+            return Ok(Vec::new());
         }
         let Some(ticket) = p4::ticket(&conn) else {
-            return Ok(None); // not logged in → can't auth to Swarm
+            return Ok(Vec::new()); // not logged in → no badges, not an error
         };
-        let url = format!("{base}/api/v9/reviews?change[]={change}&fields=id,state&max=1");
         let client = match reqwest::blocking::Client::builder()
-            .timeout(std::time::Duration::from_secs(8))
+            .timeout(std::time::Duration::from_secs(10))
             .build()
         {
             Ok(c) => c,
-            Err(_) => return Ok(None),
+            Err(_) => return Ok(Vec::new()),
         };
-        let resp = match client.get(&url).basic_auth(&conn.user, Some(&ticket)).send() {
-            Ok(r) if r.status().is_success() => r,
-            _ => return Ok(None), // unreachable / 401 → just no badge
-        };
-        let body: serde_json::Value = match resp.json() {
-            Ok(v) => v,
-            Err(_) => return Ok(None),
-        };
-        let Some(review) = body
-            .get("reviews")
-            .and_then(|r| r.as_array())
-            .and_then(|a| a.first())
-        else {
-            return Ok(None); // no review for this change
-        };
-        let id = review.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
-        let state = review
-            .get("state")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        if state.is_empty() {
-            return Ok(None);
+        let wanted: std::collections::HashSet<&str> = changes.iter().map(String::as_str).collect();
+        let mut out: Vec<p4::Record> = Vec::new();
+        // Chunked: a very long query string would be refused, and 50 keeps it
+        // comfortable.
+        for batch in changes.chunks(50) {
+            let mut url = format!("{base}/api/v9/reviews?max=200&fields=id,state,changes,commits");
+            for c in batch {
+                url.push_str(&format!("&change[]={c}"));
+            }
+            let Ok(resp) = client.get(&url).basic_auth(&conn.user, Some(&ticket)).send() else {
+                continue; // unreachable Swarm → no badges this round
+            };
+            if !resp.status().is_success() {
+                continue;
+            }
+            let Ok(body) = resp.json::<serde_json::Value>() else { continue };
+            for rv in body.get("reviews").and_then(|r| r.as_array()).into_iter().flatten() {
+                let id = rv.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+                let state = rv.get("state").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                if state.is_empty() {
+                    continue;
+                }
+                // A review covers several changelists; report it for each one the
+                // caller asked about, including the review's own id (the shelf
+                // changelist) which is what a pending row may be.
+                let mut covered: Vec<String> = vec![id.to_string()];
+                for key in ["changes", "commits"] {
+                    for c in rv.get(key).and_then(|v| v.as_array()).into_iter().flatten() {
+                        if let Some(n) = c.as_u64() {
+                            covered.push(n.to_string());
+                        }
+                    }
+                }
+                for c in covered {
+                    if !wanted.contains(c.as_str()) {
+                        continue;
+                    }
+                    let mut rec = p4::Record::new();
+                    rec.insert("change".into(), c.into());
+                    rec.insert("id".into(), id.into());
+                    rec.insert("state".into(), state.clone().into());
+                    rec.insert("stateLabel".into(), state_label(&state).into());
+                    out.push(rec);
+                }
+            }
         }
-        Ok(Some(ReviewInfo {
-            id,
-            state_label: state_label(&state),
-            state,
-        }))
+        Ok(out)
     })
     .await
-    .map_err(|e| format!("swarm-review task failed: {e}"))?
+    .map_err(|e| format!("swarm-reviews task failed: {e}"))?
 }
 
 /// Whether the connection is currently authenticated (`p4 login -s` exits 0).

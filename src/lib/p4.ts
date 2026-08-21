@@ -388,8 +388,10 @@ export const p4 = {
    *  whole depot). `scan` bounds the `p4 changes` window, not the result. */
   shelvedNoReview: (conn: P4Conn, streamPath: string, scan: number) =>
     g<ReviewRow[]>("swarm_shelved_no_review", { conn, streamPath, scan }),
-  swarmReview: (conn: P4Conn, change: string) =>
-    g<ReviewInfo | null>("swarm_review", { conn, change }),
+  /** Review status for MANY changelists in one request; rows only for the ones
+   *  that have a review. */
+  swarmReviewsFor: (conn: P4Conn, changes: string[]) =>
+    call("swarm_reviews_for", { conn, changes }),
   /** Authenticated? `error` carries the p4 text when not (charset vs ticket). */
   loginStatus: (conn: P4Conn) => g<{ ok: boolean; error: string }>("p4_login_status", { conn }),
   /** The cached ticket value for this connection (address, else user match). */

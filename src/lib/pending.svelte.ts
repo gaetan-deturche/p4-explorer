@@ -418,6 +418,16 @@ export const pending = {
       .map((r) => `${r.depotFile}|${r.action}|${r.change}`)
       .sort()
       .join("\n");
+    // Review status, shelves and resolve state move WITHOUT `p4 opened`
+    // changing — somebody approves a review, Swarm re-shelves, a colleague
+    // submits over a file we hold. None of that touched the fingerprint, so the
+    // badges sat stale until a manual refresh. They are refreshed every tick
+    // now: one batched Swarm request, one server-filtered `changes -s shelved`
+    // (0.09s for the whole client) and one server-filtered `fstat -Ru`.
+    void pending.loadReviews();
+    void pending.loadShelved();
+    void pending.loadUnresolved();
+
     if (fp === openedFingerprint) return;
     const first = openedFingerprint === null;
     openedFingerprint = fp;
@@ -519,18 +529,32 @@ export const pending = {
   async loadReviews() {
     if (!h || !h.connected() || !h.conn().client) return;
     const conn = h.conn();
-    const targets = currentPendingRows().filter((r) => r.change !== "default");
-    const next: Record<string, ReviewInfo | null> = {};
-    await Promise.all(
-      targets.map(async (r) => {
-        try {
-          next[r.change] = await p4.swarmReview(conn, r.change);
-        } catch {
-          /* leave this CL without a badge */
-        }
-      }),
-    );
-    reviews = next;
+    const targets = currentPendingRows()
+      .filter((r) => r.change !== "default")
+      .map((r) => String(r.change));
+    if (!targets.length) {
+      reviews = {};
+      return;
+    }
+    // ONE request for all of them: Swarm's change[] filter takes a list, and each
+    // returned review names the changelists it covers. It used to be a request
+    // per changelist, which is why polling this was not affordable — and so the
+    // badges only moved on a manual refresh.
+    try {
+      const rows = await p4.swarmReviewsFor(conn, targets);
+      if (h.conn().client !== conn.client) return; // switched workspace mid-flight
+      const next: Record<string, ReviewInfo | null> = {};
+      for (const r of rows) {
+        next[String(r.change)] = {
+          id: Number(r.id ?? 0),
+          state: String(r.state ?? ""),
+          stateLabel: String(r.stateLabel ?? ""),
+        };
+      }
+      reviews = next;
+    } catch {
+      /* unreachable Swarm → leave the badges as they were */
+    }
   },
 
   /** Run a workspace-mutating action, then reload. `refresh` (default true) also

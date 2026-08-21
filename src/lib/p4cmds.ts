@@ -41,7 +41,7 @@ export const P4_COMMANDS: P4Cmd[] = [
   { key: "p4_ticket_user", label: "tickets", read: true },
   { key: "p4_ticket_value", label: "tickets", read: true },
   { key: "swarm_url", label: "swarm url", read: true },
-  { key: "swarm_review", label: "swarm review", read: true },
+  { key: "swarm_reviews_for", label: "swarm review", read: true },
   { key: "swarm_reviews", label: "swarm reviews", read: true },
   { key: "swarm_shelved_no_review", label: "swarm reviews", read: true },
   { key: "review_patch", label: "describe -S (review patch)", read: true },
