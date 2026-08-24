@@ -14,7 +14,7 @@ import { cacheGet, cacheSet } from "$lib/store.svelte";
 /** Where a shortcut applies. The dispatcher only fires an action whose scope is
  *  currently meaningful, so `Ctrl+N` can mean "new changelist" on the Pending
  *  tab without being dead weight elsewhere. */
-export type Scope = "app" | "pending" | "files";
+export type Scope = "app" | "pending" | "files" | "editor";
 
 export interface ActionDef {
   id: string;
@@ -49,6 +49,30 @@ export const ACTIONS: ActionDef[] = [
   { id: "copyPath", label: "Copy the depot path", group: "Files", scope: "files", def: "Ctrl+C" },
   { id: "blame", label: "Blame the selected file…", group: "Files", scope: "files", def: "Ctrl+B" },
   { id: "fileHistory", label: "File history…", group: "Files", scope: "files", def: "Ctrl+H" },
+  // The diff and merge editors. Alt+Shift+Up/Down is Visual Studio's binding for
+  // this; VS Code uses the same keys for "copy line", so anyone coming from there
+  // can rebind them here like everything else.
+  {
+    id: "addCaretAbove",
+    label: "Add a caret above",
+    group: "Editor",
+    scope: "editor",
+    def: "Alt+Shift+ArrowUp",
+  },
+  {
+    id: "addCaretBelow",
+    label: "Add a caret below",
+    group: "Editor",
+    scope: "editor",
+    def: "Alt+Shift+ArrowDown",
+  },
+  {
+    id: "addCaretNextMatch",
+    label: "Add a caret at the next match",
+    group: "Editor",
+    scope: "editor",
+    def: "Ctrl+D",
+  },
   {
     id: "submit",
     label: "Submit the changelist…",
@@ -66,6 +90,17 @@ export const ACTIONS: ActionDef[] = [
     destructive: true,
   },
 ];
+
+/** Scopes that can be live in the same window, so a shared key is a real clash.
+ *  `app` is dispatched by the child windows too (closing them), which is why it
+ *  sits in both groups. */
+const CONTEXTS: Scope[][] = [
+  ["app", "pending", "files"],
+  ["app", "editor"],
+];
+function coexist(a: Scope, b: Scope): boolean {
+  return CONTEXTS.some((c) => c.includes(a) && c.includes(b));
+}
 
 const KEY = "shortcuts"; // store scope `nav`
 let overrides = $state<Record<string, string>>({});
@@ -122,10 +157,18 @@ export const shortcuts = {
     return "";
   },
   /** Actions currently bound to `key`, other than `except` — a rebinding that
-   *  would collide has to be visible before it is accepted. */
+   *  would collide has to be visible before it is accepted.
+   *
+   *  Only within a context: two actions that can never be live in the same window
+   *  may share a key, which is how Ctrl+D means "diff the selected file" in the
+   *  main window and "add a caret at the next match" in an editor pane. Reporting
+   *  that as a clash would be a warning about nothing. */
   clashes(key: string, except: string): ActionDef[] {
     if (!key) return [];
-    return ACTIONS.filter((a) => a.id !== except && shortcuts.key(a.id) === key);
+    const mine = ACTIONS.find((a) => a.id === except)?.scope;
+    return ACTIONS.filter(
+      (a) => a.id !== except && shortcuts.key(a.id) === key && (!mine || coexist(a.scope, mine)),
+    );
   },
   /** Rebind. An empty key unbinds; the same key as the default drops the
    *  override so a later change of default is picked up. */

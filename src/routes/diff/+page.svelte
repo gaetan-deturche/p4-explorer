@@ -16,33 +16,30 @@
   import MergeResult from "$lib/components/MergeResult.svelte";
   import OverviewRuler, { type Mark } from "$lib/components/OverviewRuler.svelte";
   import {
-    clampCaret,
-    deleteBackward,
-    deleteForward,
-    deleteRange,
-    deleteWord,
+    addCursorAtNextMatch,
+    addCursorVertical,
+    applyBackspace,
+    applyCaret,
+    applyCollapse,
+    applyDelete,
+    applyDeleteWord,
+    applyEnter,
+    applyInsert,
+    applyMove,
+    applyMoveLines,
+    applyRegionLines,
+    applySelectAll,
+    applySelectLine,
+    applySelectWord,
+    copyText,
+    hasSelection,
+    primaryCaret,
+    singleCursor,
     docText,
     emptyHistory,
-    insertLineBreak,
-    insertOverRange,
-    insertText,
-    lineRange,
-    moveByLines,
-    moveLeft,
-    moveLineEnd,
-    moveLineStart,
-    moveRight,
-    moveVertical,
     push,
     redo,
-    sameCaret,
-    selectAll,
-    selectedText,
-    setRegionLines,
     undo,
-    wordLeft,
-    wordRange,
-    wordRight,
     type Caret,
     type DocState,
     type History,
@@ -122,7 +119,6 @@
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
   }
-  let anchor = $state<Caret | null>(null);
   let dirty = $state(false);
   let saving = $state(false);
   let error = $state("");
@@ -224,8 +220,7 @@ initSplit(leftText.trim() === "");
     } else {
       target = caret;
     }
-    ds = { doc: { regions }, caret: target };
-    anchor = null;
+    ds = singleCursor({ regions }, target);
   }
 
   /** Re-diff immediately after an edit.
@@ -242,16 +237,17 @@ initSplit(leftText.trim() === "");
    *  Skipped only while a selection is open, since re-blocking rebuilds the
    *  regions its endpoints point into; the next edit (or its collapse) reflows. */
   function reflow() {
-    if (!ds || !editable || anchor) return;
+    if (!ds || !editable || hasSelection(ds)) return;
     rebuild(docText(ds.doc), absoluteLine());
   }
 
   /** The caret's line counted from the top of the right file. */
   function absoluteLine(): number {
     if (!ds) return 0;
+    const caret = primaryCaret(ds);
     let n = 0;
     for (const r of ds.doc.regions) {
-      if (r.region === ds.caret.region) return n + ds.caret.line;
+      if (r.region === caret.region) return n + caret.line;
       n += r.lines.length;
     }
     return n;
@@ -284,7 +280,10 @@ initSplit(leftText.trim() === "");
   );
   /** Alt+Up / Alt+Down step through the changes from anywhere in the window. */
   function onWindowKey(e: KeyboardEvent) {
-    if (!e.altKey || e.ctrlKey || e.metaKey) return;
+    // Whoever handled it first wins: the editor claims alt+shift+arrows for its
+    // extra carets, and preventDefault does not stop the event bubbling to here.
+    if (e.defaultPrevented) return;
+    if (!e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
     if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
     e.preventDefault();
     goTo(current + (e.key === "ArrowDown" ? 1 : -1));
@@ -304,15 +303,20 @@ initSplit(leftText.trim() === "");
     document.querySelector(`[data-change="${changes[current]}"]`)?.scrollIntoView({ block: "center" });
   }
 
-  /** A live selection, or null. */
-  function selection(): { from: Caret; to: Caret } | null {
-    if (!ds || !anchor || sameCaret(anchor, ds.caret)) return null;
-    return { from: anchor, to: ds.caret };
-  }
-
   /** Actions that only look: caret, selection, copy. A read-only pane keeps
    *  these — it is the same editor, it just refuses to change the document. */
-  const READ_ONLY_OK = new Set(["move", "moveLines", "caret", "selectWord", "selectLine", "selectAll", "copy"]);
+  const READ_ONLY_OK = new Set([
+    "move",
+    "moveLines",
+    "caret",
+    "selectWord",
+    "selectLine",
+    "selectAll",
+    "copy",
+    "addCursor",
+    "addCursorMatch",
+    "collapse",
+  ]);
 
   /** Apply an intent to the document. Identical handling to the resolve window,
    *  because it is the same model. */
@@ -326,92 +330,74 @@ initSplit(leftText.trim() === "");
       if (a.t === "copy" && a.cut) a = { ...a, cut: false }; // cut writes; degrade to copy
     }
     const before = ds;
-    const sel = selection();
     const edit = (next: DocState, coalesce = false) => {
       hist = push(hist, before, coalesce);
       ds = next;
-      anchor = null;
       dirty = true;
       reflow();
     };
     switch (a.t) {
       case "insert":
-        edit(sel ? insertOverRange(before, sel.from, sel.to, a.text) : insertText(before, a.text), typing && !sel);
+        // Coalescing stops at a selection: replacing text is one step of its own.
+        edit(applyInsert(before, a.text), typing && !hasSelection(before));
         typing = true;
         break;
       case "enter":
         typing = false;
-        edit(sel ? insertOverRange(before, sel.from, sel.to, "\n") : insertLineBreak(before));
+        edit(applyEnter(before));
         break;
       case "backspace":
         typing = false;
-        edit(sel ? deleteRange(before, sel.from, sel.to) : deleteBackward(before));
+        edit(applyBackspace(before));
         break;
       case "delete":
         typing = false;
-        edit(sel ? deleteRange(before, sel.from, sel.to) : deleteForward(before));
+        edit(applyDelete(before));
         break;
       case "deleteWord":
         typing = false;
-        edit(sel ? deleteRange(before, sel.from, sel.to) : deleteWord(before, a.forward));
+        edit(applyDeleteWord(before, a.forward));
         break;
-      case "move": {
+      case "move":
         typing = false;
-        const c = before.caret;
-        const next =
-          a.dir === "left"
-            ? moveLeft(before.doc, c)
-            : a.dir === "right"
-              ? moveRight(before.doc, c)
-              : a.dir === "up"
-                ? moveVertical(before.doc, c, -1)
-                : a.dir === "down"
-                  ? moveVertical(before.doc, c, 1)
-                  : a.dir === "home"
-                    ? moveLineStart(before.doc, c)
-                    : a.dir === "end"
-                      ? moveLineEnd(before.doc, c)
-                      : a.dir === "wordLeft"
-                        ? wordLeft(before.doc, c)
-                        : wordRight(before.doc, c);
-        anchor = a.extend ? (anchor ?? before.caret) : null;
-        ds = { doc: before.doc, caret: next };
+        ds = applyMove(before, a.dir, a.extend);
         break;
-      }
       case "moveLines":
         typing = false;
-        anchor = a.extend ? (anchor ?? before.caret) : null;
-        ds = { doc: before.doc, caret: moveByLines(before.doc, before.caret, a.delta) };
+        ds = applyMoveLines(before, a.delta, a.extend);
         break;
       case "caret":
         typing = false;
-        anchor = a.extend ? (anchor ?? before.caret) : null;
-        ds = { doc: before.doc, caret: clampCaret(before.doc, a.caret) };
+        ds = applyCaret(before, a.caret, { extend: a.extend, add: a.add });
         break;
-      case "selectWord": {
-        const w = wordRange(before.doc, a.caret);
-        anchor = w.from;
-        ds = { doc: before.doc, caret: w.to };
+      case "addCursor":
+        typing = false;
+        ds = addCursorVertical(before, a.dir);
         break;
-      }
-      case "selectLine": {
-        const l = lineRange(before.doc, a.caret);
-        anchor = l.from;
-        ds = { doc: before.doc, caret: l.to };
+      case "addCursorMatch":
+        typing = false;
+        ds = addCursorAtNextMatch(before);
         break;
-      }
-      case "selectAll": {
-        const all = selectAll(before.doc);
-        if (all) {
-          anchor = all.anchor;
-          ds = { doc: before.doc, caret: all.head };
-        }
+      case "collapse":
+        typing = false;
+        ds = applyCollapse(before);
         break;
-      }
+      case "selectWord":
+        ds = applySelectWord(before, a.caret, a.add);
+        break;
+      case "selectLine":
+        ds = applySelectLine(before, a.caret, a.add);
+        break;
+      case "selectAll":
+        ds = applySelectAll(before);
+        break;
       case "copy": {
-        if (!sel) break;
-        void setClipboard(selectedText(before.doc, sel.from, sel.to)).catch((e) => (error = String(e)));
-        if (a.cut) edit(deleteRange(before, sel.from, sel.to));
+        const text = copyText(before);
+        if (!text) break;
+        void setClipboard(text).catch((e) => (error = String(e)));
+        // Cut is copy plus "delete what was selected", which is exactly what
+        // backspace does to a selection — at every cursor.
+        if (a.cut) edit(applyBackspace(before));
         break;
       }
       case "undo": {
@@ -419,7 +405,6 @@ initSplit(leftText.trim() === "");
         if (u) {
           ds = u.state;
           hist = u.history;
-          anchor = null;
           dirty = true;
           reflow(); // the restored doc predates the current blocks
         }
@@ -433,7 +418,6 @@ initSplit(leftText.trim() === "");
         if (r) {
           ds = r.state;
           hist = r.history;
-          anchor = null;
           dirty = true;
           reflow(); // the restored doc predates the current blocks
         }
@@ -449,8 +433,7 @@ initSplit(leftText.trim() === "");
     if (!b) return;
     hist = push(hist, ds, false);
     typing = false;
-    ds = setRegionLines(ds, i, b.left);
-    anchor = null;
+    ds = applyRegionLines(ds, i, b.left);
     dirty = true;
   }
 
@@ -640,7 +623,6 @@ initSplit(leftText.trim() === "");
         <div class="resultcol">
           <MergeResult
             docState={ds}
-            {anchor}
             {rows}
             starts={starts.map((s) => s.r)}
             {kinds}

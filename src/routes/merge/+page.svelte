@@ -6,32 +6,28 @@
   import MergeResult from "$lib/components/MergeResult.svelte";
   import OverviewRuler, { type Mark } from "$lib/components/OverviewRuler.svelte";
   import {
-    clampCaret,
-    deleteBackward,
-    deleteForward,
+    addCursorAtNextMatch,
+    addCursorVertical,
+    applyBackspace,
+    applyCaret,
+    applyCollapse,
+    applyDelete,
+    applyDeleteWord,
+    applyEnter,
+    applyInsert,
+    applyMove,
+    applyMoveLines,
+    applyRegionLines,
+    applySelectAll,
+    applySelectLine,
+    applySelectWord,
+    copyText,
+    hasSelection,
+    singleCursor,
     docText,
     emptyHistory,
-    insertLineBreak,
-    insertText,
-    moveLeft,
-    moveLineEnd,
-    moveLineStart,
-    moveRight,
-    moveVertical,
-    deleteRange,
-    deleteWord,
-    insertOverRange,
-    lineRange,
-    moveByLines,
-    wordLeft,
-    wordRange,
-    wordRight,
     push,
     redo,
-    sameCaret,
-    selectAll,
-    selectedText,
-    setRegionLines,
     undo,
     type Caret,
     type DocState,
@@ -57,7 +53,6 @@
   let ds = $state<DocState | null>(null);
   let hist = $state<History>(emptyHistory());
   /** The fixed end of the selection; null when there is none. */
-  let anchor = $state<Caret | null>(null);
   /** Region → where its text came from; also marks a conflict as settled. */
   let origin = $state<Record<number, string>>({});
   let current = $state(0); // which conflict the prev/next buttons are on
@@ -157,127 +152,83 @@
   });
 
   // --- editing --------------------------------------------------------------
-  /** Apply an intent from the result pane to the model, recording undo. */
-  /** A live selection, or null. */
-  function selection(): { from: Caret; to: Caret } | null {
-    if (!ds || !anchor || sameCaret(anchor, ds.caret)) return null;
-    return { from: anchor, to: ds.caret };
-  }
-  /** Every edit clears the selection: it has been consumed or replaced. */
+  /** Apply an intent from the result pane to the model, recording undo.
+   *
+   *  Every branch is one call into the model: it owns the cursors, so an edit
+   *  with three carets down is the same code as with one. */
   function apply(a: MergeAction) {
     if (!ds) return;
     const before = ds;
-    const sel = selection();
+    /** Record undo, take the new state, and settle every region an edit reached
+     *  — with several cursors that can be more than one. */
+    const edit = (next: DocState, coalesce = false) => {
+      hist = push(hist, before, coalesce);
+      for (const c of before.cursors) touched(c.head.region);
+      ds = next;
+    };
     switch (a.t) {
       case "insert":
-        hist = push(hist, before, typing && !sel);
+        edit(applyInsert(before, a.text), typing && !hasSelection(before));
         typing = true;
-        ds = sel
-          ? insertOverRange(before, sel.from, sel.to, a.text)
-          : insertText(before, a.text);
-        anchor = null;
-        touched(before.caret.region);
         break;
       case "enter":
-        hist = push(hist, before, false);
         typing = false;
-        ds = sel ? insertOverRange(before, sel.from, sel.to, "\n") : insertLineBreak(before);
-        anchor = null;
-        touched(before.caret.region);
+        edit(applyEnter(before));
         break;
       case "backspace":
-        hist = push(hist, before, false);
         typing = false;
-        ds = sel ? deleteRange(before, sel.from, sel.to) : deleteBackward(before);
-        anchor = null;
-        touched(before.caret.region);
+        edit(applyBackspace(before));
         break;
       case "delete":
-        hist = push(hist, before, false);
         typing = false;
-        ds = sel ? deleteRange(before, sel.from, sel.to) : deleteForward(before);
-        anchor = null;
-        touched(before.caret.region);
+        edit(applyDelete(before));
         break;
-      case "move": {
+      case "deleteWord":
         typing = false;
-        const c = before.caret;
-        const next =
-          a.dir === "left"
-            ? moveLeft(before.doc, c)
-            : a.dir === "right"
-              ? moveRight(before.doc, c)
-              : a.dir === "up"
-                ? moveVertical(before.doc, c, -1)
-                : a.dir === "down"
-                  ? moveVertical(before.doc, c, 1)
-                  : a.dir === "home"
-                    ? moveLineStart(before.doc, c)
-                    : a.dir === "end"
-                      ? moveLineEnd(before.doc, c)
-                      : a.dir === "wordLeft"
-                        ? wordLeft(before.doc, c)
-                        : wordRight(before.doc, c);
-        if (a.extend) anchor = anchor ?? before.caret;
-        else anchor = null;
-        ds = { doc: before.doc, caret: next };
+        edit(applyDeleteWord(before, a.forward));
         break;
-      }
+      case "move":
+        typing = false;
+        ds = applyMove(before, a.dir, a.extend);
+        break;
+      case "moveLines":
+        typing = false;
+        ds = applyMoveLines(before, a.delta, a.extend);
+        break;
       case "caret":
         typing = false;
-        if (a.extend) anchor = anchor ?? before.caret;
-        else anchor = null;
-        ds = { doc: before.doc, caret: clampCaret(before.doc, a.caret) };
+        ds = applyCaret(before, a.caret, { extend: a.extend, add: a.add });
         break;
-      case "moveLines": {
+      case "addCursor":
         typing = false;
-        if (a.extend) anchor = anchor ?? before.caret;
-        else anchor = null;
-        ds = { doc: before.doc, caret: moveByLines(before.doc, before.caret, a.delta) };
+        ds = addCursorVertical(before, a.dir);
         break;
-      }
-      case "selectWord": {
+      case "addCursorMatch":
         typing = false;
-        const w = wordRange(before.doc, a.caret);
-        anchor = w.from;
-        ds = { doc: before.doc, caret: w.to };
+        ds = addCursorAtNextMatch(before);
         break;
-      }
-      case "selectLine": {
+      case "collapse":
         typing = false;
-        const l = lineRange(before.doc, a.caret);
-        anchor = l.from;
-        ds = { doc: before.doc, caret: l.to };
+        ds = applyCollapse(before);
         break;
-      }
-      case "deleteWord": {
-        hist = push(hist, before, false);
+      case "selectWord":
         typing = false;
-        ds = sel ? deleteRange(before, sel.from, sel.to) : deleteWord(before, a.forward);
-        anchor = null;
-        touched(before.caret.region);
+        ds = applySelectWord(before, a.caret, a.add);
         break;
-      }
-      case "selectAll": {
+      case "selectLine":
         typing = false;
-        const all = selectAll(before.doc);
-        if (all) {
-          anchor = all.anchor;
-          ds = { doc: before.doc, caret: all.head };
-        }
+        ds = applySelectLine(before, a.caret, a.add);
         break;
-      }
+      case "selectAll":
+        typing = false;
+        ds = applySelectAll(before);
+        break;
       case "copy": {
         typing = false;
-        if (!sel) break;
-        const text = selectedText(before.doc, sel.from, sel.to);
+        const text = copyText(before);
+        if (!text) break;
         void setClipboard(text).catch((e) => (error = String(e)));
-        if (a.cut) {
-          hist = push(hist, before, false);
-          ds = deleteRange(before, sel.from, sel.to);
-          anchor = null;
-          touched(before.caret.region);
-        }
+        if (a.cut) edit(applyBackspace(before));
         break;
       }
       case "undo": {
@@ -286,7 +237,6 @@
         if (u) {
           ds = u.state;
           hist = u.history;
-          anchor = null;
         }
         break;
       }
@@ -299,7 +249,6 @@
         if (r) {
           ds = r.state;
           hist = r.history;
-          anchor = null;
         }
         break;
       }
@@ -319,8 +268,7 @@
       what === "both" ? [...r.theirs, ...r.ours] : what === "base" ? r.base : r[what];
     hist = push(hist, ds, false);
     typing = false;
-    ds = setRegionLines(ds, i, lines);
-    anchor = null;
+    ds = applyRegionLines(ds, i, lines);
     origin = { ...origin, [i]: what };
   }
   /** Back to an undecided conflict. */
@@ -328,8 +276,7 @@
     if (!ds) return;
     hist = push(hist, ds, false);
     typing = false;
-    ds = setRegionLines(ds, i, []);
-    anchor = null;
+    ds = applyRegionLines(ds, i, []);
     const next = { ...origin };
     delete next[i];
     origin = next;
@@ -369,7 +316,10 @@
   );
   /** Alt+Up / Alt+Down step through the changes from anywhere in the window. */
   function onWindowKey(e: KeyboardEvent) {
-    if (!e.altKey || e.ctrlKey || e.metaKey) return;
+    // Whoever handled it first wins: the editor claims alt+shift+arrows for its
+    // extra carets, and preventDefault does not stop the event bubbling to here.
+    if (e.defaultPrevented) return;
+    if (!e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
     if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
     e.preventDefault();
     goTo(current + (e.key === "ArrowDown" ? 1 : -1));
@@ -476,8 +426,8 @@
     try {
       data = await invoke<MergeData>("merge_data", { id });
       // The result starts as the auto-merge; conflicts start empty and unsettled.
-      ds = {
-        doc: {
+      ds = singleCursor(
+        {
           regions: data.regions.map((r, i) => ({
             region: i,
             kind: r.kind === "conflict" ? "vs" : r.kind === "same" ? "" : "add",
@@ -485,8 +435,8 @@
             lines: r.kind === "conflict" ? [] : r.lines.slice(),
           })),
         },
-        caret: { region: 0, line: 0, col: 0 },
-      };
+        { region: 0, line: 0, col: 0 },
+      );
       void recolor(data);
       // Land on the first thing the merge touched, conflict or not: a clean
       // auto-merge still has to SHOW what it brought in.
@@ -630,7 +580,6 @@
         <div class="resultcol">
           <MergeResult
             docState={ds}
-            {anchor}
             {rows}
             starts={starts.map((s) => s.m)}
             {kinds}

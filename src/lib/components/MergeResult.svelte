@@ -6,15 +6,15 @@
   //! keys and IME work: composition happens in a real text control positioned at
   //! the caret, and we take the finished text from it. Nothing the browser does to
   //! that textarea can touch the document.
-  import { tick, type Snippet } from "svelte";
-  import { orderCarets, sameCaret, type Caret, type DocState, type MergeAction } from "$lib/mergedoc";
+  import { onMount, tick, type Snippet } from "svelte";
+  import { selectionsOf, type Caret, type DocState, type MergeAction } from "$lib/mergedoc";
+  import { shortcuts } from "$lib/shortcuts.svelte";
   import type { TokenRun } from "$lib/syntax";
 
   // NOT named `state`: that shadows the $state rune, and `$state` would then read
   // as a store subscription.
   let {
     docState,
-    anchor,
     rows,
     starts,
     kinds,
@@ -24,9 +24,9 @@
     toolbar,
     onAction,
   }: {
+    /** The document and every cursor in it. Selections live here too, so the
+     *  pane cannot draw a selection the model does not have. */
     docState: DocState;
-    /** The fixed end of the selection; null when there is none. */
-    anchor: Caret | null;
     /** Aligned row count per region index (max of the three panes). */
     rows: number[];
     /** First line number of each region in the merged file. */
@@ -63,19 +63,27 @@
     ),
   );
 
-  /** The caret's row, and the text before it on that row. */
-  const caretAt = $derived.by(() => {
-    const i = docState.doc.regions.findIndex((r) => r.region === docState.caret.region);
-    if (i < 0) return null;
-    const r = docState.doc.regions[i];
-    const top =
-      tops[i] + (r.conflict ? toolbarHeight : 0) + Math.min(docState.caret.line, r.lines.length) * lh;
-    const line = r.lines[docState.caret.line] ?? "";
-    return { top, prefix: line.slice(0, docState.caret.col) };
+  /** Each caret's row and the text before it on that row — one entry per cursor,
+   *  in document order, with the focus one flagged (that is the one the view
+   *  follows and where the input sink sits). */
+  const caretsAt = $derived.by(() => {
+    return docState.cursors.map((cur, n) => {
+      const c = cur.head;
+      const i = docState.doc.regions.findIndex((r) => r.region === c.region);
+      if (i < 0) return null;
+      const r = docState.doc.regions[i];
+      const top = tops[i] + (r.conflict ? toolbarHeight : 0) + Math.min(c.line, r.lines.length) * lh;
+      const line = r.lines[c.line] ?? "";
+      return { top, prefix: line.slice(0, c.col), focus: n === docState.focus };
+    });
   });
+  /** The focus caret: what scrolling and the input sink follow. */
+  const caretAt = $derived(caretsAt[docState.focus] ?? caretsAt.find((c) => c) ?? null);
 
   let probe: HTMLSpanElement | undefined = $state();
-  let caretLeft = $state(0);
+  /** x of each caret, measured — same index as `caretsAt`. */
+  let caretLefts = $state<number[]>([]);
+  const caretLeft = $derived(caretLefts[docState.focus] ?? 0);
   /** The row height the BROWSER ended up with, which is not `lineHeight`: at a
    *  fractional CSS height (12px * 1.45 = 17.4) the layout snaps every row to a
    *  device-pixel multiple — 17.3906 at 125% scaling. Positioning the caret at
@@ -100,10 +108,16 @@
     return code ? code.offsetLeft : 0;
   }
 
-  /** Rectangles covering the selection, one per selected line. */
+  /** Rectangles covering the selections, one per selected line — every cursor's,
+   *  so N selections show at once. */
   const bands = $derived.by(() => {
-    if (!anchor || sameCaret(anchor, docState.caret) || !probe) return [];
-    const { from, to } = orderCarets(docState.doc, anchor, docState.caret);
+    if (!probe) return [];
+    const out: { top: number; left: number; width: number }[] = [];
+    for (const { from, to } of selectionsOf(docState)) out.push(...bandsFor(from, to));
+    return out;
+  });
+
+  function bandsFor(from: Caret, to: Caret): { top: number; left: number; width: number }[] {
     const fi = docState.doc.regions.findIndex((r) => r.region === from.region);
     const ti = docState.doc.regions.findIndex((r) => r.region === to.region);
     if (fi < 0 || ti < 0) return [];
@@ -127,16 +141,23 @@
       }
     }
     return out;
-  });
+  }
 
-  // Re-measure whenever the caret or the text under it changes.
+  // Re-measure whenever a caret or the text under it changes.
   $effect(() => {
-    const c = caretAt;
-    if (!c || !probe) return;
-    caretLeft = gutter() + widthOf(c.prefix);
+    const cs = caretsAt;
+    if (!probe) return;
+    const gut = gutter();
+    caretLefts = cs.map((c) => (c ? gut + widthOf(c.prefix) : 0));
     const row = pane?.querySelector(".rl") as HTMLElement | null;
     const h = row?.getBoundingClientRect().height ?? 0;
     if (h > 0 && Math.abs(h - rowH) > 0.001) rowH = h;
+  });
+
+  // The editor's own bindings (add a caret above/below) are rebindable like the
+  // rest, and this pane lives in its own window — so the registry is loaded here.
+  onMount(() => {
+    void shortcuts.init();
   });
 
   /** Keep the caret visible without yanking the view around. */
@@ -233,6 +254,11 @@
       act({ t: "selectWord", caret });
       return;
     }
+    if (e.altKey) {
+      // Alt-click drops another cursor without disturbing the ones already down.
+      act({ t: "caret", caret, add: true });
+      return;
+    }
     dragging = true;
     lastMouse = { x: e.clientX, y: e.clientY };
     act({ t: "caret", caret, extend: e.shiftKey });
@@ -269,6 +295,26 @@
 
   function onKey(e: KeyboardEvent) {
     if (composing) return;
+    // The editor's own bindings first: they are the only ones that may claim an
+    // Alt combination, which otherwise belongs to the window.
+    const bound = shortcuts.match(e, ["editor"]);
+    if (bound === "addCaretAbove" || bound === "addCaretBelow") {
+      e.preventDefault();
+      act({ t: "addCursor", dir: bound === "addCaretAbove" ? -1 : 1 });
+      return;
+    }
+    if (bound === "addCaretNextMatch") {
+      e.preventDefault();
+      act({ t: "addCursorMatch" });
+      return;
+    }
+    if (e.key === "Escape" && docState.cursors.length > 1) {
+      // Back to one caret. Only when there is something to collapse, so Escape
+      // keeps whatever meaning the window gives it otherwise.
+      e.preventDefault();
+      act({ t: "collapse" });
+      return;
+    }
     // Alt combinations belong to the window (change navigation); let them bubble.
     // Typed characters arrive through `input`, not keydown, so nothing is lost —
     // including AltGr, which reports as ctrl+alt.
@@ -427,9 +473,15 @@
     <div class="sel" style="top:{b.top}px; left:{b.left}px; width:{b.width}px"></div>
   {/each}
 
-  {#if caretAt}
-    <div class="caret" style="top:{caretAt.top}px; left:{caretLeft}px"></div>
-  {/if}
+  {#each caretsAt as c, n (n)}
+    {#if c}
+      <div
+        class="caret"
+        class:extra={!c.focus}
+        style="top:{c.top}px; left:{caretLefts[n] ?? 0}px"
+      ></div>
+    {/if}
+  {/each}
 
   <!-- The input sink: invisible, but a real text control at the caret, so dead
        keys and IME candidate windows behave normally. -->
@@ -563,6 +615,11 @@
     height: var(--lh);
     background: rgba(217, 141, 58, 0.28);
     pointer-events: none;
+  }
+  /* An added caret is the same caret, a little dimmer, so the one the view
+     follows is still findable in a column of them. */
+  .caret.extra {
+    opacity: 0.75;
   }
   /* Solid, never blinking: a blinking caret is hard to follow while it moves. */
   .caret {
