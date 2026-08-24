@@ -401,6 +401,8 @@ export const p4 = {
   login: (conn: P4Conn, password: string) => g<void>("p4_login", { conn, password }),
   trust: (conn: P4Conn) => g<void>("p4_trust", { conn }),
   opened: (conn: P4Conn, change: string) => call("p4_opened", { conn, change }),
+  /** Depot paths opened for edit but identical to the depot (`diff -sr`). */
+  unchangedOpen: (conn: P4Conn) => g<string[]>("p4_unchanged_open", { conn }),
   diffLocal: (conn: P4Conn, depotFile: string) => g<string>("p4_diff_local", { conn, depotFile }),
   diffOffline: (conn: P4Conn, depotFile: string) =>
     g<string>("p4_diff_local_forced", { conn, depotFile }),

@@ -52,6 +52,9 @@ let lastUnshelve: UnshelveResult | null = null;
 // Depot paths p4 is holding a resolve on. `p4 opened` says nothing about resolve
 // state, so a conflicted file is indistinguishable from a plain edit without this.
 let unresolved = $state<Set<string>>(new Set());
+// Files open for edit whose content matches the depot: nothing to submit. Empty
+// until the first answer, so a row is only ever marked on evidence.
+let unchanged = $state<Set<string>>(new Set());
 // Fingerprint of `p4 opened` from the last poll; null = no baseline yet.
 let openedFingerprint: string | null = null;
 
@@ -386,6 +389,7 @@ export const pending = {
     if (!h.connected() || !conn.client) {
       reviews = {};
       unresolved = new Set();
+      unchanged = new Set();
       version++; // re-run the derived getters (clears the list on disconnect)
       return;
     }
@@ -401,6 +405,7 @@ export const pending = {
     pending.loadUnresolved();
     pending.loadShelved();
     pending.loadOpenCounts();
+    pending.loadUnchanged();
   },
 
   /** Cheap change-detection poll, run at keepalive rate: ONE `p4 opened` over
@@ -427,6 +432,7 @@ export const pending = {
     void pending.loadReviews();
     void pending.loadShelved();
     void pending.loadUnresolved();
+    void pending.loadUnchanged();
 
     if (fp === openedFingerprint) return;
     const first = openedFingerprint === null;
@@ -521,6 +527,31 @@ export const pending = {
   /** True when p4 is holding a resolve on this depot file. */
   needsResolve(depotFile: string): boolean {
     return unresolved.has(depotFile);
+  },
+
+  /** Which opened files are byte-identical to the depot — one `p4 diff -sr` for
+   *  the whole workspace (measured: 0.21s over 21 files, binaries included). */
+  async loadUnchanged() {
+    if (!h || !h.connected() || !h.conn().client) return;
+    const conn = h.conn();
+    try {
+      const files = await p4.unchangedOpen(conn);
+      if (h.conn().client !== conn.client) return; // workspace switched mid-fetch
+      unchanged = new Set(files);
+    } catch {
+      unchanged = new Set(); // no marker rather than a stale one
+    }
+  },
+  /** True when this file is open for edit but identical to the depot revision —
+   *  a checkout with nothing in it. Only `edit`/`integrate` files can qualify:
+   *  an `add` has no depot revision to match, a `delete` is meant to be missing,
+   *  and p4 lists neither, so nothing else is ever marked. */
+  isUnchanged(depotFile: string): boolean {
+    return unchanged.has(depotFile);
+  },
+  /** How many of a changelist's files have nothing in them. */
+  unchangedCount(files: { depotFile?: unknown }[]): number {
+    return files.filter((f) => unchanged.has(String(f.depotFile))).length;
   },
 
   /** Fetch the Swarm review status for every numbered changelist (the review is

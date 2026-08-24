@@ -9,6 +9,7 @@
   import { onMount, tick, type Snippet } from "svelte";
   import { selectionsOf, type Caret, type DocState, type MergeAction } from "$lib/mergedoc";
   import { shortcuts } from "$lib/shortcuts.svelte";
+  import { visualize } from "$lib/invisibles";
   import type { TokenRun } from "$lib/syntax";
 
   // NOT named `state`: that shadows the $state rune, and `$state` would then read
@@ -22,6 +23,7 @@
     lineHeight,
     toolbarHeight,
     toolbar,
+    showInvisibles = false,
     onAction,
   }: {
     /** The document and every cursor in it. Selections live here too, so the
@@ -38,6 +40,9 @@
     toolbarHeight: number;
     /** Rendered inside a conflict region, above its lines. */
     toolbar: Snippet<[number]>;
+    /** Draw spaces and tabs. Widths are unchanged by design (see invisibles.ts),
+     *  so the caret and click mapping are unaffected. */
+    showInvisibles?: boolean;
     onAction: (a: MergeAction) => void;
   } = $props();
 
@@ -413,8 +418,11 @@
 </script>
 
 {#snippet codeOf(line: string)}
-  {#if tokens.get(line)}{#each tokens.get(line) ?? [] as run}<span style:color={run.color}
-        >{run.content}</span
+  {#if showInvisibles}{#each visualize(tokens.get(line), line) as seg}<span
+        style:color={seg.color}
+        class:ghost={seg.ghost}>{seg.text}</span
+      >{/each}{:else if tokens.get(line)}{#each tokens.get(line) ?? [] as run}<span
+        style:color={run.color}>{run.content}</span
       >{/each}{:else}{line}{/if}
 {/snippet}
 
@@ -615,6 +623,11 @@
     height: var(--lh);
     background: rgba(217, 141, 58, 0.28);
     pointer-events: none;
+  }
+  /* Whitespace marks: visible, never competing with the code. */
+  .ghost {
+    color: var(--dim, #8a8a8a);
+    opacity: 0.55;
   }
   /* An added caret is the same caret, a little dimmer, so the one the view
      follows is still findable in a column of them. */

@@ -11,7 +11,9 @@
   import { onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { getCurrentWindow } from "@tauri-apps/api/window";
-  import { diffLines, type DiffRow } from "$lib/linediff";
+  import { diffLines, lineEndings, lineKey, type DiffRow } from "$lib/linediff";
+  import { endingLabel, visualize } from "$lib/invisibles";
+  import { cacheGet, cacheSet } from "$lib/store.svelte";
   import { langForFile, tokenizeLines, type TokenRun } from "$lib/syntax";
   import MergeResult from "$lib/components/MergeResult.svelte";
   import OverviewRuler, { type Mark } from "$lib/components/OverviewRuler.svelte";
@@ -119,6 +121,33 @@
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
   }
+  // --- view options ----------------------------------------------------------
+  // Persisted through the store (authoritative: SQLite, with localStorage only as
+  // an accelerator), because a preference that forgets itself between windows is
+  // worse than no preference — the editor choice already taught us that.
+  let ignoreWs = $state(false);
+  let invisibles = $state(false);
+  /** Line endings of the two sides, for the header. The diff strips CR before
+   *  comparing lines, so a file that differs ONLY in line endings shows no diff
+   *  at all — this is where that becomes visible instead of mysterious. */
+  let endings = $state({ left: "", right: "" });
+
+  async function loadOptions() {
+    ignoreWs = (await cacheGet("nav", "diff-ignore-ws")) === "1";
+    invisibles = (await cacheGet("nav", "diff-invisibles")) === "1";
+  }
+  function setIgnoreWs(v: boolean) {
+    ignoreWs = v;
+    cacheSet("nav", "diff-ignore-ws", v ? "1" : "0");
+    // The comparison changed, so the blocks have to be recomputed from the text
+    // that is on screen now (edits included).
+    if (ds) rebuild(docText(ds.doc), absoluteLine());
+  }
+  function setInvisibles(v: boolean) {
+    invisibles = v;
+    cacheSet("nav", "diff-invisibles", v ? "1" : "0");
+  }
+
   let dirty = $state(false);
   let saving = $state(false);
   let error = $state("");
@@ -127,11 +156,18 @@
   let current = $state(0);
   let typing = false;
 
-  /** Do the two sides of block `i` currently agree? */
+  /** Do the two sides of block `i` currently agree? Under the same rule the diff
+   *  itself used, or a block would count as changed while its rows showed as
+   *  unchanged. */
   function agrees(i: number): boolean {
     const b = blocks[i];
     const right = ds?.doc.regions[i]?.lines ?? [];
-    return !!b && right.length === b.left.length && right.every((l, k) => l === b.left[k]);
+    const opts = { ignoreWhitespace: ignoreWs };
+    return (
+      !!b &&
+      right.length === b.left.length &&
+      right.every((l, k) => lineKey(l, opts) === lineKey(b.left[k], opts))
+    );
   }
   const settled = $derived(blocks.map((_, i) => agrees(i)));
   const changes = $derived(blocks.map((_, i) => (settled[i] ? -1 : i)).filter((i) => i >= 0));
@@ -194,7 +230,8 @@
    *  structure. */
   function rebuild(rightText: string, caret: Caret | number, col = 0) {
 initSplit(leftText.trim() === "");
-    blocks = toBlocks(diffLines(leftText, rightText));
+    blocks = toBlocks(diffLines(leftText, rightText, { ignoreWhitespace: ignoreWs }));
+    endings = { left: endingLabel(lineEndings(leftText)), right: endingLabel(lineEndings(rightText)) };
     const regions = blocks.map((b, i) => ({
       region: i,
       kind: b.kind === "same" ? "" : "add",
@@ -489,6 +526,8 @@ initSplit(leftText.trim() === "");
   }
 
   onMount(async () => {
+    // Before the first diff, so the very first blocks already honour the option.
+    await loadOptions();
     try {
       const [l, r] = await Promise.all([
         invoke<string>("read_text_file", { path: leftPath }),
@@ -515,7 +554,9 @@ initSplit(leftText.trim() === "");
     <div class="line k-{kind}"><span class="mk">{kind === "del" ? "-" : ""}</span><span class="ln"
         >{from + k}</span
       ><span class="src"
-        >{#if tokens.get(line)}{#each tokens.get(line) ?? [] as run}<span
+        >{#if invisibles}{#each visualize(tokens.get(line), line) as seg}<span
+              style:color={seg.color} class:ghost={seg.ghost}>{seg.text}</span
+            >{/each}{:else if tokens.get(line)}{#each tokens.get(line) ?? [] as run}<span
               style:color={run.color}>{run.content}</span>{/each}{:else}{line || " "}{/if}</span
       ></div>
   {/each}
@@ -544,6 +585,24 @@ initSplit(leftText.trim() === "");
         : " · read-only"}
     </span>
     <span class="grow"></span>
+    <label class="opt" title="Ignore whitespace: lines that differ only in spaces, tabs or indentation count as unchanged. The text shown is always the real text.">
+      <input type="checkbox" checked={ignoreWs} onchange={(e) => setIgnoreWs(e.currentTarget.checked)} />
+      ignore spaces
+    </label>
+    <label class="opt" title="Show spaces as · and tabs as →, at their real width.">
+      <input type="checkbox" checked={invisibles} onchange={(e) => setInvisibles(e.currentTarget.checked)} />
+      show spaces
+    </label>
+    {#if invisibles && (endings.left || endings.right)}
+      <!-- The one invisible difference the diff cannot show as a change: CR is
+           stripped before lines are compared, so a file that differs only in line
+           endings looks identical here. -->
+      <span class="dim" title="Line endings of each side. The diff ignores them, so a difference here never shows as a changed line.">
+        {endings.left && endings.right && endings.left !== endings.right
+          ? `${endings.left} → ${endings.right}`
+          : (endings.right || endings.left)}
+      </span>
+    {/if}
     <span class="legend dim">
       <span class="chip add">+ local</span><span class="chip del">− other side</span>
     </span>
@@ -627,6 +686,7 @@ initSplit(leftText.trim() === "");
             starts={starts.map((s) => s.r)}
             {kinds}
             {tokens}
+            showInvisibles={invisibles}
             lineHeight={LH}
             toolbarHeight={TOOLBAR}
             toolbar={noToolbar}
@@ -677,6 +737,21 @@ initSplit(leftText.trim() === "");
   }
   .name {
     font-weight: 600;
+  }
+  .opt {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    color: var(--dim, #8a8a8a);
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  /* Whitespace marks: present, but never competing with the code. */
+  .src :global(.ghost) {
+    color: var(--dim, #8a8a8a);
+    opacity: 0.55;
   }
   .legend {
     display: flex;

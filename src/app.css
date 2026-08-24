@@ -11,6 +11,7 @@
   --have: #1f9d55;
   --have-bg: #e6f6ec;
   --warn: #c0392b;
+  --writable: #a9761c;
   --scrollbar: #c9c9d0;
   --scrollbar-hover: #ababb4;
   --mono: "Cascadia Code", "Consolas", "SFMono-Regular", ui-monospace, monospace;
@@ -35,6 +36,7 @@
     --have: #4ecb8d;
     --have-bg: #1e3328;
     --warn: #ff6b5e;
+  --writable: #e0b34d;
     --scrollbar: #45454c;
     --scrollbar-hover: #5a5a63;
   }

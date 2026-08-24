@@ -148,6 +148,7 @@ pub fn run() {
             commands::p4_set_description,
             commands::p4_revert,
             commands::p4_shelved_changes,
+            commands::p4_unchanged_open,
             commands::p4_file_holders,
             commands::p4_open_files,
             commands::p4_move_file,

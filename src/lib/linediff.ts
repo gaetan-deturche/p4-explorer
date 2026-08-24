@@ -15,14 +15,43 @@ export interface DiffRow {
   rh?: [number, number];
 }
 
+/** How lines are compared. The rows always carry the ORIGINAL text; only the
+ *  comparison changes, so "ignore whitespace" hides a re-indent from the diff
+ *  without hiding it from the reader. */
+export interface DiffOptions {
+  /** Treat lines that differ only in whitespace as equal. Runs of whitespace
+   *  collapse to one space and the ends are trimmed, which covers a re-indent,
+   *  tabs-to-spaces, and trailing space alike. */
+  ignoreWhitespace?: boolean;
+}
+
+/** The string two lines are compared BY. */
+export function lineKey(line: string, opts?: DiffOptions): string {
+  return opts?.ignoreWhitespace ? line.replace(/\s+/g, " ").trim() : line;
+}
+
+/** Which line endings a file uses — the one invisible difference that survives
+ *  every comparison here, since the diff strips CR before looking at a line. It
+ *  is reported so the viewer can say so out loud. */
+export function lineEndings(text: string): "crlf" | "lf" | "mixed" | "none" {
+  const crlf = (text.match(/\r\n/g) ?? []).length;
+  const lf = (text.match(/\n/g) ?? []).length - crlf;
+  if (crlf && lf) return "mixed";
+  if (crlf) return "crlf";
+  if (lf) return "lf";
+  return "none";
+}
+
 function splitLines(s: string): string[] {
   const lines = s.split("\n");
   if (lines.length && lines[lines.length - 1] === "") lines.pop(); // trailing \n
   return lines.map((l) => (l.endsWith("\r") ? l.slice(0, -1) : l));
 }
 
-/** Intern lines to ints so the Myers inner loop compares numbers. */
-function intern(a: string[], b: string[]): { ia: Int32Array; ib: Int32Array } {
+/** Intern lines to ints so the Myers inner loop compares numbers. Interning by
+ *  the comparison KEY is what makes "ignore whitespace" work all the way down:
+ *  two lines with the same key get the same int and Myers calls them equal. */
+function intern(a: string[], b: string[], opts?: DiffOptions): { ia: Int32Array; ib: Int32Array } {
   const ids = new Map<string, number>();
   const get = (s: string) => {
     let v = ids.get(s);
@@ -34,8 +63,8 @@ function intern(a: string[], b: string[]): { ia: Int32Array; ib: Int32Array } {
   };
   const ia = new Int32Array(a.length);
   const ib = new Int32Array(b.length);
-  for (let i = 0; i < a.length; i++) ia[i] = get(a[i]);
-  for (let i = 0; i < b.length; i++) ib[i] = get(b[i]);
+  for (let i = 0; i < a.length; i++) ia[i] = get(lineKey(a[i], opts));
+  for (let i = 0; i < b.length; i++) ib[i] = get(lineKey(b[i], opts));
   return { ia, ib };
 }
 
@@ -134,22 +163,23 @@ function charRange(a: string, b: string): { la: [number, number]; lb: [number, n
 }
 
 /** Aligned side-by-side rows for two file contents. */
-export function diffLines(leftText: string, rightText: string): DiffRow[] {
+export function diffLines(leftText: string, rightText: string, opts?: DiffOptions): DiffRow[] {
   const a = splitLines(leftText);
   const b = splitLines(rightText);
+  const same = (x: string, y: string) => lineKey(x, opts) === lineKey(y, opts);
 
   // Trim common prefix/suffix before Myers — the dominant cost saver.
   let pre = 0;
   const maxPre = Math.min(a.length, b.length);
-  while (pre < maxPre && a[pre] === b[pre]) pre++;
+  while (pre < maxPre && same(a[pre], b[pre])) pre++;
   let sufA = a.length;
   let sufB = b.length;
-  while (sufA > pre && sufB > pre && a[sufA - 1] === b[sufB - 1]) {
+  while (sufA > pre && sufB > pre && same(a[sufA - 1], b[sufB - 1])) {
     sufA--;
     sufB--;
   }
 
-  const { ia, ib } = intern(a.slice(pre, sufA), b.slice(pre, sufB));
+  const { ia, ib } = intern(a.slice(pre, sufA), b.slice(pre, sufB), opts);
   const ops: Op[] = [];
   if (pre > 0) ops.push({ type: "same", count: pre });
   ops.push(...myers(ia, ib));

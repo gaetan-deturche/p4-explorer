@@ -15,6 +15,7 @@
     onOfflineDiff,
     onOpenOfflineDiff,
     needsResolve,
+  isUnchanged,
     onLocalFiles,
     onLocalFilesCached,
     onShelvedFiles,
@@ -42,6 +43,8 @@
     onOfflineDiff: (depotFile: string) => Promise<string>; // forced local-vs-server diff
     onOpenOfflineDiff: (depotFile: string) => void; // open the offline diff externally
     needsResolve: (depotFile: string) => boolean; // p4 is holding a resolve on it
+    // Open for edit but identical to the depot: a checkout with nothing in it.
+    isUnchanged: (depotFile: string) => boolean;
     contextChange: string; // the changelist whose context menu is open (highlight it)
     onLocalFiles: (change: string) => Promise<P4Record[]>; // opened (workspace) files
     // cached opened/shelved files (all cache layers, resolves in ~ms);
@@ -628,7 +631,21 @@
     >
       {fd?.open ? "▾" : "▸"}
     </button>
-    <span class="act act-{f.action}">{f.action ?? ""}</span>
+    <!-- `p4 diff -sr`: open for edit and byte-identical to the depot, so there is
+         nothing in it to submit. Its own status rather than a note beside "edit",
+         because that is what it is — and a status is where the eye already looks
+         to see what a row will do on submit.
+         "writable" rather than "unchanged": the checkout is what the file HAS
+         (it is checked out and writable), while having no changes is only true
+         until the next keystroke. A status should not read as a verdict. -->
+    {#if kind === "local" && isUnchanged(f.depotFile)}
+      <span
+        class="act act-unchanged"
+        title="Checked out and writable, but still identical to the depot revision — nothing to submit yet. Reverting it loses nothing."
+      >writable</span>
+    {:else}
+      <span class="act act-{f.action}">{f.action ?? ""}</span>
+    {/if}
     <span class="fpath"><span class="pfile">{sp.name}</span><span class="pdir dim">{sp.dir}</span></span>
     {#if kind === "local" && needsResolve(f.depotFile)}
       <span class="unres">needs resolve</span>
@@ -827,7 +844,11 @@
   .act {
     flex: none;
     text-transform: capitalize;
-    width: 4rem;
+    /* Wide enough for the longest status p4 can report. Measured at the row's
+       12px Segoe UI: "Move/Delete" is 68px and "Move/Add" 57px, against the 52px
+       that 4rem used to give (the root font is 13px) — both were overflowing into
+       the path column on any rename. 5.6rem = 72.8px, ~5px of slack. */
+    width: 5.6rem;
   }
   .act-add {
     color: var(--have);
@@ -841,6 +862,12 @@
   .act-desync {
     color: var(--text-dim);
     font-style: italic;
+  }
+  /* Its own hue: add is green, edit is blue, delete is red, and a checkout that
+     holds nothing yet is amber. Same size as every other status — "Writable" is
+     44px, well inside the column. */
+  .act-unchanged {
+    color: var(--writable);
   }
   .unres {
     flex: none;

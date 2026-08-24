@@ -31,6 +31,33 @@ pub async fn p4_opened(conn: P4Conn, change: String) -> Res {
     }
 }
 
+/// Depot paths of files opened for edit whose content is IDENTICAL to the depot
+/// revision (`diff -sr`).
+///
+/// Workspace-wide in one command — `p4 diff` takes no `-c`, and it is cheap
+/// anyway: 21 opened files, mostly binary .uasset, answered in 0.21s. Binaries
+/// are compared without needing `-t`, since the server answers from digests.
+///
+/// Only `edit`/`integrate` files can appear: an `add` has no depot revision to
+/// match and a `delete` is meant to be missing, so p4 lists neither. The caller
+/// therefore treats "not in this set" as "differs" only for the actions that
+/// have something to compare.
+#[tauri::command]
+pub async fn p4_unchanged_open(conn: P4Conn) -> Result<Vec<String>, String> {
+    if conn.client.is_empty() {
+        return Ok(Vec::new());
+    }
+    let (recs, _notes) = p4::run_full(&conn, &["diff", "-sr"])?;
+    Ok(unchanged_paths(&recs))
+}
+
+/// The depot paths out of a `diff -sr` answer.
+fn unchanged_paths(recs: &[p4::Record]) -> Vec<String> {
+    recs.iter()
+        .filter_map(|r| r.get("depotFile").and_then(|v| v.as_str()).map(str::to_string))
+        .collect()
+}
+
 /// Shelved files of a pending changelist (`describe -S -s`), one row per file.
 #[tauri::command]
 pub async fn p4_describe_shelved(conn: P4Conn, change: String) -> Res {
@@ -464,4 +491,43 @@ pub async fn p4_file_holders(conn: P4Conn, depot_file: String) -> Result<FileHol
     })
     .await
     .map_err(|e| format!("file-holders task failed: {e}"))?
+}
+
+#[cfg(test)]
+mod unchanged_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn rec(pairs: &[(&str, &str)]) -> p4::Record {
+        let mut m = p4::Record::default();
+        for (k, v) in pairs {
+            m.insert(k.to_string(), json!(v));
+        }
+        m
+    }
+
+    #[test]
+    fn reads_the_depot_paths_of_diff_sr() {
+        // The measured shape: one field record per file, depotFile + clientFile +
+        // rev + type.
+        let recs = vec![
+            rec(&[
+                ("depotFile", "//Curiosity/main/Curiosity.uproject"),
+                ("clientFile", "H:\\Dev\\Curiosity\\Games\\Curiosity\\Curiosity.uproject"),
+                ("rev", "61"),
+                ("type", "text+D"),
+            ]),
+            rec(&[("depotFile", "//depot/b.cpp"), ("rev", "3")]),
+        ];
+        assert_eq!(
+            unchanged_paths(&recs),
+            vec!["//Curiosity/main/Curiosity.uproject", "//depot/b.cpp"]
+        );
+    }
+
+    #[test]
+    fn an_empty_answer_means_everything_differs() {
+        let none: Vec<p4::Record> = Vec::new();
+        assert!(unchanged_paths(&none).is_empty());
+    }
 }
