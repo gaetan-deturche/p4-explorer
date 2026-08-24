@@ -28,7 +28,10 @@
   import { cmdlog } from "$lib/cmdlog.svelte";
   import { notifications } from "$lib/notifications.svelte";
   import { editor } from "$lib/editor.svelte";
-  import { loadLastServer, saveView, loadViews, saveViews, type Views } from "$lib/nav";
+  import { loadLastServer, saveView, loadViews, saveViews, type Views,
+  loadStreamsDepotOnly,
+  saveStreamsDepotOnly,
+} from "$lib/nav";
   import MenuBar from "$lib/components/MenuBar.svelte";
   import Toolbar from "$lib/components/Toolbar.svelte";
   import { shortcuts, typingInto, type Scope } from "$lib/shortcuts.svelte";
@@ -147,6 +150,8 @@
   // lives on the right INSIDE the History tab.
   let leftW = $state(300);
   let detailsW = $state(400);
+  // Streams tab: list only the current workspace's depot (persisted, default on).
+  let streamsDepotOnly = $state(loadStreamsDepotOnly());
   function startResize(e: PointerEvent, which: "left" | "details") {
     e.preventDefault();
     const startX = e.clientX;
@@ -1095,6 +1100,11 @@
           rows={browse.streamRows}
           loading={browse.streamsLoading}
           currentStream={browse.rootPath}
+          depotOnly={streamsDepotOnly}
+          onDepotOnly={(v: boolean) => {
+            streamsDepotOnly = v;
+            saveStreamsDepotOnly(v);
+          }}
           onContext={onStreamContext}
         />
       {:else if centerTab === "log"}

@@ -5,20 +5,39 @@
     rows,
     loading,
     currentStream,
+    depotOnly,
+    onDepotOnly,
     onContext,
   }: {
     rows: P4Record[];
     loading: boolean;
     currentStream: string;
+    /** List only the current workspace's depot. */
+    depotOnly: boolean;
+    onDepotOnly: (v: boolean) => void;
     onContext: (stream: string, e: MouseEvent) => void;
   } = $props();
+
+  /** The depot a stream path lives in: `//Curiosity/main` -> `//Curiosity`. */
+  function depotOf(stream: string): string {
+    const m = /^\/\/([^/]+)\//.exec(stream ?? "");
+    return m ? "//" + m[1] : "";
+  }
+  const currentDepot = $derived(depotOf(currentStream));
+  /** The rows actually listed. Scoping to the depot is the default because the
+   *  rest cannot be switched to from here anyway: measured on this server, 214
+   *  streams across 26 depots, of which the project at hand owns 7 — and 21 of
+   *  those 214 are named "main". */
+  const shown = $derived(
+    depotOnly && currentDepot ? rows.filter((s) => depotOf(s.Stream) === currentDepot) : rows,
+  );
 
   type SNode = { s: P4Record; children: SNode[] };
 
   // Build the stream hierarchy by Parent (mainlines are roots).
   const roots = $derived.by<SNode[]>(() => {
     const byPath = new Map<string, SNode>();
-    for (const s of rows) if (s.Stream) byPath.set(s.Stream, { s, children: [] });
+    for (const s of shown) if (s.Stream) byPath.set(s.Stream, { s, children: [] });
     const out: SNode[] = [];
     for (const node of byPath.values()) {
       const parent = node.s.Parent;
@@ -41,6 +60,25 @@
 </script>
 
 <div class="panel">
+  <div class="bar">
+    <label title={currentDepot
+      ? `List only ${currentDepot}. Off, every stream on the server is listed — including other projects', which this workspace cannot switch to.`
+      : "No workspace stream to scope to"}>
+      <input
+        type="checkbox"
+        checked={depotOnly}
+        disabled={!currentDepot}
+        onchange={(e) => onDepotOnly(e.currentTarget.checked)}
+      />
+      this depot{currentDepot ? ` (${currentDepot})` : ""}
+    </label>
+    <span class="grow"></span>
+    <span class="dim">
+      {shown.length === rows.length
+        ? `${rows.length} stream${rows.length === 1 ? "" : "s"}`
+        : `${shown.length} of ${rows.length}`}
+    </span>
+  </div>
   <div class="scroll body">
     {#if loading}
       <div class="msg dim">Loading…</div>
@@ -74,6 +112,7 @@
     {/if}
     {#if n.s.Stream === currentStream}<span class="you">▸</span>{/if}
     <span class="sname">{n.s.Name ?? n.s.Stream}</span>
+    <span class="spath dim" title={n.s.Stream}>{n.s.Stream}</span>
     <span class="stype t-{n.s.Type}">{n.s.Type ?? ""}</span>
     <span class="sowner dim">{n.s.Owner ?? ""}</span>
   </div>
@@ -94,6 +133,31 @@
   .body {
     flex: 1;
     padding: 4px 0;
+  }
+  .bar {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 10px;
+    font-size: 11px;
+    border-bottom: 1px solid var(--border);
+  }
+  .bar label {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    cursor: pointer;
+  }
+  .grow {
+    flex: 1;
+  }
+  /* The stream path carries the depot, so two streams both called "main" are
+     told apart without hovering. Dim and shrinkable: the name leads. */
+  .spath {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-size: 11px;
   }
   .srow {
     display: flex;

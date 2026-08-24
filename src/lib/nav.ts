@@ -107,6 +107,18 @@ export function saveShowDeleted(v: boolean): void {
   set(SHOW_DELETED, v ? "1" : "0");
 }
 
+const STREAMS_DEPOT_ONLY = "streamsDepotOnly";
+/** Whether the Streams tab lists only the current workspace's depot. Defaults to
+ *  ON: this server carries 214 streams across 26 depots, 21 of them called
+ *  "main", and the ones outside the project at hand cannot be switched to
+ *  usefully. */
+export function loadStreamsDepotOnly(): boolean {
+  return get(STREAMS_DEPOT_ONLY) !== "0";
+}
+export function saveStreamsDepotOnly(v: boolean): void {
+  set(STREAMS_DEPOT_ONLY, v ? "1" : "0");
+}
+
 /** The last workspace (client) used on `server`, or "" if none. */
 export function loadClientFor(server: string): string {
   return server ? (get(clientKey(server)) ?? "") : "";
