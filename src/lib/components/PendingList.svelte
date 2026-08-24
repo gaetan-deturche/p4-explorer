@@ -657,7 +657,10 @@
   }
   .body {
     flex: 1;
-    padding: 2px 0;
+    /* Bottom only: top padding on a scroller leaves a band above a top:0 sticky
+       header — the header stops at the content edge, so rows scroll visibly
+       through it. That band was the few-pixel gap under the tab bar. */
+    padding: 0 0 2px;
   }
   .marquee {
     position: fixed;

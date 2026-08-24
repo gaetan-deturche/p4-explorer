@@ -604,7 +604,10 @@
     flex: 1;
     min-height: 0;
     overflow: auto;
-    padding: 2px 0;
+    /* Bottom only: top padding on a scroller leaves a band above a top:0 sticky
+       header — the header stops at the content edge, so rows scroll visibly
+       through it. Same fix as the pending list. */
+    padding: 0 0 2px;
   }
   .msg {
     padding: 8px 10px;
