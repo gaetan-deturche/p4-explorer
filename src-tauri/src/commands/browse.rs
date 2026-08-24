@@ -119,11 +119,14 @@ pub async fn p4_have_change(conn: P4Conn, path: String) -> Res {
     run(conn, v(&["changes", "-m", "1", &spec])).await
 }
 
-/// Latest submitted change for an EXACT spec, verbatim (no `/...` appended) —
-/// e.g. `//depot/file.cpp#have` to get a single file's synced changelist.
+/// Submitted changes for an EXACT spec, verbatim (no `/...` appended) — e.g.
+/// `//depot/file.cpp#have` for a file's synced changelist, or the file itself
+/// for every change that touched it. Appending `/...` to a file path matches
+/// nothing, which is why this exists alongside `p4_changes`.
 #[tauri::command]
-pub async fn p4_changes_exact(conn: P4Conn, spec: String) -> Res {
-    run(conn, v(&["changes", "-m", "1", "-s", "submitted", &spec])).await
+pub async fn p4_changes_exact(conn: P4Conn, spec: String, max: u32) -> Res {
+    let max = max.clamp(1, 1000).to_string();
+    run(conn, v(&["changes", "-l", "-m", &max, "-s", "submitted", &spec])).await
 }
 
 /// Full description of a changelist, exploded to one row per affected file.

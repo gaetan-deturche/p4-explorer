@@ -15,8 +15,6 @@ import {
   storeSetMem,
   hydrate,
   storeClearScope,
-  cacheGetSync,
-  cacheSet,
 } from "$lib/store.svelte";
 
 type Hooks = {
@@ -57,15 +55,21 @@ async function safe<T>(fn: () => Promise<T[]>): Promise<T[]> {
 
 const curMode = (): "folder" | "file" => (currentId.startsWith("R:") ? "file" : "folder");
 
-// Servers whose `filelog` can't be used (see selectFile). Remembered per server
-// so the failure is paid once, not on every file click; persisted so it survives
-// a restart. Cleared only by forgetting the server.
-const filelogKey = () => `filelog-unusable:${h?.conn().port ?? ""}`;
+// Servers whose `filelog` genuinely FAILED this session (see selectFile), so the
+// timeout is paid once rather than on every file click.
+//
+// It used to be persisted per server and cleared only by forgetting the server —
+// a permanent verdict from a single bad answer. On this depot the flag was set
+// and stuck while `filelog` answers in 0.1s, so every file history took the
+// fallback and came back empty. Session-only now: a restart re-tries, and the
+// cost of being wrong is one slow request instead of a feature that stays broken.
+const filelogFailed = new Set<string>();
+const serverKey = () => h?.conn().port ?? "";
 function filelogUnusable(): boolean {
-  return !!h && cacheGetSync("nav", filelogKey()) === "1";
+  return !!h && filelogFailed.has(serverKey());
 }
 function markFilelogUnusable(): void {
-  if (h) cacheSet("nav", filelogKey(), "1");
+  if (h) filelogFailed.add(serverKey());
 }
 
 // The stored entry for the current subject, read from the reactive map; null
@@ -200,6 +204,34 @@ export const history = {
     histVer++;
   },
 
+  /** A file's history from `p4 changes <file>` — the fallback when filelog cannot
+   *  answer. It queries the FILE: loadFolder appends `/...`, which matches
+   *  nothing for a file and is why the fallback returned an empty history. */
+  async loadFileChanges(depotFile: string) {
+    if (!h) return;
+    const seq = ++loadSeq;
+    const client = h.conn().client;
+    const id = "R:" + depotFile;
+    currentId = id;
+    hydrate(histScope(client), id);
+    histVer++;
+    const q = h.toQuery(depotFile);
+    const [rows, fs] = await Promise.all([
+      safe(() => p4.changesExact(h!.conn(), q, CAP)),
+      safe(() => p4.fstat(h!.conn(), q)),
+    ]);
+    if (seq !== loadSeq) return;
+    // No per-row revision here (changes knows changelists, not revisions), so the
+    // rows carry what they have; the view falls back to changelist mode.
+    writeHist(client, id, {
+      mode: "file",
+      subject: depotFile,
+      rows,
+      have: fs[0]?.haveRev ?? "",
+    });
+    history.autoSelectHave();
+  },
+
   async loadFolder(path: string) {
     if (!h) return;
     const seq = ++loadSeq;
@@ -269,18 +301,31 @@ export const history = {
     // per server, so later clicks don't pay the timeout again.
     const q = h.toQuery(depotFile);
     if (filelogUnusable()) {
-      await history.loadFolder(depotFile); // changelists for this file
+      await history.loadFileChanges(depotFile);
       return;
     }
-    const [rev, fs] = await Promise.all([
-      safe(() => p4.filelog(h!.conn(), q, 200)),
-      safe(() => p4.fstat(h!.conn(), q)),
-    ]);
+    // filelog is awaited WITHOUT `safe`, so a thrown error (the timeout this
+    // fallback exists for) is told apart from an empty answer. An empty answer
+    // is about this one file; only a failure says anything about the server.
+    let rev: P4Record[] = [];
+    let threw = false;
+    const fstatP = safe(() => p4.fstat(h!.conn(), q));
+    try {
+      rev = await p4.filelog(h!.conn(), q, 200);
+    } catch {
+      threw = true;
+    }
+    const fs = await fstatP;
     if (seq !== loadSeq) return;
-    if (rev.length === 0 && fs.length > 0) {
-      // fstat sees the file but filelog returned nothing → filelog is the problem.
+    if (threw) {
       markFilelogUnusable();
-      await history.loadFolder(depotFile);
+      await history.loadFileChanges(depotFile);
+      return;
+    }
+    if (rev.length === 0 && fs.length > 0) {
+      // The file exists but filelog said nothing about it — fall back for THIS
+      // file without condemning the server.
+      await history.loadFileChanges(depotFile);
       return;
     }
     writeHist(client, id, { mode: "file", subject: depotFile, rows: rev, have: fs[0]?.haveRev ?? "" });
