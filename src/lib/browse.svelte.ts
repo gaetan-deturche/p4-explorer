@@ -508,6 +508,13 @@ export const browse = {
     saveShowDeleted(v);
     treeVer++; // the tree is derived — re-run the projection
   },
+  /** The search index the tree is currently querying — one namespace per source
+   *  and workspace. The tree watches it so a filter is re-run when the ground
+   *  under it changes. */
+  get searchScope() {
+    void treeVer;
+    return h ? srcKey() : "";
+  },
   get source() {
     return source;
   },

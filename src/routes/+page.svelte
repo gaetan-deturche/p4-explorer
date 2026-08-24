@@ -1032,6 +1032,7 @@
           root={browse.tree}
           selectedPath={browse.selectedTreePath}
           indexing={browse.indexing}
+          searchScope={browse.searchScope}
           onSelect={(n) => browse.selectNode(n)}
           onExpand={(n) => browse.expandNode(n)}
           onSearch={(t) => browse.searchDepot(t)}

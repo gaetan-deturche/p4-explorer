@@ -6,6 +6,7 @@
     root,
     selectedPath,
     indexing = false,
+    searchScope = "",
     onSelect,
     onExpand,
     onSearch,
@@ -15,13 +16,22 @@
     root: TreeNode | null;
     selectedPath: string;
     indexing?: boolean;
+    /** Identifies WHAT is being searched (workspace + source). A change means the
+     *  current results describe something else entirely. */
+    searchScope?: string;
     onSelect: (node: TreeNode) => void; // single click: dir → history, file → details
     onExpand: (node: TreeNode) => void; // triangle / double-click: toggle + load
     // Index search: literal matches filter the view, fuzzy ones are suggestions.
     onSearch?: (term: string) => Promise<SearchHits>;
     onOpenResult?: (depotFile: string) => void; // click a search result
-    // right-click a node → (node, event, selected nodes incl. this one)
-    onContext?: (node: TreeNode, e: MouseEvent, selection: TreeNode[]) => void;
+    // right-click a row → (target, event, the selection it belongs to). Only the
+    // path and kind are needed, which lets search results use it too — they are
+    // not tree nodes and have no expansion or fstat state to invent.
+    onContext?: (
+      target: { path: string; isDir: boolean },
+      e: MouseEvent,
+      selection: { path: string; isDir: boolean }[],
+    ) => void;
   } = $props();
 
   // Multi-selection (Ctrl/Shift click), keyed by depot path. A plain click still
@@ -73,6 +83,17 @@
     return visibleNodes.filter((n) => selected.has(n.path));
   }
 
+  /** The context menu for a SEARCH RESULT row. Filtering used to make the menu
+   *  unreachable — the results are a separate list, and only the tree rows had a
+   *  handler. A result is always its own target: the multi-selection belongs to
+   *  the tree, and these rows are not in it. */
+  function rowContext(c: { path: string; isDir: boolean }, e: MouseEvent) {
+    if (!onContext) return;
+    e.preventDefault();
+    const target = { path: c.path, isDir: c.isDir };
+    onContext(target, e, [target]);
+  }
+
   let query = $state("");
   let hits = $state<SearchHits | null>(null); // null = show the tree
   let suggestOpen = $state(false); // fuzzy droplist under the search box
@@ -99,6 +120,24 @@
     searching = true;
     debounce = window.setTimeout(() => runSearch(term), 90);
   }
+
+  // Switching workspace or source leaves a filter showing matches from the place
+  // you just left — the rows are stale AND belong to a different depot. Re-run it
+  // against the new scope instead of silently keeping the old answer.
+  let lastScope = "";
+  $effect(() => {
+    const scope = searchScope;
+    if (scope === lastScope) return;
+    const first = lastScope === "";
+    lastScope = scope;
+    if (first) return; // initial mount: nothing was searched yet
+    const term = query.trim();
+    if (!term) return;
+    seq++; // drop anything in flight against the old scope
+    hits = null;
+    searching = true;
+    void runSearch(term);
+  });
 
   async function runSearch(term: string) {
     if (!onSearch) return;
@@ -309,12 +348,21 @@
         <button class="tw" title="Expand / collapse" onclick={() => toggleCollapse(c.path)}>
           {open ? "▾" : "▸"}
         </button>
-        <button class="main mono" onclick={() => toggleCollapse(c.path)}>
+        <button
+          class="main mono"
+          onclick={() => toggleCollapse(c.path)}
+          oncontextmenu={(e) => rowContext(c, e)}
+        >
           <span class="ic">📁</span><span class="name">{c.name}</span>
         </button>
       {:else}
         <span class="tw-sp"></span>
-        <button class="main mono" title={c.path} onclick={() => onOpenResult?.(c.path)}>
+        <button
+          class="main mono"
+          title={c.path}
+          onclick={() => onOpenResult?.(c.path)}
+          oncontextmenu={(e) => rowContext(c, e)}
+        >
           <span class="ic">📄</span><span class="name">{c.name}</span>
         </button>
       {/if}
