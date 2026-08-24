@@ -51,7 +51,11 @@ const LAST_SERVER = "lastServer";
 const clientKey = (server: string) => `client:${server}`;
 const userKey = (server: string) => `user:${server}`;
 const charsetKey = (server: string) => `charset:${server}`;
-const viewKey = (client: string) => `view:${client}`;
+// v2: the previous key can hold a FILE path with histMode "folder" — the two
+// halves used to be captured from different stores — and restoring that pair
+// asks p4 for `<file>/...` and shows an empty history. The bad pairs are dropped
+// rather than repaired: a view is one click to re-establish.
+const viewKey = (client: string) => `view2:${client}`;
 
 // Route through the store (scope `nav`): reads are synchronous from the fast
 // layers; writes also persist to SQLite. Keys keep the same `nav:*` localStorage

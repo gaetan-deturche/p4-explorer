@@ -253,8 +253,21 @@
   // it mutates state, so the read always beats this save.
   $effect(() => {
     const client = conn.client;
-    const view = { tab: centerTab, treePath: browse.selectedTreePath, histMode: history.mode };
-    if (connection.connected && client) saveView(client, view);
+    // Only once the panes actually describe THIS workspace. The effect re-runs
+    // the moment conn.client changes, while the tree and history still hold the
+    // outgoing workspace — saving then filed a file selected in one workspace as
+    // another workspace's saved view, which is what made a switch look like it
+    // carried the selection over.
+    if (!connection.connected || !client || browse.viewClient !== client) return;
+    // Path AND mode from the SAME source. They used to come from two stores, so
+    // a file path could be stored with histMode "folder" — and the restore then
+    // ran loadFolder on a file, which asks p4 for `<file>/...` and yields an
+    // empty history.
+    const subject = history.subject;
+    const view = subject
+      ? { tab: centerTab, treePath: subject, histMode: history.mode }
+      : { tab: centerTab, treePath: browse.selectedTreePath, histMode: "folder" as const };
+    saveView(client, view);
   });
 
   onDestroy(() => connection.stopKeepAlive());

@@ -82,6 +82,11 @@ function parseJson<T>(s: string | undefined | null): T | null {
 }
 
 let rootPath = $state(""); // stream root, e.g. //Curiosity/main
+// The workspace the pane currently DESCRIBES. Between `conn.client` changing and
+// openWorkspace finishing, the tree and history still hold the previous
+// workspace's state, and anything that persists "the current view" in that gap
+// files the old selection under the new workspace.
+let viewClient = $state("");
 let clientRoot = $state(""); // local workspace root, e.g. H:\Dev\...\Curiosity
 let selectedTreePath = $state("");
 let source = $state<BrowseSource>(loadBrowseSource()); // Files pane data source (persisted)
@@ -473,6 +478,10 @@ export const browse = {
       ? queryRoot + path.slice(rootPath.length)
       : path;
   },
+  /** The workspace the tree and history currently describe. */
+  get viewClient() {
+    return viewClient;
+  },
   get rootPath() {
     return rootPath;
   },
@@ -547,6 +556,7 @@ export const browse = {
     fileHaveClCache.clear();
     rootPath = "";
     clientRoot = "";
+    viewClient = ""; // the pane describes no workspace until openWorkspace says so
     selectedTreePath = "";
     treeVer++;
     history.reset();
@@ -562,6 +572,7 @@ export const browse = {
     if (!h) return;
     clientRoot = root;
     rootPath = stream;
+    viewClient = h.conn().client;
     queryRoot = "//" + h.conn().client; // browse through the client view
 
     // Restore the saved selection only for the stream-rooted sources; the Depot
