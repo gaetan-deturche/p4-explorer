@@ -1,6 +1,7 @@
 <script lang="ts">
   import { fmtTime, firstLine, splitPath, type P4Record, type ReviewInfo } from "$lib/p4";
   import DiffView from "$lib/components/DiffView.svelte";
+  import { describeFileType } from "$lib/filetype";
 
   let {
     rows,
@@ -758,7 +759,7 @@
     {#if kind === "local" && needsResolve(f.depotFile)}
       <span class="unres">needs resolve</span>
     {/if}
-    <span class="ftype dim">{f.type ?? ""}</span>
+    <span class="ftype dim" title={describeFileType(String(f.type ?? ""))}>{f.type ?? ""}</span>
   </div>
   {#if fd?.open}
     {#if fd.loading}

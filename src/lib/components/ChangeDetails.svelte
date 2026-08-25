@@ -1,6 +1,7 @@
 <script lang="ts">
   import { fmtTime, type P4Record } from "$lib/p4";
   import DiffView from "$lib/components/DiffView.svelte";
+  import { describeFileType } from "$lib/filetype";
 
   let {
     change,
@@ -188,7 +189,7 @@
                   </span>
                 </div>
               </td>
-              <td class="dim">{f.type ?? ""}</td>
+              <td class="dim" title={describeFileType(String(f.type ?? ""))}>{f.type ?? ""}</td>
             </tr>
             {#if d?.open}
               <tr class="diffrow">

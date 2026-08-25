@@ -9,6 +9,7 @@
   import DiffView from "$lib/components/DiffView.svelte";
   import { fmtTime, firstLine, splitPath, type P4Record, type ReviewRow } from "$lib/p4";
   import { REVIEW_STATES, type ReviewContent, type Role } from "$lib/reviews.svelte";
+  import { describeFileType } from "$lib/filetype";
 
   let {
     rows,
@@ -466,7 +467,7 @@
                   <span class="fpath"
                     ><span class="pfile">{sp.name}</span><span class="pdir dim">{sp.dir}</span></span
                   >
-                  <span class="ftype dim">{f.type ?? ""}</span>
+                  <span class="ftype dim" title={describeFileType(String(f.type ?? ""))}>{f.type ?? ""}</span>
                 </div>
                 {#if fd?.open}
                   {#if fd.loading}
