@@ -16,6 +16,7 @@
     onOpenOfflineDiff,
     needsResolve,
   isUnchanged,
+  caseTwin,
     onLocalFiles,
     onLocalFilesCached,
     onShelvedFiles,
@@ -45,6 +46,8 @@
     needsResolve: (depotFile: string) => boolean; // p4 is holding a resolve on it
     // Open for edit but identical to the depot: a checkout with nothing in it.
     isUnchanged: (depotFile: string) => boolean;
+    // The depot path differing from this one only in case, if there is one.
+    caseTwin: (depotFile: string) => string;
     contextChange: string; // the changelist whose context menu is open (highlight it)
     onLocalFiles: (change: string) => Promise<P4Record[]>; // opened (workspace) files
     // cached opened/shelved files (all cache layers, resolves in ~ms);
@@ -623,6 +626,14 @@
                   >
                 {/if}
                 <span class="fpath"><span class="pfile">{sp.name}</span><span class="pdir dim">{sp.dir}</span></span>
+                {#if caseTwin(f.depotFile ?? "")}
+                  <!-- Why this row keeps coming back however often it is reverted. -->
+                  <span
+                    class="clash"
+                    title={`Also in the depot as:\n${caseTwin(f.depotFile ?? "")}\n\nTwo paths differing only in case are ONE file on Windows, so whichever you restore leaves the other looking modified — a revert just moves the difference to the twin. Only renaming one of the two paths in the depot settles it.`}
+                    >case clash</span
+                  >
+                {/if}
               </div>
               {#if od?.open}
                 {#if od.loading}
@@ -973,6 +984,17 @@
      nothing else in the app can see it. */
   .act-untracked {
     color: var(--warn);
+  }
+  /* Not a local problem at all: two depot paths differing only in case. Same
+     shape as the resolve badge, since both mean "this needs a decision". */
+  .clash {
+    flex: none;
+    font-size: 10px;
+    color: var(--warn);
+    border: 1px solid currentColor;
+    border-radius: 999px;
+    padding: 0 6px;
+    margin-left: 6px;
   }
   .unres {
     flex: none;

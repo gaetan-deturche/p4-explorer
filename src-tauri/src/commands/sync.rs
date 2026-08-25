@@ -458,6 +458,120 @@ fn mark_desyncs(conn: &P4Conn, recs: &mut [p4::Record]) {
     }
 }
 
+/// A depot path that differs from another only in case.
+#[derive(serde::Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CaseTwin {
+    pub file: String,
+    pub twin: String,
+}
+
+/// The sibling that matches `name` ignoring case but is not `name` itself.
+fn case_twin_name(name: &str, siblings: &[String]) -> Option<String> {
+    siblings
+        .iter()
+        .find(|s| s.as_str() != name && s.eq_ignore_ascii_case(name))
+        .cloned()
+}
+
+/// Split `//depot/a/b/c.uasset` into ("//depot", ["a", "b", "c.uasset"]).
+fn split_depot(path: &str) -> Option<(String, Vec<String>)> {
+    let rest = path.strip_prefix("//")?;
+    let mut parts = rest.split('/');
+    let depot = parts.next()?;
+    let tail: Vec<String> = parts.map(str::to_string).collect();
+    if tail.is_empty() {
+        return None;
+    }
+    Some((format!("//{depot}"), tail))
+}
+
+/// Rebuild a path with component `idx` replaced.
+fn with_component(root: &str, parts: &[String], idx: usize, name: &str) -> String {
+    let mut out = root.to_string();
+    for (i, p) in parts.iter().enumerate() {
+        out.push('/');
+        out.push_str(if i == idx { name } else { p.as_str() });
+    }
+    out
+}
+
+/// For each path, a depot path differing from it only in case — if one exists AND
+/// really holds that file.
+///
+/// The clash can be at any level, so every ancestor is checked as well as the
+/// file name itself; listings are cached, so a set of files under one directory
+/// costs one walk rather than one per file.
+#[tauri::command]
+pub async fn p4_case_twins(conn: P4Conn, files: Vec<String>) -> Result<Vec<CaseTwin>, String> {
+    if files.is_empty() {
+        return Ok(Vec::new());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut dirs_cache: std::collections::HashMap<String, Vec<String>> = Default::default();
+        let mut files_cache: std::collections::HashMap<String, Vec<String>> = Default::default();
+        let mut out = Vec::new();
+
+        for file in &files {
+            let Some((depot, parts)) = split_depot(file) else { continue };
+            let mut found: Option<String> = None;
+
+            // The file name itself, then each directory from the deepest up.
+            for idx in (0..parts.len()).rev() {
+                let parent = with_component(&depot, &parts[..idx], usize::MAX, "");
+                let parent = parent.trim_end_matches('/').to_string();
+                let siblings = if idx == parts.len() - 1 {
+                    files_cache
+                        .entry(parent.clone())
+                        .or_insert_with(|| list_leaf_names(&conn, &parent))
+                        .clone()
+                } else {
+                    dirs_cache
+                        .entry(parent.clone())
+                        .or_insert_with(|| list_dir_names(&conn, &parent))
+                        .clone()
+                };
+                if let Some(twin) = case_twin_name(&parts[idx], &siblings) {
+                    let candidate = with_component(&depot, &parts, idx, &twin);
+                    // A twin directory does not have to contain our file.
+                    if p4::run(&conn, &["files", &candidate]).map(|r| !r.is_empty()).unwrap_or(false) {
+                        found = Some(candidate);
+                        break;
+                    }
+                }
+            }
+            if let Some(twin) = found {
+                out.push(CaseTwin { file: file.clone(), twin });
+            }
+        }
+        Ok(out)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Sub-directory names of a depot directory.
+fn list_dir_names(conn: &P4Conn, parent: &str) -> Vec<String> {
+    let spec = format!("{parent}/*");
+    p4::run(conn, &["dirs", &spec])
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|r| r.get("dir").and_then(|v| v.as_str()))
+        .filter_map(|d| d.rsplit('/').next().map(str::to_string))
+        .collect()
+}
+
+/// File names in a depot directory.
+fn list_leaf_names(conn: &P4Conn, parent: &str) -> Vec<String> {
+    let spec = format!("{parent}/*");
+    p4::run(conn, &["files", &spec])
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|r| r.get("depotFile").and_then(|v| v.as_str()))
+        .filter_map(|d| d.rsplit('/').next().map(str::to_string))
+        .collect()
+}
+
 /// Path of this session's command log, for the Commands view ("" if unavailable).
 #[tauri::command]
 pub fn session_log_path() -> String {
@@ -792,5 +906,40 @@ mod revert_tests {
         let r = outcome("//d/a.uasset", false, true, false, &notes);
         assert!(!r.ok);
         assert!(r.message.contains("still reports the file as open"));
+    }
+}
+
+#[cfg(test)]
+mod case_tests {
+    use super::*;
+
+    #[test]
+    fn finds_the_sibling_that_differs_only_in_case() {
+        let sibs = vec!["JellyClip".to_string(), "Jellyclip".to_string(), "Fluff".to_string()];
+        assert_eq!(case_twin_name("JellyClip", &sibs), Some("Jellyclip".to_string()));
+        assert_eq!(case_twin_name("Jellyclip", &sibs), Some("JellyClip".to_string()));
+    }
+
+    #[test]
+    fn an_exact_match_is_not_a_twin() {
+        let sibs = vec!["Meshes".to_string(), "Textures".to_string()];
+        assert_eq!(case_twin_name("Meshes", &sibs), None);
+    }
+
+    #[test]
+    fn a_path_is_rebuilt_with_one_component_swapped() {
+        let (depot, parts) = split_depot("//Curiosity/main/Content/JellyClip/M/A.uasset").unwrap();
+        assert_eq!(depot, "//Curiosity");
+        assert_eq!(parts.len(), 5);
+        assert_eq!(
+            with_component(&depot, &parts, 2, "jellyclip"),
+            "//Curiosity/main/Content/jellyclip/M/A.uasset"
+        );
+    }
+
+    #[test]
+    fn a_depot_root_alone_is_not_a_path() {
+        assert!(split_depot("//Curiosity").is_none());
+        assert!(split_depot("not-a-depot-path").is_none());
     }
 }

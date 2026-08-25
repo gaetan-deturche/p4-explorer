@@ -128,6 +128,7 @@ pub fn run() {
             commands::p4_sync_blockers,
             commands::p4_revert_local,
             commands::session_log_path,
+            commands::p4_case_twins,
             commands::p4_sync_stream,
             commands::sync_cancel,
             commands::p4_search,

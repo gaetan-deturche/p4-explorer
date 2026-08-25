@@ -418,6 +418,9 @@ export const p4 = {
   unchangedOpen: (conn: P4Conn) => g<string[]>("p4_unchanged_open", { conn }),
   /** Why a sync could not overwrite these paths — one entry per file. */
   syncBlockers: (conn: P4Conn, files: string[]) => g<SyncBlocker[]>("p4_sync_blockers", { conn, files }),
+  /** Depot paths that differ from these only in case (one file on Windows). */
+  caseTwins: (conn: P4Conn, files: string[]) =>
+    g<{ file: string; twin: string }[]>("p4_case_twins", { conn, files }),
   /** Path of this session's command log file on disk. */
   sessionLogPath: () => g<string>("session_log_path", {}),
   /** Revert a mixed selection (open files reverted, offline ones cleaned), with

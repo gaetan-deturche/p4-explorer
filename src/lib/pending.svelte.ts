@@ -65,6 +65,11 @@ let unresolved = $state<Set<string>>(new Set());
 // Files open for edit whose content matches the depot: nothing to submit. Empty
 // until the first answer, so a row is only ever marked on evidence.
 let unchanged = $state<Set<string>>(new Set());
+// depotFile -> the depot path that differs from it only in case. One file on
+// Windows serves both, so whichever one you restore leaves the other looking
+// modified: a revert appears to do nothing and the row returns. Nothing local
+// can settle that, so the least the app can do is name it.
+let caseTwins = $state<Record<string, string>>({});
 // Fingerprint of `p4 opened` from the last poll; null = no baseline yet.
 let openedFingerprint: string | null = null;
 
@@ -199,6 +204,20 @@ function countOpen(recs: P4Record[]): void {
     next[c] = (next[c] ?? 0) + 1;
   }
   openCounts = next;
+}
+
+/** A line for the confirmation when some files cannot be settled by a revert at
+ *  all: their depot path has a twin differing only in case, so restoring one
+ *  leaves the other looking modified. */
+function twinWarning(files: string[]): string {
+  const clashing = files.filter((f) => caseTwins[f]);
+  if (!clashing.length) return "";
+  const one = clashing.length === 1;
+  return (
+    `\n\nNote: ${one ? "this file" : `${clashing.length} of these`} also exist${one ? "s" : ""} in the depot under a path ` +
+    `differing only in case (e.g. ${caseTwins[clashing[0]]}). Windows keeps one file for both, so reverting moves the ` +
+    `difference to the twin instead of clearing it — it comes back. Only renaming one path in the depot fixes that.`
+  );
 }
 
 function forgetFiles(files: string[]): () => void {
@@ -375,6 +394,7 @@ export const pending = {
       // leak into the view — it just populates that workspace's cache for later.
       offlineVer++;
       if (h && h.conn().client === client) offlineScannedAt = Date.now(); // freshness stamp
+      void pending.loadCaseTwins(result.map((r) => String(r.depotFile)).filter(Boolean));
       return true;
     } finally {
       offlineScanning = false;
@@ -566,6 +586,27 @@ export const pending = {
   /** True when p4 is holding a resolve on this depot file. */
   needsResolve(depotFile: string): boolean {
     return unresolved.has(depotFile);
+  },
+
+  /** Ask which of these depot paths have a case-twin. Only run over what the
+   *  scan reported, so the cost is a short walk for a handful of files. */
+  async loadCaseTwins(files: string[]) {
+    if (!h || !files.length) {
+      caseTwins = {};
+      return;
+    }
+    const conn = h.conn();
+    try {
+      const twins = await p4.caseTwins(conn, files);
+      if (h.conn().client !== conn.client) return;
+      caseTwins = Object.fromEntries(twins.map((t) => [t.file, t.twin]));
+    } catch {
+      caseTwins = {};
+    }
+  },
+  /** The depot path that differs from this one only in case ("" if none). */
+  caseTwin(depotFile: string): string {
+    return caseTwins[depotFile] ?? "";
   },
 
   /** Which opened files are byte-identical to the depot — one `p4 diff -sr` for
@@ -1217,7 +1258,8 @@ export const pending = {
           );
         }
       },
-      `${list}\n\nRevert? Opened files are reverted, offline files restored to their depot state — your local changes are DISCARDED.`,
+      `${list}\n\nRevert? Opened files are reverted, offline files restored to their depot state — your local changes are DISCARDED.` +
+        twinWarning(files),
       "Revert files",
       "Revert",
       `Reverted ${n} file${n === 1 ? "" : "s"}.`,
