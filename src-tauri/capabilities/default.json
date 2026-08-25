@@ -7,6 +7,7 @@
     "core:default",
     "core:window:allow-close",
     "opener:default",
+    "opener:allow-reveal-item-in-dir",
     "opener:allow-open-url",
     "updater:default",
     "process:default",

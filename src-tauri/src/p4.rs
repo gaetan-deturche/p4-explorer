@@ -17,6 +17,115 @@ pub fn set_app_handle(app: AppHandle) {
     let _ = APP.set(app);
 }
 
+/// The session's command-log file, and its path for the UI to show.
+static LOG: OnceLock<std::sync::Mutex<std::fs::File>> = OnceLock::new();
+static LOG_PATH: OnceLock<std::path::PathBuf> = OnceLock::new();
+/// Session start, so each line can carry a time relative to the app opening.
+static STARTED: OnceLock<Instant> = OnceLock::new();
+
+/// Seconds since the epoch as `YYYY-MM-DD HH:MM:SS` (UTC). Days-to-civil by the
+/// usual algorithm — a date needs no dependency.
+fn utc_stamp(secs: u64) -> String {
+    let days = (secs / 86_400) as i64;
+    let tod = secs % 86_400;
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!(
+        "{y:04}-{m:02}-{d:02} {:02}:{:02}:{:02}",
+        tod / 3600,
+        (tod % 3600) / 60,
+        tod % 60
+    )
+}
+
+fn epoch_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Open this session's log in `dir`, keeping only the newest `keep` files, and
+/// write a header naming the build and the machine. Called once at startup;
+/// failures are silent — logging must never stop the app from running.
+pub fn init_session_log(dir: std::path::PathBuf, version: &str, keep: usize) {
+    use std::io::Write;
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    // Prune first, so a long-lived install does not accumulate sessions.
+    if let Ok(rd) = std::fs::read_dir(&dir) {
+        let mut old: Vec<(std::time::SystemTime, std::path::PathBuf)> = rd
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with("session-"))
+            .filter_map(|e| {
+                let m = e.metadata().ok()?;
+                Some((m.modified().ok()?, e.path()))
+            })
+            .collect();
+        old.sort_by(|a, b| b.0.cmp(&a.0));
+        for (_, path) in old.into_iter().skip(keep.saturating_sub(1)) {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+    let secs = epoch_secs();
+    let stamp = utc_stamp(secs).replace(['-', ':'], "").replace(' ', "-");
+    let path = dir.join(format!("session-{stamp}-{}.log", std::process::id()));
+    let Ok(mut file) = std::fs::File::create(&path) else {
+        return;
+    };
+    let _ = writeln!(
+        file,
+        "# Auger {version} — session started {} UTC (pid {})",
+        utc_stamp(secs),
+        std::process::id()
+    );
+    let _ = writeln!(
+        file,
+        "# every p4 command of this session, in order: [+seconds] ok|ERR duration command"
+    );
+    let _ = file.flush();
+    let _ = LOG_PATH.set(path);
+    let _ = LOG.set(std::sync::Mutex::new(file));
+    let _ = STARTED.set(Instant::now());
+}
+
+/// Where this session is logging ("" when the log could not be opened).
+pub fn session_log_path() -> String {
+    LOG_PATH
+        .get()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default()
+}
+
+/// Append one command to the session log. Flushed every time: a log that only
+/// reaches disk on a clean exit is no use for the crash or hang you are chasing.
+fn log_to_file(line: &str, ms: u128, ok: bool, err: &str) {
+    use std::io::Write;
+    let Some(lock) = LOG.get() else { return };
+    let Ok(mut file) = lock.lock() else { return };
+    let at = STARTED.get().map(|s| s.elapsed().as_secs_f64()).unwrap_or(0.0);
+    let _ = writeln!(
+        file,
+        "[{at:8.2}] {} {ms:>6}ms  {line}",
+        if ok { "ok " } else { "ERR" }
+    );
+    if !err.is_empty() {
+        for l in err.lines() {
+            let _ = writeln!(file, "               !! {l}");
+        }
+    }
+    let _ = file.flush();
+}
+
 /// Emit a `p4-command` event describing a command the app just ran, for the
 /// Commands log view. `args` is the subcommand + args (connection globals and
 /// `-ztag -Mj` are omitted for readability; stdin, e.g. a password, is never
@@ -24,9 +133,11 @@ pub fn set_app_handle(app: AppHandle) {
 /// `err` carries the failure text so the Commands view can SHOW why a command
 /// failed instead of just flagging it red (capped for the UI; "" when ok).
 pub fn log_command_err(args: &[&str], ms: u128, ok: bool, err: &str) {
+    let line = format!("p4 {}", args.join(" "));
+    let err: String = err.trim().chars().take(500).collect();
+    // The file gets everything, whether or not a window is listening.
+    log_to_file(&line, ms, ok, &err);
     if let Some(app) = APP.get() {
-        let line = format!("p4 {}", args.join(" "));
-        let err: String = err.trim().chars().take(500).collect();
         let _ = app
             .emit("p4-command", serde_json::json!({ "line": line, "ms": ms, "ok": ok, "err": err }));
     }
@@ -654,4 +765,21 @@ pub fn explode_indexed(rec: &Record, anchor: &str) -> Vec<Record> {
         i += 1;
     }
     rows
+}
+
+#[cfg(test)]
+mod stamp_tests {
+    use super::utc_stamp;
+
+    #[test]
+    fn known_instants() {
+        assert_eq!(utc_stamp(0), "1970-01-01 00:00:00");
+        assert_eq!(utc_stamp(1_700_000_000), "2023-11-14 22:13:20");
+    }
+
+    #[test]
+    fn leap_day_is_not_skipped() {
+        assert_eq!(utc_stamp(1_582_934_400), "2020-02-29 00:00:00");
+        assert_eq!(utc_stamp(1_583_020_800), "2020-03-01 00:00:00");
+    }
 }

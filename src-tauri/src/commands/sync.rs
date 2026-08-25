@@ -458,6 +458,279 @@ fn mark_desyncs(conn: &P4Conn, recs: &mut [p4::Record]) {
     }
 }
 
+/// Path of this session's command log, for the Commands view ("" if unavailable).
+#[tauri::command]
+pub fn session_log_path() -> String {
+    p4::session_log_path()
+}
+
+/// What actually happened to one file in a revert.
+#[derive(serde::Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RevertOutcome {
+    pub file: String,
+    pub ok: bool,
+    /// "reverted" (was open) | "cleaned" (offline change) | "" when nothing worked.
+    pub how: String,
+    pub message: String,
+}
+
+/// Revert a mixed selection: open files are `p4 revert`ed, files with offline
+/// changes are `p4 clean`ed, and the result of each is CHECKED.
+///
+/// Both halves of that used to be guesses. Which command a file got was decided
+/// from the cached offline list, so a file the cache did not know about was sent
+/// to `p4 revert` — which for a file that is not open is a warning with exit
+/// status 0, i.e. nothing at all. And no result was read back, so the rows were
+/// removed from the UI either way and reappeared at the next scan with no
+/// explanation. Now p4 says which files are open, and p4 says afterwards whether
+/// they are clean.
+#[tauri::command]
+pub async fn p4_revert_local(
+    conn: P4Conn,
+    files: Vec<String>,
+) -> Result<Vec<RevertOutcome>, String> {
+    if files.is_empty() {
+        return Ok(Vec::new());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let refs: Vec<&str> = files.iter().map(String::as_str).collect();
+
+        // Who is actually open? The authoritative split.
+        let mut args = vec!["opened"];
+        args.extend(refs.iter());
+        let opened_recs = p4::run(&conn, &args).unwrap_or_default();
+        let open: Vec<String> = opened_recs
+            .iter()
+            .filter(|r| r.contains_key("action"))
+            .filter_map(|r| r.get("depotFile").and_then(|v| v.as_str()).map(str::to_string))
+            .collect();
+
+        let mut notes: Vec<String> = Vec::new();
+        if !open.is_empty() {
+            let mut a = vec!["revert".to_string()];
+            a.extend(open.clone());
+            let argv: Vec<&str> = a.iter().map(String::as_str).collect();
+            if let Ok((_recs, mut n)) = p4::run_notes(&conn, &argv) {
+                notes.append(&mut n);
+            }
+        }
+        let offline: Vec<String> = files.iter().filter(|f| !open.contains(f)).cloned().collect();
+        if !offline.is_empty() {
+            let mut a = vec!["clean".to_string()];
+            a.extend(offline.clone());
+            let argv: Vec<&str> = a.iter().map(String::as_str).collect();
+            if let Ok((_recs, mut n)) = p4::run_notes(&conn, &argv) {
+                notes.append(&mut n);
+            }
+        }
+
+        // Verify: still open, or still differing from the depot?
+        let mut args = vec!["opened"];
+        args.extend(refs.iter());
+        let still_open: Vec<String> = p4::run(&conn, &args)
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|r| r.get("depotFile").and_then(|v| v.as_str()).map(str::to_string))
+            .collect();
+        let mut args = vec!["reconcile", "-n", "-e", "-d"];
+        args.extend(refs.iter());
+        let still_dirty: Vec<String> = p4::run(&conn, &args)
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|r| r.get("depotFile").and_then(|v| v.as_str()).map(str::to_string))
+            .collect();
+
+        Ok(files
+            .iter()
+            .map(|f| {
+                outcome(
+                    f,
+                    open.contains(f),
+                    still_open.contains(f),
+                    still_dirty.contains(f),
+                    &notes,
+                )
+            })
+            .collect())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// The verdict for one file. `notes` are p4's warnings for the whole run — the
+/// only place a per-file refusal is explained, since those come back with exit
+/// status 0.
+fn outcome(
+    file: &str,
+    was_open: bool,
+    still_open: bool,
+    still_dirty: bool,
+    notes: &[String],
+) -> RevertOutcome {
+    let leaf = file.rsplit('/').next().unwrap_or(file);
+    let mine: Vec<&str> = notes
+        .iter()
+        .map(String::as_str)
+        .filter(|n| n.contains(file) || n.contains(leaf))
+        .collect();
+    if !still_open && !still_dirty {
+        return RevertOutcome {
+            file: file.to_string(),
+            ok: true,
+            how: if was_open { "reverted".into() } else { "cleaned".into() },
+            message: String::new(),
+        };
+    }
+    let why = if !mine.is_empty() {
+        mine.join(" — ")
+    } else if still_open {
+        "p4 still reports the file as open.".to_string()
+    } else {
+        "the file on disk still differs from the depot.".to_string()
+    };
+    RevertOutcome {
+        file: file.to_string(),
+        ok: false,
+        how: String::new(),
+        message: why,
+    }
+}
+
+/// Why one file is standing in the way of a sync.
+///
+/// `kind` is the state, and it is what decides the remedy:
+///   untracked  a local file sits where a depot revision belongs, and this
+///              workspace has no have-record for it. NOTHING else reports this:
+///              the offline scan (`reconcile -e -d`) looks for edits and deletes
+///              of files p4 believes you hold, and this is neither.
+///   modified   held and then changed on disk without being checked out — an
+///              offline change. Forcing discards it.
+///   writable   identical to the revision held; only the read-only flag is
+///              cleared, which is all p4 needs to refuse. Forcing loses nothing.
+///   gone       nothing there any more; a retry will work.
+///   unknown    p4 knows no such path.
+///
+/// Content is compared by `p4 diff -se` rather than by hashing the file here:
+/// that is p4's own comparison, so text translation and keyword expansion cannot
+/// make an identical file look modified.
+#[derive(serde::Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncBlocker {
+    pub file: String,
+    pub depot_file: String,
+    pub client_file: String,
+    pub kind: String,
+    pub reason: String,
+    pub have_rev: String,
+    pub head_rev: String,
+    pub local_size: u64,
+    pub depot_size: u64,
+}
+
+fn field(rec: &p4::Record, key: &str) -> String {
+    rec.get(key).and_then(|v| v.as_str()).unwrap_or("").to_string()
+}
+
+/// Digit grouping, so 40415 reads as 40 415 in a sentence.
+fn grouped(n: u64) -> String {
+    let mut s = n.to_string();
+    let mut i = s.len() as i64 - 3;
+    while i > 0 {
+        s.insert(i as usize, ' ');
+        i -= 3;
+    }
+    s
+}
+
+/// Does p4 consider this unopened file different from the revision held?
+/// `diff -se` prints the file when it differs and nothing when it matches.
+fn differs_unopened(conn: &P4Conn, file: &str) -> bool {
+    match p4::run_full(conn, &["diff", "-se", file]) {
+        Ok((recs, _notes)) => recs.iter().any(|r| r.contains_key("depotFile")),
+        Err(_) => false,
+    }
+}
+
+/// Classify each path a sync refused to overwrite.
+#[tauri::command]
+pub async fn p4_sync_blockers(conn: P4Conn, files: Vec<String>) -> Result<Vec<SyncBlocker>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut out = Vec::new();
+        for file in files {
+            let recs = p4::run(&conn, &["fstat", "-Ol", &file]).unwrap_or_default();
+            let Some(rec) = recs.first() else {
+                out.push(SyncBlocker {
+                    file: file.clone(),
+                    depot_file: String::new(),
+                    client_file: file.clone(),
+                    kind: "unknown".into(),
+                    reason: "p4 has no record of this path.".into(),
+                    have_rev: String::new(),
+                    head_rev: String::new(),
+                    local_size: 0,
+                    depot_size: 0,
+                });
+                continue;
+            };
+            let depot_file = field(rec, "depotFile");
+            let client_file = {
+                let c = field(rec, "clientFile");
+                if c.is_empty() { file.clone() } else { c }
+            };
+            let have_rev = field(rec, "haveRev");
+            let head_rev = field(rec, "headRev");
+            let depot_size = field(rec, "fileSize").parse::<u64>().unwrap_or(0);
+            let local_size = std::fs::metadata(&client_file).map(|m| m.len()).unwrap_or(0);
+            let exists = std::fs::metadata(&client_file).is_ok();
+
+            let (kind, reason) = if !exists {
+                ("gone", "The file is no longer on disk — a retry will work.".to_string())
+            } else if have_rev.is_empty() {
+                (
+                    "untracked",
+                    format!(
+                        "This workspace has never synced this file, so Perforce has no record of the {} bytes on disk.                          The depot has #{} ({} bytes). The offline scan cannot see it either: it reports edits and deletes                          of files you hold, and this is neither. Force replaces the local copy with the depot's — move it                          aside first if you might want it.",
+                        grouped(local_size),
+                        head_rev,
+                        grouped(depot_size)
+                    ),
+                )
+            } else if differs_unopened(&conn, &client_file) {
+                (
+                    "modified",
+                    format!(
+                        "Changed on disk without being checked out — an offline change ({} bytes here against #{}).                          Force discards it; check it out instead to keep it.",
+                        grouped(local_size),
+                        have_rev
+                    ),
+                )
+            } else {
+                (
+                    "writable",
+                    format!(
+                        "Identical to the revision you hold (#{have_rev}); only the read-only flag is cleared, which is                          all p4 needs to refuse. Force loses nothing."
+                    ),
+                )
+            };
+            out.push(SyncBlocker {
+                file,
+                depot_file,
+                client_file,
+                kind: kind.into(),
+                reason,
+                have_rev,
+                head_rev,
+                local_size,
+                depot_size,
+            });
+        }
+        Ok(out)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Kill the in-flight offline-changes scan, called before an interactive write.
 /// Killing the client is sufficient: p4d abandons its own `reconcile` about a
 /// second later (watched in `p4 monitor show`). Asking the server directly, with
@@ -481,4 +754,43 @@ pub async fn cancel_offline_scan(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod revert_tests {
+    use super::*;
+
+    #[test]
+    fn a_file_that_is_clean_afterwards_says_how_it_got_there() {
+        let r = outcome("//d/a.uasset", true, false, false, &[]);
+        assert!(r.ok && r.how == "reverted");
+        let r = outcome("//d/a.uasset", false, false, false, &[]);
+        assert!(r.ok && r.how == "cleaned");
+    }
+
+    #[test]
+    fn a_file_still_dirty_is_a_failure_with_a_reason() {
+        // The case that used to pass silently: p4 revert on a file that is not
+        // open does nothing, and the row came back at the next scan.
+        let r = outcome("//d/a.uasset", false, false, true, &[]);
+        assert!(!r.ok);
+        assert!(r.message.contains("still differs"));
+        assert_eq!(r.how, "");
+    }
+
+    #[test]
+    fn p4s_own_warning_is_preferred_over_ours() {
+        let notes = vec!["//d/a.uasset - file(s) not opened on this client.".to_string()];
+        let r = outcome("//d/a.uasset", false, false, true, &notes);
+        assert!(!r.ok);
+        assert!(r.message.contains("not opened on this client"));
+    }
+
+    #[test]
+    fn a_note_about_another_file_is_not_borrowed() {
+        let notes = vec!["//d/other.uasset - no such file(s).".to_string()];
+        let r = outcome("//d/a.uasset", false, true, false, &notes);
+        assert!(!r.ok);
+        assert!(r.message.contains("still reports the file as open"));
+    }
 }

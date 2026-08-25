@@ -23,6 +23,14 @@ pub fn run() {
                 _ => app.path().app_data_dir()?,
             };
             std::fs::create_dir_all(&dir).ok();
+            // One command log per session, next to the data. The Commands tab is
+            // in-memory, so without this a report of "it hung" or "it did nothing"
+            // arrives with no record of what p4 was asked.
+            p4::init_session_log(
+                dir.join("logs"),
+                app.package_info().version.to_string().as_str(),
+                20,
+            );
             // TWO connections to the same file, in WAL mode: the tiny cache
             // table (source of truth for every view) must never queue behind
             // the multi-million-row file index. One mutex-guarded connection
@@ -117,6 +125,9 @@ pub fn run() {
             commands::p4_status,
             commands::p4_flush,
             commands::cancel_offline_scan,
+            commands::p4_sync_blockers,
+            commands::p4_revert_local,
+            commands::session_log_path,
             commands::p4_sync_stream,
             commands::sync_cancel,
             commands::p4_search,

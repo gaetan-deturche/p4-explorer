@@ -1196,15 +1196,26 @@ export const pending = {
    *  confirmation for the lot. Destructive for the local edits. */
   async revertMixed(files: string[]) {
     if (!files.length) return;
-    const offline = new Set(currentOffline().map((o) => o.depotFile));
-    const off = files.filter((f) => offline.has(f));
-    const opened = files.filter((f) => !offline.has(f));
     const n = files.length;
     const list = n <= 5 ? files.join("\n") : `${n} files`;
     await pending.action(
       async () => {
-        for (const f of opened) await p4.revert(h!.conn(), f);
-        if (off.length) await p4.clean(h!.conn(), off);
+        // One command that splits the selection by asking p4 which files are
+        // open, then checks the result of each. The split used to come from the
+        // cached offline list and nothing was verified, so a file the cache had
+        // not seen was sent to `p4 revert` — a no-op with exit status 0 for a
+        // file that is not open — and the row simply came back at the next scan.
+        const results = await p4.revertLocal(h!.conn(), files);
+        const failed = results.filter((r) => !r.ok);
+        if (failed.length) {
+          const lines = failed.map((r) => `${r.file.split("/").pop()} — ${r.message}`);
+          // Thrown, so `mutate` rolls the optimistic removal back: these rows
+          // belong on screen, since nothing happened to them.
+          throw new Error(
+            `${failed.length} of ${results.length} file${results.length === 1 ? "" : "s"} could not be reverted:\n` +
+              lines.join("\n"),
+          );
+        }
       },
       `${list}\n\nRevert? Opened files are reverted, offline files restored to their depot state — your local changes are DISCARDED.`,
       "Revert files",

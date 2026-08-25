@@ -615,7 +615,12 @@
                 {#if f.desync}
                   <span class="act act-desync">desync</span>
                 {:else}
-                  <span class="act act-{f.action}">{f.action ?? ""}</span>
+                  <!-- `reason` is set for rows a sync could not write (see
+                       p4_sync_blockers): the state is the status, and the
+                       explanation travels with it. -->
+                  <span class="act act-{f.action}" title={String(f.reason ?? "")}
+                    >{f.action ?? ""}</span
+                  >
                 {/if}
                 <span class="fpath"><span class="pfile">{sp.name}</span><span class="pdir dim">{sp.dir}</span></span>
               </div>
@@ -958,8 +963,16 @@
   /* Its own hue: add is green, edit is blue, delete is red, and a checkout that
      holds nothing yet is amber. Same size as every other status — "Writable" is
      44px, well inside the column. */
-  .act-unchanged {
+  .act-unchanged,
+  /* A file that is writable where a depot revision belongs: same state, same
+     colour, whether it turned up in a changelist or blocked a sync. */
+  .act-writable {
     color: var(--writable);
+  }
+  /* Perforce has no record of this file at all — it is why a sync stopped, and
+     nothing else in the app can see it. */
+  .act-untracked {
+    color: var(--warn);
   }
   .unres {
     flex: none;

@@ -3,7 +3,7 @@
 //! shared bits (conn, busy flags, notices, refresh/reload) come via `init()`.
 
 import { listen } from "@tauri-apps/api/event";
-import { p4, type P4Conn } from "$lib/p4";
+import { p4, type P4Conn, type SyncBlocker } from "$lib/p4";
 
 type Hooks = {
   conn: () => P4Conn;
@@ -30,7 +30,15 @@ type Progress = {
   phase: "running" | "error";
   message: string;
 };
-type ErrItem = { line: string; file: string | null };
+type ErrItem = {
+  line: string;
+  file: string | null;
+  /** What p4's refusal actually means for this file, asked for after the fact
+   *  (see p4_sync_blockers). "Can't clobber writable file" says nothing about
+   *  whether the local copy is precious, tracked, or merely writable. */
+  why?: string;
+  kind?: string;
+};
 // `specs` = what the failed run targeted; the retry falls back to these when
 // no per-file paths could be parsed out of the error lines. NEVER widen it to
 // the whole workspace — a retry must not sync more than the run it retries.
@@ -58,6 +66,12 @@ let errorItems: ErrItem[] = [];
 
 let progress = $state<Progress | null>(null);
 let errors = $state<ErrReport | null>(null);
+/** Files a sync could not write, with the state behind each refusal. Kept after
+ *  the dialog closes so the Offline section can list them: an untracked file
+ *  blocking a sync is invisible to the offline scan (`reconcile -e -d` reports
+ *  edits and deletes of files you hold; this is neither), and the only moment
+ *  anything notices is the sync that trips over it. */
+let blockers = $state<SyncBlocker[]>([]);
 let busyFile = $state<string | null>(null); // file being fixed ("*" = all)
 
 export const sync = {
@@ -67,8 +81,43 @@ export const sync = {
   get progress() {
     return progress;
   },
+  /** Files that blocked the last sync, for the Offline section. */
+  get blockers() {
+    return blockers;
+  },
+  /** Forget a blocker (it was force-synced, moved aside, or reported gone). */
+  clearBlocker(file: string) {
+    blockers = blockers.filter((b) => b.depotFile !== file && b.clientFile !== file && b.file !== file);
+  },
+  /** Re-ask p4 about the recorded blockers and drop the ones that are settled. */
+  async recheckBlockers() {
+    if (!h || !blockers.length) return;
+    const files = blockers.map((b) => b.depotFile || b.file);
+    const fresh = await p4.syncBlockers(h.conn(), files).catch(() => null);
+    if (!fresh) return;
+    blockers = fresh.filter((b) => b.kind !== "gone" && b.kind !== "unknown");
+  },
   get errors() {
     return errors;
+  },
+  /** Fill in the "why" for the failures on screen, and remember the ones that
+   *  are workspace state rather than a passing hiccup. */
+  async explainErrors() {
+    if (!h || !errors) return;
+    const files = errors.items.map((i) => i.file).filter((f): f is string => !!f);
+    if (!files.length) return;
+    const infos = await p4.syncBlockers(h.conn(), files).catch(() => null);
+    if (!infos || !errors) return;
+    const by = new Map(infos.map((i) => [i.file, i]));
+    errors = {
+      ...errors,
+      items: errors.items.map((it) => {
+        const info = it.file ? by.get(it.file) : undefined;
+        return info ? { ...it, why: info.reason, kind: info.kind } : it;
+      }),
+    };
+    // Only the states that persist are worth listing outside the dialog.
+    blockers = infos.filter((i) => i.kind === "untracked" || i.kind === "writable" || i.kind === "modified");
   },
   get busyFile() {
     return busyFile;
@@ -107,7 +156,10 @@ export const sync = {
     try {
       const n = await p4.syncStream(h.conn(), specs);
       progress = null;
-      if (errorItems.length > 0) errors = { title, items: [...errorItems], specs };
+      if (errorItems.length > 0) {
+        errors = { title, items: [...errorItems], specs };
+        void sync.explainErrors(); // fills in the "why" a moment later
+      }
       else h.setNotice(n > 0 ? `Synced ${n} file${n === 1 ? "" : "s"}.` : "Already up to date.");
       return n;
     } catch (e) {
@@ -323,6 +375,7 @@ export const sync = {
     busyFile = file;
     try {
       const rows = await p4.resync(h.conn(), [file], force);
+      sync.clearBlocker(file); // it either synced or the recheck will bring it back
       // A non-force retry refuses files with offline modifications, and a sync
       // that still fails comes back as a "failed" record (see p4_resync) — in
       // both cases keep the item listed with the fresh reason.
@@ -389,6 +442,7 @@ export const sync = {
       }
       if (still.length) {
         errors = { ...errors, items: still };
+      void sync.explainErrors();
         const nKept = still.filter((i) => i.line.includes("offline changes")).length;
         h.setNotice(
           nKept === still.length
@@ -397,6 +451,7 @@ export const sync = {
         );
       } else {
         errors = null;
+        blockers = []; // whatever blocked the sync has been dealt with
         h.setNotice(force ? "Force re-synced the affected files." : "Re-synced the affected files.");
       }
       await h.refresh();

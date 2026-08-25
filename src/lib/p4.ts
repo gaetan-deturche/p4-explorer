@@ -316,6 +316,19 @@ async function call(cmd: string, args: Record<string, unknown>): Promise<P4Recor
   return g<P4Record[]>(cmd, args);
 }
 
+/** One reason a sync could not write a file (see p4_sync_blockers). */
+export type SyncBlocker = {
+  file: string;
+  depotFile: string;
+  clientFile: string;
+  kind: "untracked" | "modified" | "writable" | "gone" | "unknown";
+  reason: string;
+  haveRev: string;
+  headRev: string;
+  localSize: number;
+  depotSize: number;
+};
+
 export const p4 = {
   info: (conn: P4Conn) => call("p4_info", { conn }),
   clients: (conn: P4Conn) => call("p4_clients", { conn }),
@@ -403,6 +416,17 @@ export const p4 = {
   opened: (conn: P4Conn, change: string) => call("p4_opened", { conn, change }),
   /** Depot paths opened for edit but identical to the depot (`diff -sr`). */
   unchangedOpen: (conn: P4Conn) => g<string[]>("p4_unchanged_open", { conn }),
+  /** Why a sync could not overwrite these paths — one entry per file. */
+  syncBlockers: (conn: P4Conn, files: string[]) => g<SyncBlocker[]>("p4_sync_blockers", { conn, files }),
+  /** Path of this session's command log file on disk. */
+  sessionLogPath: () => g<string>("session_log_path", {}),
+  /** Revert a mixed selection (open files reverted, offline ones cleaned), with
+   *  a checked outcome per file. */
+  revertLocal: (conn: P4Conn, files: string[]) =>
+    g<{ file: string; ok: boolean; how: string; message: string }[]>("p4_revert_local", {
+      conn,
+      files,
+    }),
   diffLocal: (conn: P4Conn, depotFile: string) => g<string>("p4_diff_local", { conn, depotFile }),
   diffOffline: (conn: P4Conn, depotFile: string) =>
     g<string>("p4_diff_local_forced", { conn, depotFile }),

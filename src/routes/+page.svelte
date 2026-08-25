@@ -661,6 +661,27 @@
     files: string[];
   } | null>(null);
   let offlineCtx = $state<{ x: number; y: number; file: P4Record; files: string[] } | null>(null);
+
+  /** The Offline section: what the scan found, plus anything a sync could not
+   *  write. The second half cannot come from the scan — `reconcile -e -d` reports
+   *  edits and deletes of files you hold, and an untracked file sitting where a
+   *  depot revision belongs is neither, so the sync that tripped over it is the
+   *  only thing that ever learns about it. */
+  const offlineRows = $derived.by(() => {
+    const rows = pending.offline;
+    if (!sync.blockers.length) return rows;
+    const known = new Set(rows.map((r) => String(r.depotFile)));
+    const extra = sync.blockers
+      .filter((b) => b.depotFile && !known.has(b.depotFile))
+      .map((b) => ({
+        depotFile: b.depotFile,
+        clientFile: b.clientFile,
+        action: b.kind, // untracked | writable | modified
+        reason: b.reason,
+        blocked: true,
+      })) as unknown as P4Record[];
+    return [...rows, ...extra];
+  });
   let detailsCtx = $state<{ x: number; y: number; file: P4Record } | null>(null);
 
   // --- Copy name / depot path / workspace path -------------------------------
@@ -927,6 +948,7 @@
       loadPending: () => {
         pending.load();
         void pending.scanOffline(); // a sync/retry changes offline state — refresh the list
+      void sync.recheckBlockers(); // and drop the blockers that are settled
       },
       rootPath: () => browse.rootPath,
       histSubject: () => history.subject,
@@ -1170,7 +1192,7 @@
           client={conn.client}
           refreshKey={pending.version}
           reviews={pending.reviews}
-          offline={pending.offline}
+          offline={offlineRows}
           offlineScanning={pending.offlineScanning}
           offlineScannedAt={pending.offlineScannedAt}
           offlineCached={pending.offlineCached}

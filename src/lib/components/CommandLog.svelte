@@ -1,7 +1,18 @@
 <script lang="ts">
+  import { onMount } from "svelte";
+  import { revealItemInDir } from "@tauri-apps/plugin-opener";
   import type { CmdEntry } from "$lib/cmdlog.svelte";
+  import { p4 } from "$lib/p4";
 
   let { entries, onClear }: { entries: CmdEntry[]; onClear: () => void } = $props();
+
+  // This view is in memory and capped; the file behind it keeps the whole
+  // session, survives the app closing, and is what to ask someone else for when
+  // their app "did nothing".
+  let logPath = $state("");
+  onMount(async () => {
+    logPath = await p4.sessionLogPath().catch(() => "");
+  });
 
   // Auto-scroll to the newest entry unless the user has scrolled up.
   let body: HTMLDivElement | undefined = $state();
@@ -19,6 +30,16 @@
 <div class="panel">
   <div class="hdr">
     <span class="dim">{entries.length} command{entries.length === 1 ? "" : "s"}</span>
+    {#if logPath}
+      <span class="grow"></span>
+      <span class="logpath dim mono" title={logPath}>{logPath.split(/[\\/]/).pop()}</span>
+      <button
+        title={`Every command of this session is written to:\n${logPath}\n\nThe newest 20 sessions are kept.`}
+        onclick={() => revealItemInDir(logPath)}
+      >
+        Show log file
+      </button>
+    {/if}
     <button onclick={onClear} disabled={entries.length === 0}>Clear</button>
   </div>
   <div class="scroll body" bind:this={body} onscroll={onScroll}>
@@ -48,6 +69,16 @@
     flex-direction: column;
     height: 100%;
     background: var(--bg-panel);
+  }
+  .grow {
+    flex: 1;
+  }
+  .logpath {
+    font-size: 11px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 40ch;
   }
   .hdr {
     display: flex;

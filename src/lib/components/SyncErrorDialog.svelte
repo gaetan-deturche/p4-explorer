@@ -11,7 +11,9 @@
     onClose,
   }: {
     title: string;
-    items: { line: string; file: string | null }[];
+    // `why` is p4's refusal translated into the state behind it (see
+    // p4_sync_blockers); it arrives a moment after the dialog opens.
+    items: { line: string; file: string | null; why?: string; kind?: string }[];
     busyFile: string | null;
     onFixFile: (file: string, force: boolean) => void;
     onResolveFile: (file: string) => void; // opens the three-way resolve
@@ -71,6 +73,11 @@
           <div class="fcell mono" title={it.file ?? it.line}>{it.file ?? "(unknown)"}</div>
           <div class="ecell">
             <span class="etext mono">{errText(it)}</span>
+            {#if it.why}
+              <!-- "Can't clobber writable file" does not say whether the local
+                   copy is precious, untracked, or merely writable. This does. -->
+              <span class="why">{it.why}</span>
+            {/if}
             <span class="act">
               {#if !it.file}
                 <span class="dim">—</span>
@@ -198,6 +205,14 @@
     justify-content: space-between;
     gap: 10px;
     min-width: 0;
+  }
+  .why {
+    display: block;
+    margin: 2px 0 4px;
+    font-size: 11px;
+    line-height: 1.45;
+    color: var(--text-dim);
+    max-width: 62ch;
   }
   .etext {
     font-size: 11px;
