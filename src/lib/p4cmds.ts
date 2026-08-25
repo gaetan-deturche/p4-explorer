@@ -77,6 +77,14 @@ export const P4_COMMANDS: P4Cmd[] = [
   { key: "p4_unshelve", label: "unshelve", read: false },
   { key: "p4_request_review", label: "request review", read: false },
   { key: "p4_revert", label: "revert", read: false },
+  // Unlisted commands default to read=true, so anything that WRITES has to be
+  // here or safe mode waves it through. p4_revert_local reverts open files and
+  // cleans offline ones — the most destructive thing in the Pending tab.
+  { key: "p4_revert_local", label: "revert / clean (discard local changes)", read: false },
+  { key: "p4_unchanged_open", label: "diff -sr (opened but unchanged)", read: true },
+  { key: "p4_sync_blockers", label: "fstat (why a sync was refused)", read: true },
+  { key: "p4_case_twins", label: "dirs/files (case-clash check)", read: true },
+  { key: "session_log_path", label: "session log path", read: true },
   { key: "p4_shelved_changes", label: "changes -s shelved", read: true },
   { key: "p4_file_holders", label: "fstat (who has it)", read: true },
   { key: "p4_open_files", label: "edit / add / delete", read: false },

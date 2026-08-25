@@ -1138,7 +1138,9 @@
           onContext={onStreamContext}
         />
       {:else if centerTab === "log"}
-        <CommandLog entries={cmdlog.entries} onClear={() => cmdlog.clear()} />
+        <CommandLog entries={cmdlog.entries}
+          running={cmdlog.running}
+          onClearRunning={() => cmdlog.clearRunning()} onClear={() => cmdlog.clear()} />
       {:else if centerTab === "notes"}
         <NotificationLog entries={notifications.entries} onClear={() => notifications.clear()} />
       {:else if centerTab === "reviews"}

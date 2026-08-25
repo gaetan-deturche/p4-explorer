@@ -229,10 +229,11 @@ pub async fn p4_trust(conn: P4Conn) -> Result<(), String> {
         let mut cmd = p4::base_command(&conn);
         cmd.arg("trust").arg("-y").arg("-f");
         let start = std::time::Instant::now();
+    let trust_id = p4::log_command_begin(&["trust", "-y", "-f"]);
         let out = cmd
             .output()
             .map_err(|e| format!("failed to launch p4: {e} (is p4 on PATH?)"))?;
-        p4::log_command_err(&["trust", "-y", "-f"], start.elapsed().as_millis(), out.status.success(), &if out.status.success() { String::new() } else { p4::extract_error(&out.stdout, &out.stderr) });
+        p4::log_command_err(trust_id, &["trust", "-y", "-f"], start.elapsed().as_millis(), out.status.success(), &if out.status.success() { String::new() } else { p4::extract_error(&out.stdout, &out.stderr) });
         if !out.status.success() {
             return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
         }

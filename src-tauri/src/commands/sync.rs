@@ -51,6 +51,12 @@ fn sync_run(
     }
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     let started = std::time::Instant::now();
+    // A streaming sync is the longest-running command the app issues, so it is
+    // the one most worth seeing in flight rather than only once it is over.
+    let sync_id = {
+        let refs: Vec<&str> = log_args.iter().map(String::as_str).collect();
+        p4::log_command_begin(&refs)
+    };
     let mut child = cmd.spawn().map_err(|e| format!("failed to launch p4: {e}"))?;
     let id = child.id();
     pids.lock().unwrap().push(id);
@@ -112,7 +118,7 @@ fn sync_run(
     {
         let refs: Vec<&str> = log_args.iter().map(String::as_str).collect();
         let log_err = if status.success() { String::new() } else { err.trim().to_string() };
-        p4::log_command_err(&refs, started.elapsed().as_millis(), status.success(), &log_err);
+        p4::log_command_err(sync_id, &refs, started.elapsed().as_millis(), status.success(), &log_err);
     }
     // Fatal only when nothing synced (parallel-not-enabled, auth, connection).
     // Per-file issues (e.g. locked files) still synced the rest and are shown

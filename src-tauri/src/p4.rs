@@ -106,6 +106,16 @@ pub fn session_log_path() -> String {
         .unwrap_or_default()
 }
 
+/// Note a command starting, so a hang is visible in the file afterwards.
+fn log_begin_to_file(line: &str) {
+    use std::io::Write;
+    let Some(lock) = LOG.get() else { return };
+    let Ok(mut file) = lock.lock() else { return };
+    let at = STARTED.get().map(|s| s.elapsed().as_secs_f64()).unwrap_or(0.0);
+    let _ = writeln!(file, "[{at:8.2}] >>>          {line}");
+    let _ = file.flush();
+}
+
 /// Append one command to the session log. Flushed every time: a log that only
 /// reaches disk on a clean exit is no use for the crash or hang you are chasing.
 fn log_to_file(line: &str, ms: u128, ok: bool, err: &str) {
@@ -132,14 +142,37 @@ fn log_to_file(line: &str, ms: u128, ok: bool, err: &str) {
 /// included).
 /// `err` carries the failure text so the Commands view can SHOW why a command
 /// failed instead of just flagging it red (capped for the UI; "" when ok).
-pub fn log_command_err(args: &[&str], ms: u128, ok: bool, err: &str) {
+/// Ids for pairing a command's start with its finish. A stalled command must not
+/// be cleared from the view by a DIFFERENT command with the same text finishing,
+/// which is what matching on the text alone would do.
+static NEXT_CMD_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// Announce a command that is about to run, returning the id to report it with.
+///
+/// The app spawns p4 commands immediately — there is no queue — so "in flight"
+/// means "a p4 process is running right now".
+pub fn log_command_begin(args: &[&str]) -> u64 {
+    let id = NEXT_CMD_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let line = format!("p4 {}", args.join(" "));
+    // The file gets a start line too: a command that never finishes leaves
+    // nothing else behind, which is exactly the case the log is for.
+    log_begin_to_file(&line);
+    if let Some(app) = APP.get() {
+        let _ = app.emit("p4-command-begin", serde_json::json!({ "id": id, "line": line }));
+    }
+    id
+}
+
+pub fn log_command_err(id: u64, args: &[&str], ms: u128, ok: bool, err: &str) {
     let line = format!("p4 {}", args.join(" "));
     let err: String = err.trim().chars().take(500).collect();
     // The file gets everything, whether or not a window is listening.
     log_to_file(&line, ms, ok, &err);
     if let Some(app) = APP.get() {
-        let _ = app
-            .emit("p4-command", serde_json::json!({ "line": line, "ms": ms, "ok": ok, "err": err }));
+        let _ = app.emit(
+            "p4-command",
+            serde_json::json!({ "id": id, "line": line, "ms": ms, "ok": ok, "err": err }),
+        );
     }
 }
 
@@ -290,6 +323,7 @@ fn run_output(
     let mut attempt = 0usize;
     loop {
         let start = Instant::now();
+        let id = log_command_begin(args);
         let out = build(&c).map_err(|e| format!("failed to launch p4: {e} (is p4 on PATH?)"))?;
         let ok = out.status.success();
         let err = if ok { String::new() } else { extract_error(&out.stdout, &out.stderr) };
@@ -298,7 +332,7 @@ fn run_output(
             logged.push(format!("(auth retry {attempt})"));
         }
         let refs: Vec<&str> = logged.iter().map(String::as_str).collect();
-        log_command_err(&refs, start.elapsed().as_millis(), ok, &err);
+        log_command_err(id, &refs, start.elapsed().as_millis(), ok, &err);
 
         attempt += 1;
         // Only retry when the command produced NOTHING: an auth failure after
@@ -390,13 +424,14 @@ pub fn run_raw_stdin(conn: &P4Conn, args: &[&str], input: &str) -> Result<String
         cmd.arg(a);
     }
     cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let id = log_command_begin(args);
     let mut child = cmd.spawn().map_err(|e| format!("failed to launch p4: {e}"))?;
     if let Some(mut si) = child.stdin.take() {
         si.write_all(input.as_bytes()).map_err(|e| e.to_string())?;
     }
     let start = Instant::now();
     let out = child.wait_with_output().map_err(|e| e.to_string())?;
-    log_command_err(args, start.elapsed().as_millis(), out.status.success(), &if out.status.success() { String::new() } else { extract_error(&out.stdout, &out.stderr) });
+    log_command_err(id, args, start.elapsed().as_millis(), out.status.success(), &if out.status.success() { String::new() } else { extract_error(&out.stdout, &out.stderr) });
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
         if !err.trim().is_empty() {
@@ -451,10 +486,11 @@ pub fn run_raw_stdout_diff(conn: &P4Conn, args: &[&str]) -> Result<String, Strin
         cmd.arg(a);
     }
     let start = Instant::now();
+    let id = log_command_begin(args);
     let out = cmd
         .output()
         .map_err(|e| format!("failed to launch p4: {e} (is p4 on PATH?)"))?;
-    log_command_err(args, start.elapsed().as_millis(), out.status.success(), &if out.status.success() { String::new() } else { extract_error(&out.stdout, &out.stderr) });
+    log_command_err(id, args, start.elapsed().as_millis(), out.status.success(), &if out.status.success() { String::new() } else { extract_error(&out.stdout, &out.stderr) });
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 

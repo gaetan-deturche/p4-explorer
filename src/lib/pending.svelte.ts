@@ -69,7 +69,36 @@ let unchanged = $state<Set<string>>(new Set());
 // Windows serves both, so whichever one you restore leaves the other looking
 // modified: a revert appears to do nothing and the row returns. Nothing local
 // can settle that, so the least the app can do is name it.
-let caseTwins = $state<Record<string, string>>({});
+//
+// Persisted per workspace (store scope `p4:casetwins`), like the offline list
+// itself: the rows paint from cache instantly, and the answer to "why does this
+// one keep coming back" has to arrive with them. It used to be computed only
+// after a scan, so for the ~20s a scan takes — every restart, every workspace
+// switch — the rows were there and the explanation was not.
+let twinVer = $state(0);
+// Parsed once per (workspace, version) rather than per row rendered.
+let twinMemo: { client: string; ver: number; map: Record<string, string> } = {
+  client: "",
+  ver: -1,
+  map: {},
+};
+
+function currentTwins(): Record<string, string> {
+  const ver = twinVer; // read for reactivity, like currentOffline's offlineVer
+  const client = h?.conn().client ?? "";
+  if (twinMemo.client === client && twinMemo.ver === ver) return twinMemo.map;
+  let map: Record<string, string> = {};
+  const json = client ? storeGet("p4:casetwins", client) : undefined;
+  if (json) {
+    try {
+      map = JSON.parse(json) as Record<string, string>;
+    } catch {
+      map = {};
+    }
+  }
+  twinMemo = { client, ver, map };
+  return map;
+}
 // Fingerprint of `p4 opened` from the last poll; null = no baseline yet.
 let openedFingerprint: string | null = null;
 
@@ -210,12 +239,13 @@ function countOpen(recs: P4Record[]): void {
  *  all: their depot path has a twin differing only in case, so restoring one
  *  leaves the other looking modified. */
 function twinWarning(files: string[]): string {
-  const clashing = files.filter((f) => caseTwins[f]);
+  const twins = currentTwins();
+  const clashing = files.filter((f) => twins[f]);
   if (!clashing.length) return "";
   const one = clashing.length === 1;
   return (
     `\n\nNote: ${one ? "this file" : `${clashing.length} of these`} also exist${one ? "s" : ""} in the depot under a path ` +
-    `differing only in case (e.g. ${caseTwins[clashing[0]]}). Windows keeps one file for both, so reverting moves the ` +
+    `differing only in case (e.g. ${twins[clashing[0]]}). Windows keeps one file for both, so reverting moves the ` +
     `difference to the twin instead of clearing it — it comes back. Only renaming one path in the depot fixes that.`
   );
 }
@@ -407,7 +437,9 @@ export const pending = {
   startOfflineScan() {
     if (!h) return;
     hydrate("p4:offline", h.conn().client); // instant: last known set for this workspace
+    hydrate("p4:casetwins", h.conn().client); // and why any of those rows cannot settle
     offlineVer++;
+    twinVer++;
     if (!offlineStopped) return; // a loop is already active — don't spawn another
     offlineStopped = false;
     // Not immediately: the cached list is already on screen (hydrate above), and
@@ -448,6 +480,8 @@ export const pending = {
     }
     const client = conn.client;
     hydrate("p4:pending", client); // fill the store from localStorage/SQLite (reactive)
+    hydrate("p4:casetwins", client);
+    twinVer++;
     version++; // paint the cached list now, before the server round-trip
     const r = await p4.pending(conn, 100).catch(() => [] as P4Record[]);
     if (h.conn().client !== client) return; // switched workspace during the fetch
@@ -591,22 +625,28 @@ export const pending = {
   /** Ask which of these depot paths have a case-twin. Only run over what the
    *  scan reported, so the cost is a short walk for a handful of files. */
   async loadCaseTwins(files: string[]) {
-    if (!h || !files.length) {
-      caseTwins = {};
+    if (!h) return;
+    const conn = h.conn();
+    if (!conn.client) return;
+    const save = (map: Record<string, string>) => {
+      cacheSet("p4:casetwins", conn.client, JSON.stringify(map));
+      twinVer++;
+    };
+    if (!files.length) {
+      save({}); // nothing offline: nothing to explain
       return;
     }
-    const conn = h.conn();
     try {
       const twins = await p4.caseTwins(conn, files);
-      if (h.conn().client !== conn.client) return;
-      caseTwins = Object.fromEntries(twins.map((t) => [t.file, t.twin]));
+      if (h.conn().client !== conn.client) return; // workspace switched mid-walk
+      save(Object.fromEntries(twins.map((t) => [t.file, t.twin])));
     } catch {
-      caseTwins = {};
+      /* keep the previous answer rather than dropping a true one */
     }
   },
   /** The depot path that differs from this one only in case ("" if none). */
   caseTwin(depotFile: string): string {
-    return caseTwins[depotFile] ?? "";
+    return currentTwins()[depotFile] ?? "";
   },
 
   /** Which opened files are byte-identical to the depot — one `p4 diff -sr` for
