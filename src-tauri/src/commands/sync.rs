@@ -458,8 +458,11 @@ fn mark_desyncs(conn: &P4Conn, recs: &mut [p4::Record]) {
     }
 }
 
-/// Kill the in-flight offline-changes scan (called before an interactive write
-/// so the scan's server locks don't block it). No-op if none is running.
+/// Kill the in-flight offline-changes scan, called before an interactive write.
+/// Killing the client is sufficient: p4d abandons its own `reconcile` about a
+/// second later (watched in `p4 monitor show`). Asking the server directly, with
+/// `p4 monitor terminate`, is refused for our own process here even though the
+/// help offers it to the owner of the process id. No-op if none is running.
 #[tauri::command]
 pub async fn cancel_offline_scan(
     state: tauri::State<'_, crate::index::AppState>,

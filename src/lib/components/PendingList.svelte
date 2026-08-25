@@ -76,7 +76,7 @@
     const out: string[] = [];
     for (const r of rows) {
       const s = cls[r.change];
-      if (s?.open) for (const f of s.local) if (f.depotFile) out.push(f.depotFile);
+      if (s?.open) for (const f of localOf(String(r.change))) if (f.depotFile) out.push(f.depotFile);
     }
     if (offlineOpen) for (const f of offline) if (f.depotFile) out.push(f.depotFile);
     return out;
@@ -204,6 +204,95 @@
   };
   let cls = $state<Record<string, CL>>({});
 
+  // Files the UI is pretending are gone, the changelist each was hidden from, and
+  // whether the command it was covering has finished.
+  //
+  // This is what makes an optimistic removal survive: a `p4 opened` answer that
+  // was already in flight when the user acted cannot resurrect the row (the
+  // startup case, where those fetches are still landing), and neither can the
+  // stale-while-revalidate paint of the refetch that follows.
+  //
+  // An entry clears when an authoritative fetch of its changelist comes back
+  // WITHOUT the file — the command really happened. While the command is still
+  // running, a fetch that still lists the file changes nothing: our guess is
+  // about a state p4 has not reached yet.
+  //
+  // `settled` closes the loop. Once a mutation has completed (every one reloads
+  // the pending list, which settles what is hidden), p4's answer wins: a settled
+  // entry is dropped whatever the fetch says, so a guess that turned out wrong —
+  // or a file reverted and then checked out again inside the same window — cannot
+  // leave a row invisible for the rest of the session.
+  interface Hide {
+    change: string;
+    settled: boolean;
+  }
+  let hidden = $state<Map<string, Hide>>(new Map());
+
+  /** Which expanded changelist currently lists `file` ("*" when none does — it
+   *  is not on screen, so hiding it is free and any fetch may clear it). */
+  function changeHolding(file: string): string {
+    for (const [change, cl] of Object.entries(cls)) {
+      if (cl.local.some((f) => String(f.depotFile) === file)) return change;
+    }
+    return "*";
+  }
+
+  /** Hide these files from the list at once, and return the undo. Called by the
+   *  store's optimistic path so the rows react before p4 answers. */
+  export function forgetRows(files: string[]): () => void {
+    if (!files.length) return () => {};
+    const next = new Map(hidden);
+    for (const f of files) next.set(f, { change: changeHolding(f), settled: false });
+    hidden = next;
+    return () => {
+      const back = new Map(hidden);
+      for (const f of files) back.delete(f);
+      hidden = back;
+    };
+  }
+
+  /** The commands behind every current guess have finished: from here on, the
+   *  next authoritative answer decides, whatever it says. */
+  export function settleRows() {
+    if (!hidden.size) return;
+    let changed = false;
+    const next = new Map(hidden);
+    for (const [file, h] of next) {
+      if (!h.settled) {
+        next.set(file, { ...h, settled: true });
+        changed = true;
+      }
+    }
+    if (changed) hidden = next;
+  }
+
+  /** The depot paths a changelist is currently showing. The store's caches can be
+   *  cold (a fresh boot reads them from SQLite asynchronously) while these rows
+   *  are already on screen, so a changelist-wide action asks the list rather than
+   *  the cache — otherwise it optimistically removes nothing. */
+  export function rowsOf(change: string): string[] {
+    return localOf(change).map((f) => String(f.depotFile));
+  }
+
+  /** A changelist's rows, minus anything being optimistically removed. */
+  function localOf(change: string): P4Record[] {
+    const list = cls[change]?.local ?? [];
+    if (!hidden.size) return list;
+    return list.filter((f) => !hidden.has(String(f.depotFile)));
+  }
+
+  /** Stop hiding files that this changelist's fresh list no longer contains. */
+  function reconcileHidden(change: string, fresh: P4Record[]) {
+    if (!hidden.size) return;
+    const present = new Set(fresh.map((f) => String(f.depotFile)));
+    const next = new Map(hidden);
+    for (const [file, h] of hidden) {
+      if (h.change !== change && h.change !== "*") continue;
+      if (!present.has(file) || h.settled) next.delete(file);
+    }
+    if (next.size !== hidden.size) hidden = next;
+  }
+
   // Per-file inline diff, keyed by "<change>|<kind>|<depotFile>".
   let fdiff = $state<Record<string, { open: boolean; loading: boolean; text: string }>>({});
 
@@ -235,6 +324,7 @@
     const [local, shelved] = await Promise.all([onLocalFiles(change), onShelvedFiles(change)]);
     const local2 = local.filter((f) => f.depotFile);
     const shelved2 = shelved.filter((f) => f.depotFile);
+    reconcileHidden(change, local2);
     cls[change] = {
       open: cls[change]?.open ?? true,
       loading: false,
@@ -258,7 +348,7 @@
   export function selectedChange(): string {
     const owners = new Set<string>();
     for (const [change, cl] of Object.entries(cls)) {
-      for (const f of cl.local) if (selected.has(String(f.depotFile))) owners.add(change);
+      for (const f of localOf(change)) if (selected.has(String(f.depotFile))) owners.add(change);
     }
     return owners.size === 1 ? [...owners][0] : "";
   }
@@ -268,7 +358,7 @@
   export function moveFiles(files: string[], from: string, to: string) {
     const gone = new Set(files);
     const src = cls[from];
-    const recs = src?.local.filter((f) => gone.has(String(f.depotFile))) ?? [];
+    const recs = localOf(from).filter((f) => gone.has(String(f.depotFile)));
     if (src && recs.length) {
       cls[from] = { ...src, local: src.local.filter((f) => !gone.has(String(f.depotFile))) };
       const dst = cls[to];
@@ -305,6 +395,7 @@
     if (client !== lastClient) {
       lastClient = client;
       cls = {};
+      hidden = new Map();
       fdiff = {};
       selected = new Set();
       anchor = null;
@@ -376,7 +467,8 @@
       {#each rows as r (r.change)}
         {@const s = cls[r.change]}
         {@const rv = reviews[r.change]}
-        {@const empty = !!s && !s.loading && s.local.length === 0 && s.shelved.length === 0}
+        {@const shown = localOf(String(r.change))}
+        {@const empty = !!s && !s.loading && shown.length === 0 && s.shelved.length === 0}
         <!-- Section wrapper = the sticky header's containing block, so the pinned
              CL row is pushed out by its own section's end (clean hand-off to the
              next CL) instead of being painted over mid-overlap. -->
@@ -448,7 +540,7 @@
                 {/if}
               </div>
             {/if}
-            {#each s.local as f (f.depotFile)}
+            {#each shown as f (f.depotFile)}
               {@render fileRow(f, r.change, "local", 1)}
             {/each}
           {/if}

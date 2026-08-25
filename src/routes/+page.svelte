@@ -435,6 +435,9 @@
   let pendingList = $state<{
     moveFile: (file: string, from: string, to: string) => void;
     moveFiles: (files: string[], from: string, to: string) => void;
+    forgetRows: (files: string[]) => () => void;
+    rowsOf: (change: string) => string[];
+    settleRows: () => void;
     selection: () => string[];
     selectedChange: () => string;
   }>();
@@ -874,6 +877,11 @@
       askConfirm,
       askOption,
       refresh: () => browse.refresh(),
+      // The rows live in PendingList's own state, so this is how an optimistic
+      // removal reaches the screen. A no-op undo if the list isn't mounted.
+      hideFiles: (files) => pendingList?.forgetRows(files) ?? (() => {}),
+      rowsOf: (change) => pendingList?.rowsOf(change) ?? [],
+      settleHidden: () => pendingList?.settleRows(),
     });
     merges.init({
       conn: () => conn,

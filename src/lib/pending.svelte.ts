@@ -20,6 +20,16 @@ type Hooks = {
   connected: () => boolean;
   syncing: () => boolean; // shared busy guard
   setSyncing: (v: boolean) => void;
+  /** Hide these depot files from the rendered changelists at once, returning the
+   *  undo. The rows live in the list component, not in this store's cache, so an
+   *  optimistic removal has to reach them there — see forgetFiles. */
+  hideFiles: (files: string[]) => () => void;
+  /** The depot paths a changelist is showing right now (the rendered rows, which
+   *  can be ahead of this store's caches on a fresh boot). */
+  rowsOf: (change: string) => string[];
+  /** Mark every optimistic removal as covering a finished command: the next
+   *  authoritative answer decides. */
+  settleHidden: () => void;
   setNotice: (m: string, ms?: number) => void;
   setError: (m: string) => void;
   askConfirm: (msg: string, title?: string, ok?: string) => Promise<boolean>;
@@ -90,9 +100,17 @@ let offlineScanning = $state(false);
 let offlineScannedAt = $state<number | null>(null); // last completed scan (freshness stamp)
 let offlineTimer: number | null = null;
 let offlineStopped = true;
+/** When the last interactive write finished — the scan keeps clear of it. */
+let lastWriteAt = 0;
 let offlineFocused = true;
 const OFFLINE_MS_FOCUS = 300_000; // 5 min (the scan itself is ~30s)
 const OFFLINE_MS_BG = 1_800_000; // 30 min in the background
+// The scan used to start the instant a workspace opened. It costs a write that
+// lands during it about 10x: a small db write measured 0.57s against 0.05s idle.
+// Sub-second, so this is a polish item, not the reason a revert can take seconds
+// (that is the revert's own work — restoring .uasset files from the depot).
+const OFFLINE_MS_FIRST = 20_000; // grace period after a workspace opens
+const OFFLINE_QUIET_MS = 30_000; // quiet after a write: a burst of them stays cheap
 
 // Persist the last offline result per workspace (store scope `p4:offline`) so
 // switching back shows it instantly; a fresh scan then refreshes it. Durable in
@@ -158,8 +176,8 @@ async function runOfflineLoop() {
   const ran = await pending.scanOffline();
   if (offlineStopped) return;
 
-  // If the scan was skipped (another scan held the lock — e.g. right after a
-  // workspace switch), retry soon instead of waiting the full interval.
+  // If the scan was skipped (another scan held the lock, a write just happened,
+  // or one is in flight), retry soon instead of waiting the full interval.
   const delay = ran ? (offlineFocused ? OFFLINE_MS_FOCUS : OFFLINE_MS_BG) : 5_000;
   offlineTimer = window.setTimeout(runOfflineLoop, delay);
 }
@@ -188,6 +206,12 @@ function forgetFiles(files: string[]): () => void {
   if (!client || !files.length) return () => {};
   const gone = new Set(files);
   const undo: (() => void)[] = [];
+  // The rendered rows first. Trimming the caches below only shows up when the
+  // list refetches, which happens AFTER the p4 command — so on its own it is not
+  // an optimistic update at all: it just stops the row flashing back afterwards.
+  // With a fast command that was invisible; behind the offline scan's server
+  // locks the whole thing sat still for ten seconds.
+  if (h) undo.push(h.hideFiles(files));
 
   for (const row of currentPendingRows()) {
     const change = String(row.change);
@@ -326,6 +350,10 @@ export const pending = {
     // phantom "offline changes" that stays until the next scan. Returning false
     // makes the scan loop retry shortly (see runOfflineLoop).
     if (h.syncing()) return false;
+    // And not in the seconds after an interactive write. Reverting or checking out
+    // a handful of files is a burst, not one event: without this the scan starts
+    // again between two of them and the next one pays the lock wait.
+    if (Date.now() - lastWriteAt < OFFLINE_QUIET_MS) return false;
     const w = window as unknown as { __p4guiOfflineBusy?: boolean };
     if (w.__p4guiOfflineBusy) return false; // a scan is already running — skipped
     w.__p4guiOfflineBusy = true;
@@ -362,7 +390,9 @@ export const pending = {
     offlineVer++;
     if (!offlineStopped) return; // a loop is already active — don't spawn another
     offlineStopped = false;
-    runOfflineLoop();
+    // Not immediately: the cached list is already on screen (hydrate above), and
+    // the app's first seconds belong to whatever the user opened it to do.
+    offlineTimer = window.setTimeout(runOfflineLoop, OFFLINE_MS_FIRST);
   },
   stopOfflineScan() {
     offlineStopped = true;
@@ -385,6 +415,9 @@ export const pending = {
    *  the derived `rows` re-renders. One path: the UI only reads the store. */
   async load() {
     if (!h) return;
+    // Every mutation reloads through here, so this is where a guess stops being
+    // in-flight: from now on p4's answer wins over it.
+    h.settleHidden();
     const conn = h.conn();
     if (!h.connected() || !conn.client) {
       reviews = {};
@@ -495,7 +528,13 @@ export const pending = {
    *  than agreeing to "the files, whatever they are". */
   revertChangelist(change: string) {
     const client = h?.conn().client ?? "";
-    const files = (loadClFilesCache(client, change) ?? []).map((f) => String(f.depotFile));
+    // What the list is showing, falling back to the cache: on a fresh boot the
+    // rows are on screen before these caches are warm, and an empty list here
+    // meant the revert removed nothing until p4 answered.
+    const shown = h?.rowsOf(change) ?? [];
+    const files = shown.length
+      ? shown
+      : (loadClFilesCache(client, change) ?? []).map((f) => String(f.depotFile));
     const what = change === "default" ? "the default changelist" : `@${change}`;
     const count = files.length
       ? `${files.length} file${files.length === 1 ? "" : "s"} in ${what}`
@@ -599,13 +638,24 @@ export const pending = {
     okNotice: string | (() => string),
     opts?: { refresh?: boolean; optimistic?: () => () => void },
   ) {
-    if (!h || !h.connected() || h.syncing()) return;
+    if (!h || !h.connected()) return;
+    // A dropped click used to be silent: while the app is busy every action
+    // returned here without a word, which reads as the app ignoring you.
+    if (h.syncing()) {
+      h.setNotice("Busy — finishing the previous command. Try again in a moment.");
+      return;
+    }
+    lastWriteAt = Date.now(); // keep the offline scan off the server while we write
     // Guess the outcome first so the list reacts immediately; the reload in
     // `finally` reconciles it, and `rollback` undoes the guess if p4 refuses.
     const rollback = opts?.optimistic?.();
     h.setSyncing(true);
     try {
-      await p4.cancelOfflineScan().catch(() => {}); // free its server locks before writing
+      // Killing the scan's client is enough: p4d drops its own reconcile ~1s later
+      // (measured via `p4 monitor show`). `p4 monitor terminate` would be the
+      // direct route but is refused for our own process on this server, despite
+      // the help offering it to "the owner of the process id".
+      await p4.cancelOfflineScan().catch(() => {});
       await runFn();
       h.setNotice(typeof okNotice === "string" ? okNotice : okNotice());
       if (opts?.refresh !== false) await h.refresh();
@@ -613,6 +663,7 @@ export const pending = {
       rollback?.();
       h.setError(String(e));
     } finally {
+      lastWriteAt = Date.now(); // and for a while after
       pending.load();
       h.setSyncing(false);
     }
@@ -627,13 +678,21 @@ export const pending = {
     note: string | (() => string),
     opts?: { refresh?: boolean; optimistic?: () => () => void },
   ) {
-    if (!h || !h.connected() || h.syncing()) return;
+    if (!h || !h.connected()) return;
+    if (h.syncing()) {
+      h.setNotice("Busy — finishing the previous command. Try again in a moment.");
+      return;
+    }
     if (!(await h.askConfirm(msg, title, ok))) return;
     await pending.mutate(runFn, note, opts);
   },
 
   async submit(change: string) {
-    if (!h || !h.connected() || h.syncing()) return;
+    if (!h || !h.connected()) return;
+    if (h.syncing()) {
+      h.setNotice("Busy — finishing the previous command. Try again in a moment.");
+      return;
+    }
     const what = change === "default" ? "the default changelist" : `changelist @${change}`;
     const go = await h.askConfirm(
       `Submit ${what}?\nThis commits the files to the depot and cannot be undone.`,
@@ -650,7 +709,7 @@ export const pending = {
     const label = change === "default" ? "The default changelist" : `Changelist @${change}`;
     h.setSyncing(true);
     try {
-      await p4.cancelOfflineScan().catch(() => {}); // free its server locks before submitting
+      await p4.cancelOfflineScan().catch(() => {}); // p4d follows the client down (see mutate)
       try {
         await p4.submit(h.conn(), change);
       } catch (e) {
