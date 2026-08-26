@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from "svelte";
   import { shortcuts } from "$lib/shortcuts.svelte";
   export type MenuItem = {
     label: string;
@@ -28,6 +29,39 @@
   // Open submenus to the left when the menu is near the right edge.
   const flipLeft = $derived(typeof window !== "undefined" && x > window.innerWidth * 0.6);
 
+  // --- staying inside the window ---------------------------------------------
+  // The cursor point is where the menu WANTS to be, not where it can be: opened
+  // on a row near the bottom, a menu placed there simply ran off the window and
+  // its last items were unreachable. The size is only known once it is in the DOM,
+  // so it is measured and then moved.
+  //
+  // Order matters: flip to the other side of the cursor first (a menu above the
+  // pointer is normal and keeps the pointer out of the way), and only clamp if it
+  // does not fit on either side.
+  let menuEl = $state<HTMLDivElement>();
+  // The cursor point is the right FIRST guess (it is correct whenever the menu
+  // fits), and untracked because this is an initial value, not a binding — the
+  // effect below owns it from then on.
+  let at = $state(untrack(() => ({ left: x, top: y })));
+  const EDGE = 6; // breathing room, so it never touches the frame
+
+  $effect(() => {
+    if (!menuEl) return;
+    void x;
+    void y;
+    void openSub; // a submenu can change the height
+    const r = menuEl.getBoundingClientRect();
+    const maxW = window.innerWidth - EDGE;
+    const maxH = window.innerHeight - EDGE;
+    let left = x;
+    let top = y;
+    if (left + r.width > maxW) left = Math.max(EDGE, x - r.width);
+    if (top + r.height > maxH) {
+      top = y - r.height >= EDGE ? y - r.height : Math.max(EDGE, maxH - r.height);
+    }
+    if (left !== at.left || top !== at.top) at = { left, top };
+  });
+
   function run(it: MenuItem) {
     if (it.disabled || !it.action) return;
     // Invoke BEFORE closing: some actions read a value lazily from the context
@@ -50,7 +84,7 @@
   }}
 ></button>
 
-<div class="menu" style="left:{x}px; top:{y}px">
+<div class="menu" bind:this={menuEl} style="left:{at.left}px; top:{at.top}px">
   {#each items as it, i (it.label + i)}
     {#if it.sep}
       <div class="sep" role="separator"></div>
@@ -112,6 +146,10 @@
     z-index: 61;
     min-width: 13rem;
     max-width: 90vw;
+    /* Taller than the window (a long menu on a short window): scroll rather than
+       overflow, since clamping alone cannot make it fit. */
+    max-height: calc(100vh - 12px);
+    overflow-y: auto;
     background: var(--bg-panel);
     border: 1px solid var(--border);
     border-radius: 6px;
