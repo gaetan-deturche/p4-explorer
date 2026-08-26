@@ -6,6 +6,7 @@
   import MergeResult from "$lib/components/MergeResult.svelte";
   import OverviewRuler, { type Mark } from "$lib/components/OverviewRuler.svelte";
   import {
+    visualColumn,
     addCursorAtNextMatch,
     addCursorVertical,
     applyBackspace,
@@ -254,6 +255,112 @@
       }
     }
   }
+  // --- horizontal panning ----------------------------------------------------
+  // A scrollbar under each pane, and the panes move together: the panes show the
+  // same columns of three versions of a file, so panning one and not
+  // the other would break the comparison. One bar stretched across all the panels
+  // was the first attempt and read as if they were a single surface.
+  //
+  // The bars are ours rather than the panes' own, because a pane is as tall as the
+  // file: the scrollbar it would grow sits at the bottom of the DOCUMENT, hundreds
+  // of rows below the window. And the wheel is handled here, since a WebView2 does
+  // not reliably turn shift+wheel into horizontal scroll.
+  let paneEls = $state<(HTMLElement | undefined)[]>([]);
+  let barEls = $state<(HTMLDivElement | undefined)[]>([]);
+  let barWs = $state<number[]>([]);
+  let panWs = $state<number[]>([]); // content width per pane
+  let panViews = $state<number[]>([]); // visible width per pane
+  /** The shared range: the panes move as one, so it is the widest need. */
+  const panRange = $derived(
+    Math.max(0, ...panWs.map((w, i) => w - (panViews[i] ?? 0)), 0),
+  );
+  const canPan = $derived(panRange > 1);
+  let panning = false;
+
+  function measurePan() {
+    const w = paneEls.map((p) => p?.scrollWidth ?? 0);
+    const v = paneEls.map((p) => p?.clientWidth ?? 0);
+    // Only write when something actually moved. Assigning unconditionally fed the
+    // ResizeObserver from its own results — measure, show the bar, layout changes,
+    // observe, measure — which ran thousands of times for one open file.
+    const same = (a: number[], b: number[]) =>
+      a.length === b.length && a.every((n, i) => n === b[i]);
+    if (same(w, panWs) && same(v, panViews)) return;
+    panWs = w;
+    panViews = v;
+  }
+  /** Spacer width giving bar `i` the shared scroll range.
+   *
+   *  Sizing it to the CONTENT width was the bug behind "no scrollbar at all": a
+   *  bar is not as wide as the content it stands for, and a spacer narrower than
+   *  its own bar leaves nothing to scroll. What must match is the range. */
+  function spacerW(i: number): number {
+    return (barWs[i] ?? 0) + panRange;
+  }
+  function setPan(x: number) {
+    const to = Math.max(0, Math.min(x, panRange));
+    panning = true;
+    for (const p of paneEls) if (p && p.scrollLeft !== to) p.scrollLeft = to;
+    for (const b of barEls) if (b && b.scrollLeft !== to) b.scrollLeft = to;
+    requestAnimationFrame(() => (panning = false));
+  }
+  function onBarScroll(i: number) {
+    if (panning) return;
+    const bar = barEls[i];
+    if (bar) setPan(bar.scrollLeft);
+  }
+  /** A pane scrolled itself (a trackpad gesture, a focus jump): follow it. */
+  function onPaneScroll(i: number) {
+    if (panning) return;
+    const pane = paneEls[i];
+    if (pane) setPan(pane.scrollLeft);
+  }
+  /** Shift+wheel, or a horizontal wheel/swipe. */
+  function onPanWheel(e: WheelEvent) {
+    const dx = e.deltaX !== 0 ? e.deltaX : e.shiftKey ? e.deltaY : 0;
+    if (!dx) return;
+    measurePan(); // a stale measurement must not refuse a pan
+    if (!canPan) return;
+    e.preventDefault(); // or the vertical scroller eats a shifted wheel
+    setPan((paneEls[0]?.scrollLeft ?? 0) + dx);
+  }
+
+  /** The longest line across all four panes, in visual columns. */
+  const maxCols = $derived.by(() => {
+    let n = 0;
+    const widest = (lines: string[]) => {
+      for (const l of lines) n = Math.max(n, visualColumn(l, l.length));
+    };
+    for (const r of regions) {
+      if (r.kind === "conflict") {
+        widest(r.theirs);
+        widest(r.ours);
+      } else {
+        widest(r.lines);
+      }
+      if (r.kind !== "same") widest(r.base);
+    }
+    for (const r of ds?.doc.regions ?? []) widest(r.lines);
+    return n;
+  });
+
+  // Observed, not guessed at — see the diff window for why a state-change
+  // measurement is not enough (the grid does not exist yet when it fires).
+  $effect(() => {
+    const ps = paneEls.filter((x): x is HTMLElement => !!x);
+    if (!ps.length) return;
+    const ro = new ResizeObserver(() => measurePan());
+    for (const p of ps) ro.observe(p);
+    measurePan();
+    return () => ro.disconnect();
+  });
+  $effect(() => {
+    void regions;
+    void ds;
+    void maxCols;
+    requestAnimationFrame(measurePan);
+  });
+
   /** Any edit inside a region settles it and marks it hand-edited. */
   function touched(region: number) {
     if (origin[region] !== "manual") origin = { ...origin, [region]: "manual" };
@@ -475,7 +582,7 @@
   {/if}
 {/snippet}
 
-<svelte:window onkeydown={onWindowKey} />
+<svelte:window onkeydown={onWindowKey} onresize={measurePan} />
 
 <div class="wrap">
   <div class="bar">
@@ -533,9 +640,9 @@
   {:else if !data || !ds}
     <div class="dim pad">Loading…</div>
   {:else}
-    <div class="viewport">
-      <div class="scroll" bind:this={scrollEl}>
-      <div class="grid mono">
+    <div class="viewport" onwheel={onPanWheel}>
+      <div class="scroll" class:hasbar={canPan} bind:this={scrollEl}>
+      <div class="grid mono" style="--content-w: calc(4.2em + {maxCols}ch + 20px)">
         <div class="head">{data.theirsLabel}</div>
         <div class="head link"></div>
         <div class="head mid">
@@ -545,7 +652,12 @@
         <div class="head">{data.yoursLabel}</div>
 
         <!-- Every pane places its regions at the same y, from the same row counts. -->
-        <div class="col" style="height:{total}px">
+        <div
+          class="col"
+          style="height:{total}px"
+          bind:this={paneEls[0]}
+          onscroll={() => onPaneScroll(0)}
+        >
           {#each regions as r, i (i)}
             <div
               class="rgn"
@@ -577,7 +689,7 @@
           {/each}
         </div>
 
-        <div class="resultcol">
+        <div class="resultcol" bind:this={paneEls[1]} onscroll={() => onPaneScroll(1)}>
           <MergeResult
             docState={ds}
             {rows}
@@ -610,7 +722,12 @@
           {/each}
         </div>
 
-        <div class="col" style="height:{total}px">
+        <div
+          class="col"
+          style="height:{total}px"
+          bind:this={paneEls[2]}
+          onscroll={() => onPaneScroll(2)}
+        >
           {#each regions as r, i (i)}
             <div
               class="rgn"
@@ -624,6 +741,42 @@
         </div>
         </div>
       </div>
+      {#if canPan}
+        <!-- The grid's own column template, so each bar sits under its own pane. -->
+      <!-- The row stops at the vertical scrollbar, so its columns match the panes'
+           (which are fractions of the scroller's CLIENT width). The ruler is an
+           overlay on top of the content rather than a column, so it is not
+           subtracted here — the last bar just keeps clear of it. -->
+        <div class="hbars" style="right: {barWidth}px">
+          <div
+            class="hbar"
+            bind:this={barEls[0]}
+            bind:clientWidth={barWs[0]}
+            onscroll={() => onBarScroll(0)}
+          >
+            <div class="hspace" style="width:{spacerW(0)}px"></div>
+          </div>
+          <div class="hgut"></div>
+          <div
+            class="hbar"
+            bind:this={barEls[1]}
+            bind:clientWidth={barWs[1]}
+            onscroll={() => onBarScroll(1)}
+          >
+            <div class="hspace" style="width:{spacerW(1)}px"></div>
+          </div>
+          <div class="hgut"></div>
+          <div
+            class="hbar"
+            style="margin-right: {marks.length ? 11 : 0}px"
+            bind:this={barEls[2]}
+            bind:clientWidth={barWs[2]}
+            onscroll={() => onBarScroll(2)}
+          >
+            <div class="hspace" style="width:{spacerW(2)}px"></div>
+          </div>
+        </div>
+      {/if}
       {#if marks.length}
         <OverviewRuler {marks} offsetRight={barWidth} onPick={jumpTo} onSeek={seek} />
       {/if}
@@ -704,11 +857,39 @@
     color: var(--warn, #d9a33a);
     white-space: pre-wrap;
   }
+  .hbars {
+    position: absolute;
+    left: 0;
+    bottom: 0;
+    display: grid;
+    /* Must match .grid: one bar per pane, each as wide as its pane. */
+    grid-template-columns: minmax(0, 1fr) 1.4rem minmax(0, 1fr) 1.4rem minmax(0, 1fr);
+    height: 12px;
+    background: var(--bg-panel);
+    border-top: 1px solid var(--border);
+    z-index: 3;
+  }
+  .hbar {
+    overflow-x: auto;
+    overflow-y: hidden;
+    min-width: 0;
+  }
+  .hgut {
+    border-left: 1px solid var(--border);
+    border-right: 1px solid var(--border);
+  }
+  .hspace {
+    height: 1px;
+  }
   .viewport {
     position: relative;
     flex: 1;
     min-height: 0;
     display: flex;
+  }
+  /* Room for the pinned pan bar, so it does not sit on top of the last line. */
+  .scroll.hasbar {
+    padding-bottom: 12px;
   }
   .scroll {
     flex: 1;
@@ -744,8 +925,17 @@
   .col {
     position: relative;
     border-right: 1px solid var(--border, #333);
-    overflow: hidden;
+    /* Sideways is the pane's own scroll; vertical belongs to the whole grid. */
+    overflow-x: auto;
+    overflow-y: hidden;
     min-width: 0;
+    /* A pane is as tall as the file, so its own scrollbar would sit at the bottom
+       of the document, out of reach — shift+wheel and trackpad gestures pan. */
+    scrollbar-width: none;
+  }
+  .col::-webkit-scrollbar,
+  .resultcol::-webkit-scrollbar {
+    height: 0;
   }
   .col.link {
     background: var(--bg-alt, #1f1f1f);
@@ -754,13 +944,20 @@
   .resultcol {
     background: rgba(255, 255, 255, 0.02);
     border-right: 1px solid var(--border, #333);
-    overflow: hidden;
+    overflow-x: auto;
+    overflow-y: hidden;
     min-width: 0;
+    scrollbar-width: none;
   }
   .rgn {
     position: absolute;
     left: 0;
-    right: 0;
+    right: auto;
+    /* Wide enough for the longest line, from --content-w (set on the grid): the
+       panes are monospace, so that width is arithmetic rather than a measurement,
+       and it does not depend on intrinsic sizing reaching through an absolutely
+       positioned box. Never narrower than the pane, so backgrounds still span. */
+    width: max(100%, var(--content-w, 100%));
     overflow: hidden;
   }
   .rgn.conflict {
@@ -787,6 +984,7 @@
   }
   .line {
     display: flex;
+    width: max(100%, var(--content-w, 100%));
     align-items: flex-start;
     line-height: 1.45;
     height: 17.4px;

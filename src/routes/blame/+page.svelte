@@ -217,6 +217,19 @@
       close();
     }
   }
+
+  /** Shift+wheel (and a horizontal wheel or swipe) pans a line wider than the
+   *  window. Handled here rather than left to the webview, which does not
+   *  reliably turn a shifted wheel into horizontal scroll. The scrollbar itself
+   *  is the scroller's own — unlike the diff panes, this one is window-height,
+   *  so it is where you can reach it. */
+  function onPanWheel(e: WheelEvent) {
+    if (!scrollEl) return;
+    const dx = e.deltaX !== 0 ? e.deltaX : e.shiftKey ? e.deltaY : 0;
+    if (!dx || scrollEl.scrollWidth <= scrollEl.clientWidth) return;
+    e.preventDefault();
+    scrollEl.scrollLeft += dx;
+  }
 </script>
 
 <svelte:window onkeydown={onWinKey} />
@@ -246,7 +259,7 @@
     <div class="pad dim">Annotating…</div>
   {:else if blame}
     <div class="viewport">
-      <div class="scroll" bind:this={scrollEl}>
+      <div class="scroll" bind:this={scrollEl} onwheel={onPanWheel}>
         <div class="grid mono">
           {#each runs as r, ri (r.from)}
             <!-- One gutter cell per run, spanning its lines: the provenance is
@@ -358,7 +371,12 @@
   .grid {
     display: grid;
     /* provenance | line number | code */
-    grid-template-columns: max-content max-content 1fr;
+    /* The code column is at least as wide as its widest line, so a line longer
+       than the window makes the GRID wider than the scroller and the window's own
+       horizontal scrollbar appears — reachable, unlike a scrollbar inside a
+       file-tall pane. It still stretches to fill when the lines are short, so the
+       per-change wash and the hover still span the row. */
+    grid-template-columns: max-content max-content minmax(max-content, 1fr);
     align-items: stretch;
     font-size: 12px;
     line-height: 1.45;

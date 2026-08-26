@@ -578,6 +578,12 @@ fn list_leaf_names(conn: &P4Conn, parent: &str) -> Vec<String> {
         .collect()
 }
 
+/// A note from the frontend into the session log (see p4::log_note).
+#[tauri::command]
+pub fn app_log(line: String) {
+    p4::log_note(&line);
+}
+
 /// Path of this session's command log, for the Commands view ("" if unavailable).
 #[tauri::command]
 pub fn session_log_path() -> String {

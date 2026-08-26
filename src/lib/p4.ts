@@ -329,6 +329,12 @@ export type SyncBlocker = {
   depotSize: number;
 };
 
+/** Write a line into this session's log file. Not gated by safe mode (it runs no
+ *  p4 command) and never throws: a diagnostic must not be able to break the app. */
+export function appLog(line: string): void {
+  void invoke("app_log", { line }).catch(() => {});
+}
+
 export const p4 = {
   info: (conn: P4Conn) => call("p4_info", { conn }),
   clients: (conn: P4Conn) => call("p4_clients", { conn }),

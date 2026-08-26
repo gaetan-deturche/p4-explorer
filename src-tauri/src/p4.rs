@@ -106,6 +106,18 @@ pub fn session_log_path() -> String {
         .unwrap_or_default()
 }
 
+/// Write a note into the session log. The command log records what p4 was asked;
+/// this records what the APP decided — a layout measurement, a branch taken —
+/// which is otherwise invisible outside a devtools console we cannot reach.
+pub fn log_note(line: &str) {
+    use std::io::Write;
+    let Some(lock) = LOG.get() else { return };
+    let Ok(mut file) = lock.lock() else { return };
+    let at = STARTED.get().map(|s| s.elapsed().as_secs_f64()).unwrap_or(0.0);
+    let _ = writeln!(file, "[{at:8.2}] ##           {line}");
+    let _ = file.flush();
+}
+
 /// Note a command starting, so a hang is visible in the file afterwards.
 fn log_begin_to_file(line: &str) {
     use std::io::Write;

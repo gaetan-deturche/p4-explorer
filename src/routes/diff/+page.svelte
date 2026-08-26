@@ -18,6 +18,7 @@
   import MergeResult from "$lib/components/MergeResult.svelte";
   import OverviewRuler, { type Mark } from "$lib/components/OverviewRuler.svelte";
   import {
+    visualColumn,
     addCursorAtNextMatch,
     addCursorVertical,
     applyBackspace,
@@ -100,11 +101,116 @@
   function initSplit(leftEmpty: boolean) {
     single = leftEmpty;
   }
+  /** The longest line in either side, in visual columns — tabs expanded exactly
+   *  as the panes render them. This drives --content-w, and with it how far there
+   *  is to pan. */
+  const maxCols = $derived.by(() => {
+    let n = 0;
+    for (const b of blocks) {
+      for (const l of b.left) n = Math.max(n, visualColumn(l, l.length));
+      for (const l of b.right) n = Math.max(n, visualColumn(l, l.length));
+    }
+    return n;
+  });
+
+  // What there is to pan is a LAYOUT fact, so it is observed rather than guessed
+  // at: the first attempt measured on a state change, which happens while the
+  // grid is still behind the loading branch — it saw nothing to pan and never
+  // looked again. A ResizeObserver catches the grid appearing, the split moving
+  // and the window changing; `measurePan` is also called on the way into a pan,
+  // so a stale number can never block one.
+  $effect(() => {
+    const ps = paneEls.filter((x): x is HTMLElement => !!x);
+    if (!ps.length) return;
+    const ro = new ResizeObserver(() => measurePan());
+    for (const p of ps) ro.observe(p);
+    measurePan();
+    return () => ro.disconnect();
+  });
+  // Content can grow wider without any box being resized (a re-diff swaps the
+  // lines inside panes that keep their width), so the blocks are watched too.
+  $effect(() => {
+    void blocks;
+    void ds;
+    void maxCols;
+    requestAnimationFrame(measurePan);
+  });
+
   const gridCols = $derived(
     single
       ? "0 0 minmax(0, 1fr)"
       : `minmax(0, ${split}fr) 1.6rem minmax(0, ${1 - split}fr)`,
   );
+  // --- horizontal panning ----------------------------------------------------
+  // A scrollbar under each pane, and the panes move together: side by side, the
+  // panes show the same columns of two versions of a file, so panning one and not
+  // the other would break the comparison. One bar stretched across both panels
+  // was the first attempt and read as if the two were a single surface.
+  //
+  // The bars are ours rather than the panes' own, because a pane is as tall as the
+  // file: the scrollbar it would grow sits at the bottom of the DOCUMENT, hundreds
+  // of rows below the window. And the wheel is handled here, since a WebView2 does
+  // not reliably turn shift+wheel into horizontal scroll.
+  let paneEls = $state<(HTMLElement | undefined)[]>([]);
+  let barEls = $state<(HTMLDivElement | undefined)[]>([]);
+  let barWs = $state<number[]>([]);
+  let panWs = $state<number[]>([]); // content width per pane
+  let panViews = $state<number[]>([]); // visible width per pane
+  /** The shared range: the panes move as one, so it is the widest need. */
+  const panRange = $derived(
+    Math.max(0, ...panWs.map((w, i) => w - (panViews[i] ?? 0)), 0),
+  );
+  const canPan = $derived(panRange > 1);
+  let panning = false;
+
+  function measurePan() {
+    const w = paneEls.map((p) => p?.scrollWidth ?? 0);
+    const v = paneEls.map((p) => p?.clientWidth ?? 0);
+    // Only write when something actually moved. Assigning unconditionally fed the
+    // ResizeObserver from its own results — measure, show the bar, layout changes,
+    // observe, measure — which ran thousands of times for one open file.
+    const same = (a: number[], b: number[]) =>
+      a.length === b.length && a.every((n, i) => n === b[i]);
+    if (same(w, panWs) && same(v, panViews)) return;
+    panWs = w;
+    panViews = v;
+  }
+  /** Spacer width giving bar `i` the shared scroll range.
+   *
+   *  Sizing it to the CONTENT width was the bug behind "no scrollbar at all": a
+   *  bar is not as wide as the content it stands for, and a spacer narrower than
+   *  its own bar leaves nothing to scroll. What must match is the range. */
+  function spacerW(i: number): number {
+    return (barWs[i] ?? 0) + panRange;
+  }
+  function setPan(x: number) {
+    const to = Math.max(0, Math.min(x, panRange));
+    panning = true;
+    for (const p of paneEls) if (p && p.scrollLeft !== to) p.scrollLeft = to;
+    for (const b of barEls) if (b && b.scrollLeft !== to) b.scrollLeft = to;
+    requestAnimationFrame(() => (panning = false));
+  }
+  function onBarScroll(i: number) {
+    if (panning) return;
+    const bar = barEls[i];
+    if (bar) setPan(bar.scrollLeft);
+  }
+  /** A pane scrolled itself (a trackpad gesture, a focus jump): follow it. */
+  function onPaneScroll(i: number) {
+    if (panning) return;
+    const pane = paneEls[i];
+    if (pane) setPan(pane.scrollLeft);
+  }
+  /** Shift+wheel, or a horizontal wheel/swipe. */
+  function onPanWheel(e: WheelEvent) {
+    const dx = e.deltaX !== 0 ? e.deltaX : e.shiftKey ? e.deltaY : 0;
+    if (!dx) return;
+    measurePan(); // a stale measurement must not refuse a pan
+    if (!canPan) return;
+    e.preventDefault(); // or the vertical scroller eats a shifted wheel
+    setPan((paneEls[0]?.scrollLeft ?? 0) + dx);
+  }
+
   function splitDown(e: PointerEvent) {
     // Only from the gutter background — the revert buttons stay clickable.
     if ((e.target as HTMLElement).closest("button")) return;
@@ -572,7 +678,7 @@ initSplit(leftText.trim() === "");
 
 {#snippet noToolbar(_region: number)}{/snippet}
 
-<svelte:window onkeydown={onWindowKey} />
+<svelte:window onkeydown={onWindowKey} onresize={measurePan} />
 
 <div class="wrap">
   <div class="bar">
@@ -628,13 +734,13 @@ initSplit(leftText.trim() === "");
   {:else if loading || !ds}
     <div class="dim pad">Loading…</div>
   {:else}
-    <div class="viewport">
-      <div class="scroll" bind:this={scrollEl}>
+    <div class="viewport" onwheel={onPanWheel}>
+      <div class="scroll" class:hasbar={canPan} bind:this={scrollEl}>
       <div
         class="grid mono"
         class:single
         bind:this={gridEl}
-        style="grid-template-columns: {gridCols}"
+        style="grid-template-columns: {gridCols}; --content-w: calc(4.2em + {maxCols}ch + 20px)"
       >
         <div class="head">{leftLabel}</div>
         <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -643,7 +749,12 @@ initSplit(leftText.trim() === "");
           {rightLabel}{#if editable}<span class="dim"> — editable</span>{/if}
         </div>
 
-        <div class="col" style="height:{total}px">
+        <div
+          class="col"
+          style="height:{total}px"
+          bind:this={paneEls[0]}
+          onscroll={() => onPaneScroll(0)}
+        >
           {#each blocks as b, i (i)}
             <div
               class="rgn"
@@ -679,7 +790,7 @@ initSplit(leftText.trim() === "");
           {/each}
         </div>
 
-        <div class="resultcol">
+        <div class="resultcol" bind:this={paneEls[1]} onscroll={() => onPaneScroll(1)}>
           <MergeResult
             docState={ds}
             {rows}
@@ -695,6 +806,34 @@ initSplit(leftText.trim() === "");
         </div>
         </div>
       </div>
+      {#if canPan}
+        <!-- On the grid's own column template, so each bar is exactly as wide as
+             the pane above it. -->
+      <!-- The row stops at the vertical scrollbar, so its columns match the panes'
+           (which are fractions of the scroller's CLIENT width). The ruler is an
+           overlay on top of the content rather than a column, so it is not
+           subtracted here — the last bar just keeps clear of it. -->
+        <div class="hbars" style="grid-template-columns: {gridCols}; right: {barWidth}px">
+          <div
+            class="hbar"
+            bind:this={barEls[0]}
+            bind:clientWidth={barWs[0]}
+            onscroll={() => onBarScroll(0)}
+          >
+            <div class="hspace" style="width:{spacerW(0)}px"></div>
+          </div>
+          <div class="hgut"></div>
+          <div
+            class="hbar"
+            style="margin-right: {marks.length ? 11 : 0}px"
+            bind:this={barEls[1]}
+            bind:clientWidth={barWs[1]}
+            onscroll={() => onBarScroll(1)}
+          >
+            <div class="hspace" style="width:{spacerW(1)}px"></div>
+          </div>
+        </div>
+      {/if}
       {#if marks.length}
         <OverviewRuler {marks} offsetRight={barWidth} onPick={jumpTo} onSeek={seek} />
       {/if}
@@ -784,11 +923,40 @@ initSplit(leftText.trim() === "");
     color: var(--warn, #d9a33a);
     white-space: pre-wrap;
   }
+  .hbars {
+    position: absolute;
+    left: 0;
+    /* `right` comes from the markup: it depends on the scrollbar width and
+       whether the ruler is there. */
+    bottom: 0;
+    display: grid;
+    height: 12px;
+    background: var(--bg-panel);
+    border-top: 1px solid var(--border);
+    z-index: 3;
+  }
+  .hbar {
+    overflow-x: auto;
+    overflow-y: hidden;
+    min-width: 0;
+  }
+  /* The gutter column, so the two bars read as belonging to their own panes. */
+  .hgut {
+    border-left: 1px solid var(--border);
+    border-right: 1px solid var(--border);
+  }
+  .hspace {
+    height: 1px;
+  }
   .viewport {
     position: relative;
     flex: 1;
     min-height: 0;
     display: flex;
+  }
+  /* Room for the pinned pan bar, so it does not sit on top of the last line. */
+  .scroll.hasbar {
+    padding-bottom: 12px;
   }
   .scroll {
     flex: 1;
@@ -838,8 +1006,17 @@ initSplit(leftText.trim() === "");
   .col {
     position: relative;
     border-right: 1px solid var(--border, #333);
-    overflow: hidden;
+    /* Sideways is the pane's own scroll; vertical belongs to the whole grid. */
+    overflow-x: auto;
+    overflow-y: hidden;
     min-width: 0;
+    /* The pane is as tall as the file, so its own scrollbar would sit at the
+       bottom of the document, out of reach. Hidden: shift+wheel and trackpad
+       gestures do the panning. */
+    scrollbar-width: none;
+  }
+  .col::-webkit-scrollbar {
+    height: 0;
   }
   .col.gut {
     background: var(--bg-alt, #1f1f1f);
@@ -875,17 +1052,29 @@ initSplit(leftText.trim() === "");
   }
   .resultcol {
     background: rgba(255, 255, 255, 0.02);
-    overflow: hidden;
+    /* Same as .col: sideways here, vertical on the grid. */
+    overflow-x: auto;
+    overflow-y: hidden;
     min-width: 0;
+    scrollbar-width: none;
+  }
+  .resultcol::-webkit-scrollbar {
+    height: 0;
   }
   .rgn {
     position: absolute;
     left: 0;
-    right: 0;
+    right: auto;
+    /* Wide enough for the longest line, from --content-w (set on the grid): the
+       panes are monospace, so that width is arithmetic rather than a measurement,
+       and it does not depend on intrinsic sizing reaching through an absolutely
+       positioned box. Never narrower than the pane, so backgrounds still span. */
+    width: max(100%, var(--content-w, 100%));
     overflow: hidden;
   }
   .line {
     display: flex;
+    width: max(100%, var(--content-w, 100%));
     align-items: flex-start;
     line-height: 1.45;
     height: 17.4px;

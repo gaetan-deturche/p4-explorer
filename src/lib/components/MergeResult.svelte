@@ -165,16 +165,28 @@
     void shortcuts.init();
   });
 
-  /** Keep the caret visible without yanking the view around. */
+  /** Keep the caret visible without yanking the view around, in both directions:
+   *  typing past the right edge of a long line has to bring the view along, the
+   *  same as typing past the bottom. */
   async function reveal() {
     await tick();
     if (!pane || !caretAt) return;
     const box = pane.closest(".scroll") as HTMLElement | null;
-    if (!box) return;
-    const y = pane.offsetTop + caretAt.top;
-    if (y < box.scrollTop + lineHeight) box.scrollTop = Math.max(0, y - lineHeight * 3);
-    else if (y + lineHeight > box.scrollTop + box.clientHeight - lineHeight)
-      box.scrollTop = y - box.clientHeight + lineHeight * 4;
+    if (box) {
+      const y = pane.offsetTop + caretAt.top;
+      if (y < box.scrollTop + lineHeight) box.scrollTop = Math.max(0, y - lineHeight * 3);
+      else if (y + lineHeight > box.scrollTop + box.clientHeight - lineHeight)
+        box.scrollTop = y - box.clientHeight + lineHeight * 4;
+    }
+    // The pane's own column is what pans; a caret at x needs a little air on
+    // either side so the character being typed is not against the frame.
+    const hbox = pane.parentElement;
+    if (!hbox || hbox.scrollWidth <= hbox.clientWidth) return;
+    const margin = 40;
+    const x = caretLeft;
+    if (x < hbox.scrollLeft + margin) hbox.scrollLeft = Math.max(0, x - margin * 2);
+    else if (x > hbox.scrollLeft + hbox.clientWidth - margin)
+      hbox.scrollLeft = x - hbox.clientWidth + margin * 2;
   }
 
   export function focus() {
@@ -514,7 +526,10 @@
 <style>
   .pane {
     position: relative;
-    min-width: 0;
+    /* The host window sets --content-w from its longest line (monospace, so it is
+       arithmetic); the pane is at least that wide or the column has nothing to
+       scroll to. */
+    width: max(100%, var(--content-w, 100%));
     /* mark + line number + gap, matching the read-only panes */
     --gut: calc(4.2em + 8px);
     font-family: var(--mono, ui-monospace, Consolas, monospace);
@@ -533,7 +548,8 @@
   .rgn {
     position: absolute;
     left: 0;
-    right: 0;
+    right: auto;
+    width: max(100%, var(--content-w, 100%));
     overflow: hidden;
   }
   .rgn.conflict {
@@ -549,6 +565,7 @@
   }
   .rl {
     display: flex;
+    width: max(100%, var(--content-w, 100%));
     align-items: flex-start;
     line-height: var(--lh);
     border-left: 3px solid transparent;
