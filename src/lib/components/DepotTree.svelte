@@ -423,7 +423,15 @@
     </button>
   </div>
   {#if node.isDir && node.expanded}
-    {#if node.loaded && node.children.length === 0 && !node.loading}
+    {#if !node.loaded}
+      <!-- Never fetched: say so. Rendering nothing here was indistinguishable
+           from a folder that IS empty, which has its own row below. A folder
+           already loaded keeps showing its children through a refresh (the name
+           carries the ellipsis) rather than flashing back to this. -->
+      <div class="empty dim" style="padding-left:{(depth + 1) * 14 + 24}px">
+        <span class="spin"></span> Loading…
+      </div>
+    {:else if node.children.length === 0 && !node.loading}
       <div class="empty dim" style="padding-left:{(depth + 1) * 14 + 24}px">empty</div>
     {:else}
       {#each node.children as child (child.path)}
@@ -613,6 +621,24 @@
   }
   .sync.stale {
     color: #d08a1d;
+  }
+  /* A spinner, not a static glyph: the point is to show that something is still
+     happening, and a folder listing on a cold cache can take a second. */
+  .spin {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    margin-right: 4px;
+    vertical-align: baseline;
+    border: 1px solid currentColor;
+    border-top-color: transparent;
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+  }
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
   }
   .empty {
     font-size: 11px;

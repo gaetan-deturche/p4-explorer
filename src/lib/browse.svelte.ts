@@ -532,11 +532,27 @@ export const browse = {
    *  from the last visit, so switching back restores the open folders. */
   async setSource(s: BrowseSource) {
     if (!h || s === source) return;
+    const was = selectedTreePath;
+    const wasFile = history.mode === "file";
     source = s;
     saveBrowseSource(s); // persist across workspace switch + restart
     if (s === "local") void browse.refreshLocalIndexIfStale();
     selectedTreePath = "";
     const rootP = rootPathForSource();
+    // The History tab describes what the Files pane has selected, so a source
+    // switch has to settle it: follow the same path into the new source when it
+    // is addressable there (a stream path is a depot path, so workspace and depot
+    // usually agree), and otherwise stop describing anything. Leaving it alone was
+    // the bug — switching to Depot showed the depot tree beside the previous
+    // source's history.
+    const addressable = !!was && !!rootP && (rootP === "//" || was.startsWith(rootP));
+    if (addressable) {
+      selectedTreePath = was;
+      if (wasFile) void history.selectFile(was);
+      else void history.loadFolder(was);
+    } else {
+      history.reset(); // the path does not exist in this source: describe nothing
+    }
     if (!rootP) return; // no workspace open (derive renders nothing)
     const exp = expandedSet();
     if (exp.size === 0) exp.add(rootP); // first visit: expand the root
@@ -608,15 +624,15 @@ export const browse = {
   },
 
   // --- file tree -------------------------------------------------------------
-  // Single click: select. File → its server history/details (works for tracked
-  // files in every source). Folder → its history in workspace/local; in the
-  // depot source (no folder-history subject) it just folds/unfolds.
+  // Single click: select, and show what was selected. A file gives its server
+  // history and details; a folder gives its changelists. The same in all three
+  // sources — the depot source used to fold/unfold on a click instead, for no
+  // reason that survives contact with p4: `changes //depot/path/...` answers for
+  // any depot, workspace or not. Only the synced-CL marker is missing there,
+  // since `#have` says nothing about a path outside the workspace view.
+  // Expanding is the triangle's job (or a double click), everywhere.
   selectNode(node: TreeNode) {
     selectedTreePath = node.path;
-    if (node.isDir && source === "depot") {
-      browse.expandNode(node);
-      return;
-    }
     h?.setTab("history"); // explicit user navigation → show History
     if (node.isDir) history.loadFolder(node.path);
     else history.selectFile(node.path);
