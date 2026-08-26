@@ -39,6 +39,12 @@
   // pointer is normal and keeps the pointer out of the way), and only clamp if it
   // does not fit on either side.
   let menuEl = $state<HTMLDivElement>();
+  /** Only set when the menu genuinely cannot fit: scrolling and submenus are
+   *  mutually exclusive. A submenu sits at `left: 100%`, and CSS refuses to keep
+   *  one axis visible while the other scrolls — so `overflow-y: auto` turned the
+   *  menu into a scroller on BOTH axes, clipping every submenu and putting bars
+   *  around a menu that had room to spare. */
+  let scrolls = $state(false);
   // The cursor point is the right FIRST guess (it is correct whenever the menu
   // fits), and untracked because this is an initial value, not a binding — the
   // effect below owns it from then on.
@@ -53,6 +59,10 @@
     const r = menuEl.getBoundingClientRect();
     const maxW = window.innerWidth - EDGE;
     const maxH = window.innerHeight - EDGE;
+    // scrollHeight is the natural height even once the cap is on, so this does
+    // not latch: a menu that stops being too tall stops scrolling.
+    const tooTall = menuEl.scrollHeight > window.innerHeight - 2 * EDGE;
+    if (tooTall !== scrolls) scrolls = tooTall;
     let left = x;
     let top = y;
     if (left + r.width > maxW) left = Math.max(EDGE, x - r.width);
@@ -84,7 +94,12 @@
   }}
 ></button>
 
-<div class="menu" bind:this={menuEl} style="left:{at.left}px; top:{at.top}px">
+<div
+  class="menu"
+  class:scrolls
+  bind:this={menuEl}
+  style="left:{at.left}px; top:{at.top}px"
+>
   {#each items as it, i (it.label + i)}
     {#if it.sep}
       <div class="sep" role="separator"></div>
@@ -146,15 +161,18 @@
     z-index: 61;
     min-width: 13rem;
     max-width: 90vw;
-    /* Taller than the window (a long menu on a short window): scroll rather than
-       overflow, since clamping alone cannot make it fit. */
-    max-height: calc(100vh - 12px);
-    overflow-y: auto;
+    /* No overflow here by default — see `scrolls`. */
     background: var(--bg-panel);
     border: 1px solid var(--border);
     border-radius: 6px;
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
     padding: 4px 0;
+  }
+  /* The last resort for a menu longer than the window. Submenus are clipped in
+     this state, which is why it is not the default. */
+  .menu.scrolls {
+    max-height: calc(100vh - 12px);
+    overflow-y: auto;
   }
   .mi {
     position: relative;
