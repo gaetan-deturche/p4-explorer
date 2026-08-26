@@ -166,6 +166,7 @@
       hist = push(hist, before, coalesce);
       for (const c of before.cursors) touched(c.head.region);
       ds = next;
+      scheduleRecolor(); // the edited lines have no tokens yet
     };
     switch (a.t) {
       case "insert":
@@ -502,6 +503,23 @@
   }
 
   /** Colour every distinct line once; all three panes share the map. */
+  // Same as the diff window: tokens are keyed by line TEXT, so a line typed into
+  // the result pane has no entry and loses its colour. Debounced, because the
+  // highlighter needs a whole side to keep a block comment or a multi-line string
+  // coloured correctly.
+  let recolorTimer: number | null = null;
+  function scheduleRecolor() {
+    if (recolorTimer !== null) clearTimeout(recolorTimer);
+    recolorTimer = window.setTimeout(() => {
+      recolorTimer = null;
+      if (data) void recolor(data);
+    }, 250);
+  }
+
+  /** Cap on the token map: keyed by text and never forgetting, it would otherwise
+   *  accumulate every intermediate version of every edited line. */
+  const TOKEN_CAP = 20_000;
+
   async function recolor(d: MergeData) {
     const lang = langForFile(d.name);
     if (!lang) return;
@@ -514,6 +532,7 @@
     }
     batches[3] = ds ? ds.doc.regions.flatMap((r) => r.lines) : [];
     const map = new Map(tokens);
+    if (map.size > TOKEN_CAP) map.clear(); // every side is in `batches`, so it refills
     for (const lines of batches) {
       if (!lines.some((l) => !map.has(l))) continue;
       try {

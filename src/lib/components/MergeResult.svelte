@@ -9,7 +9,7 @@
   import { onMount, tick, type Snippet } from "svelte";
   import { selectionsOf, type Caret, type DocState, type MergeAction } from "$lib/mergedoc";
   import { shortcuts } from "$lib/shortcuts.svelte";
-  import { visualize } from "$lib/invisibles";
+  import { renderLine } from "$lib/invisibles";
   import type { TokenRun } from "$lib/syntax";
 
   // NOT named `state`: that shadows the $state rune, and `$state` would then read
@@ -24,6 +24,7 @@
     toolbarHeight,
     toolbar,
     showInvisibles = false,
+    hotOf,
     onAction,
   }: {
     /** The document and every cursor in it. Selections live here too, so the
@@ -43,6 +44,10 @@
     /** Draw spaces and tabs. Widths are unchanged by design (see invisibles.ts),
      *  so the caret and click mapping are unaffected. */
     showInvisibles?: boolean;
+    /** The changed span of a line, when the host knows one (the diff window does:
+     *  its blocks carry the ranges). Highlighting it keeps a one-character edit
+     *  from reading as a whole changed line. */
+    hotOf?: (region: number, line: number) => readonly [number, number] | null;
     onAction: (a: MergeAction) => void;
   } = $props();
 
@@ -429,13 +434,15 @@
   }
 </script>
 
-{#snippet codeOf(line: string)}
-  {#if showInvisibles}{#each visualize(tokens.get(line), line) as seg}<span
-        style:color={seg.color}
-        class:ghost={seg.ghost}>{seg.text}</span
-      >{/each}{:else if tokens.get(line)}{#each tokens.get(line) ?? [] as run}<span
-        style:color={run.color}>{run.content}</span
-      >{/each}{:else}{line}{/if}
+{#snippet codeOf(line: string, region: number, at: number)}
+  {#each renderLine(line, tokens.get(line), {
+    invisibles: showInvisibles,
+    hot: hotOf?.(region, at) ?? null,
+  }) as seg}<span
+      style:color={seg.color}
+      class:ghost={seg.ghost}
+      class:hot={seg.hot}>{seg.text}</span
+    >{/each}
 {/snippet}
 
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
@@ -472,7 +479,7 @@
       {#each r.lines as line, k (k)}
         <div class="rl k-{kind}" style="height:{lineHeight}px">
           <span class="mk">{MARK[kind] ?? ""}</span><span class="ln">{starts[i] + k}</span><span
-            class="code">{@render codeOf(line)}</span
+            class="code">{@render codeOf(line, r.region, k)}</span
           >
         </div>
       {/each}
@@ -640,6 +647,12 @@
     height: var(--lh);
     background: rgba(217, 141, 58, 0.28);
     pointer-events: none;
+  }
+  /* The part of the line that changed — the local side, so it takes the "added"
+     colour rather than the reference side's. */
+  .hot {
+    background: rgba(95, 175, 95, 0.3);
+    border-radius: 2px;
   }
   /* Whitespace marks: visible, never competing with the code. */
   .ghost {

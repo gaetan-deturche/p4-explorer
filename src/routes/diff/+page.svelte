@@ -12,7 +12,7 @@
   import { invoke } from "@tauri-apps/api/core";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { diffLines, lineEndings, lineKey, type DiffRow } from "$lib/linediff";
-  import { endingLabel, visualize } from "$lib/invisibles";
+  import { endingLabel, renderLine } from "$lib/invisibles";
   import { cacheGet, cacheSet } from "$lib/store.svelte";
   import { langForFile, tokenizeLines, type TokenRun } from "$lib/syntax";
   import MergeResult from "$lib/components/MergeResult.svelte";
@@ -73,6 +73,12 @@
     left: string[];
     right: string[];
     leftFrom: number; // 1-based line number in the left file
+    /** The changed span within each line, parallel to `left` / `right`. Comes
+     *  from the diff itself (linediff trims the common prefix and suffix), and
+     *  was previously dropped on the way into the blocks — so a one-character
+     *  edit painted the whole line as changed. */
+    lhot: (readonly [number, number] | null)[];
+    rhot: (readonly [number, number] | null)[];
   }
 
   let leftText = "";
@@ -288,14 +294,22 @@
       const kind: Block["kind"] = row.type === "same" ? "same" : "change";
       const last = out[out.length - 1];
       if (last && last.kind === kind) {
-        if (row.l) last.left.push(row.l.text);
-        if (row.r) last.right.push(row.r.text);
+        if (row.l) {
+          last.left.push(row.l.text);
+          last.lhot.push(row.lh ?? null);
+        }
+        if (row.r) {
+          last.right.push(row.r.text);
+          last.rhot.push(row.rh ?? null);
+        }
         continue;
       }
       out.push({
         kind,
         left: row.l ? [row.l.text] : [],
         right: row.r ? [row.r.text] : [],
+        lhot: row.l ? [row.lh ?? null] : [],
+        rhot: row.r ? [row.rh ?? null] : [],
         leftFrom: row.l?.no ?? (last ? last.leftFrom + last.left.length : 1),
       });
     }
@@ -382,6 +396,7 @@ initSplit(leftText.trim() === "");
   function reflow() {
     if (!ds || !editable || hasSelection(ds)) return;
     rebuild(docText(ds.doc), absoluteLine());
+    scheduleRecolor(); // the edited lines have no tokens yet
   }
 
   /** The caret's line counted from the top of the right file. */
@@ -609,6 +624,29 @@ initSplit(leftText.trim() === "");
   function base(p: string): string {
     return p.split(/[\\/]/).pop() ?? p;
   }
+  // Tokens are keyed by line TEXT, so a line you just typed has no entry and
+  // renders with no colour at all. Re-tokenizing is debounced rather than done per
+  // keystroke: it runs the highlighter over a whole side, which is what keeps a
+  // line inside a block comment or a multi-line string coloured correctly — an
+  // isolated line has no context to colour it by.
+  let recolorTimer: number | null = null;
+  function scheduleRecolor() {
+    if (recolorTimer !== null) clearTimeout(recolorTimer);
+    recolorTimer = window.setTimeout(() => {
+      recolorTimer = null;
+      if (!ds) return;
+      void recolor(
+        blocks.flatMap((b) => b.left),
+        ds.doc.regions.flatMap((r) => r.lines),
+      );
+    }, 250);
+  }
+
+  /** Cap on the token map. It is keyed by text and never forgets, so a long
+   *  editing session accumulates every intermediate version of every line; past
+   *  this it starts again from what is on screen. */
+  const TOKEN_CAP = 20_000;
+
   async function recolor(left: string[], right: string[]) {
     // The window TITLE carries revisions ("foo.cpp#12 vs #14") and has no trailing
     // extension, so the language has to come from the paths.
@@ -616,6 +654,7 @@ initSplit(leftText.trim() === "");
     if (!lang) return;
     const dark = window.matchMedia("(prefers-color-scheme: dark)").matches;
     const map = new Map(tokens);
+    if (map.size > TOKEN_CAP) map.clear(); // both sides are passed in, so it refills
     for (const lines of [left, right]) {
       if (!lines.some((l) => !map.has(l))) continue;
       try {
@@ -655,15 +694,22 @@ initSplit(leftText.trim() === "");
 </script>
 
 <!-- Read-only side: mark, line number, coloured code — as in the resolve window. -->
-{#snippet pane(lines: string[], from: number, kind: string, fill = 0)}
+{#snippet pane(
+  lines: string[],
+  hots: (readonly [number, number] | null)[],
+  from: number,
+  kind: string,
+  fill = 0,
+)}
   {#each lines as line, k}
     <div class="line k-{kind}"><span class="mk">{kind === "del" ? "-" : ""}</span><span class="ln"
         >{from + k}</span
       ><span class="src"
-        >{#if invisibles}{#each visualize(tokens.get(line), line) as seg}<span
-              style:color={seg.color} class:ghost={seg.ghost}>{seg.text}</span
-            >{/each}{:else if tokens.get(line)}{#each tokens.get(line) ?? [] as run}<span
-              style:color={run.color}>{run.content}</span>{/each}{:else}{line || " "}{/if}</span
+        >{#each renderLine(line, tokens.get(line), { invisibles, hot: hots[k] }) as seg}<span
+            style:color={seg.color}
+            class:ghost={seg.ghost}
+            class:hot={seg.hot}>{seg.text}</span
+          >{:else}<span> </span>{/each}</span
       ></div>
   {/each}
   <!-- Rows this side does not HAVE: the block is taller because the other side
@@ -762,7 +808,7 @@ initSplit(leftText.trim() === "");
               data-change={b.kind === "same" ? undefined : i}
               style="top:{tops[i]}px; height:{rows[i] * LH}px"
             >
-              {@render pane(b.left, starts[i].l, leftKind(i), rows[i] - b.left.length)}
+              {@render pane(b.left, b.lhot, starts[i].l, leftKind(i), rows[i] - b.left.length)}
             </div>
           {/each}
         </div>
@@ -798,6 +844,7 @@ initSplit(leftText.trim() === "");
             {kinds}
             {tokens}
             showInvisibles={invisibles}
+            hotOf={(region, line) => blocks[region]?.rhot[line] ?? null}
             lineHeight={LH}
             toolbarHeight={TOOLBAR}
             toolbar={noToolbar}
@@ -886,6 +933,12 @@ initSplit(leftText.trim() === "");
     color: var(--dim, #8a8a8a);
     cursor: pointer;
     white-space: nowrap;
+  }
+  /* The part of the line that actually changed. Strong enough to find at a
+     glance, weak enough to read the code through. */
+  .src :global(.hot) {
+    background: rgba(217, 135, 58, 0.3);
+    border-radius: 2px;
   }
   /* Whitespace marks: present, but never competing with the code. */
   .src :global(.ghost) {
