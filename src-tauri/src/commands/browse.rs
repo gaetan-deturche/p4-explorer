@@ -20,6 +20,139 @@ pub async fn p4_clients(conn: P4Conn) -> Res {
     run(conn, args).await
 }
 
+/// One workspace's spec, as the manage dialog shows it.
+#[derive(serde::Serialize, Clone, Debug, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ClientSpec {
+    pub client: String,
+    pub owner: String,
+    pub host: String,
+    pub root: String,
+    pub stream: String,
+    pub description: String,
+    pub options: String,
+    pub submit_options: String,
+    pub line_end: String,
+    pub access: String,
+    pub update: String,
+}
+
+/// Read a workspace spec (`client -o`, tagged).
+#[tauri::command]
+pub async fn p4_client_spec(conn: P4Conn, client: String) -> Result<ClientSpec, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let recs = p4::run(&conn, &["client", "-o", &client])?;
+        let r = recs.first().ok_or("p4 returned no spec for that workspace")?;
+        let get = |k: &str| r.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+        Ok(ClientSpec {
+            client: get("Client"),
+            owner: get("Owner"),
+            host: get("Host"),
+            root: get("Root"),
+            stream: get("Stream"),
+            description: get("Description"),
+            options: get("Options"),
+            submit_options: get("SubmitOptions"),
+            line_end: get("LineEnd"),
+            access: get("Access"),
+            update: get("Update"),
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// A stream client's View is derived from its Stream, so the template's View is
+/// dropped before writing back — `client -i` regenerates it. Leaving it in makes
+/// p4 reject a spec whose View no longer matches the stream.
+fn drop_view(form: &str) -> String {
+    match form.find("\nView:") {
+        Some(i) => format!("{}\n", &form[..i]),
+        None => form.to_string(),
+    }
+}
+
+/// Change an existing workspace's root, stream, host or description.
+///
+/// The edit goes through `p4 --field`, which patches p4's own form: every field
+/// the dialog does not touch (Options, SubmitOptions, LineEnd, the writable
+/// entries, the View of a non-stream client) survives untouched. Rebuilding a
+/// spec from parsed fields would quietly drop whatever this app does not know
+/// about.
+#[tauri::command]
+pub async fn p4_client_save(
+    conn: P4Conn,
+    client: String,
+    root: String,
+    stream: String,
+    host: String,
+    description: String,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut args: Vec<String> = Vec::new();
+        for (field, value) in [
+            ("Root", &root),
+            ("Host", &host),
+            ("Description", &description),
+        ] {
+            args.push("--field".into());
+            args.push(format!("{field}={}", value.trim()));
+        }
+        // An empty stream would mean "make this a classic client", which is not
+        // what an empty box in the dialog means — it is left alone instead.
+        if !stream.trim().is_empty() {
+            args.push("--field".into());
+            args.push(format!("Stream={}", stream.trim()));
+        }
+        args.extend(["client".into(), "-o".into(), client.clone()]);
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        let form = p4::run_raw(&conn, &refs)?;
+        let form = if stream.trim().is_empty() { form } else { drop_view(&form) };
+        p4::run_raw_stdin(&conn, &["client", "-i"], &form)?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Delete a workspace (`client -d`).
+///
+/// p4 refuses at severity 3 with the reason ("has files opened. To delete the
+/// client, revert any opened files and delete any pending changes first."), which
+/// reaches the caller as the error text — no forcing, and no guessing why.
+#[tauri::command]
+pub async fn p4_client_delete(conn: P4Conn, client: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        p4::run_strict(&conn, &["client", "-d", &client]).map(|_| ())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Rename a workspace (`renameclient`), which p4 allows the client's OWNER —
+/// admin is not needed (checked against this server).
+///
+/// p4 moves the pending changes, shelves, opened files and have-list with it. It
+/// refuses for a client with opened streams or promoted shelves, and for a target
+/// name that already exists; in each case its own text is what comes back.
+#[tauri::command]
+pub async fn p4_client_rename(conn: P4Conn, from: String, to: String) -> Result<(), String> {
+    let to = to.trim().to_string();
+    if to.is_empty() {
+        return Err("A new name is required.".into());
+    }
+    if to == from {
+        return Err("That is already its name.".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let from_arg = format!("--from={from}");
+        let to_arg = format!("--to={to}");
+        p4::run_strict(&conn, &["renameclient", &from_arg, &to_arg]).map(|_| ())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Create a new stream workspace bound to this machine: sets Root + Stream +
 /// Host (this host) and drops the View so p4 generates it from the stream.
 #[tauri::command]
@@ -207,4 +340,24 @@ pub async fn list_local_dir(path: String) -> Result<LocalDir, String> {
     })
     .await
     .map_err(|e| format!("list_local_dir task failed: {e}"))?
+}
+
+#[cfg(test)]
+mod client_spec_tests {
+    use super::drop_view;
+
+    #[test]
+    fn a_stream_clients_view_is_dropped() {
+        let form = "Client:\tws\nStream:\t//d/main\nView:\n\t//d/main/... //ws/...\n";
+        let out = drop_view(form);
+        assert!(!out.contains("View:"));
+        assert!(out.contains("Stream:"), "everything before the View survives");
+        assert!(out.ends_with('\n'), "p4 wants a trailing newline");
+    }
+
+    #[test]
+    fn a_form_without_a_view_is_untouched() {
+        let form = "Client:\tws\nRoot:\tC:\\x\n";
+        assert_eq!(drop_view(form), form);
+    }
 }

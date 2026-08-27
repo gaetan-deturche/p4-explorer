@@ -12,6 +12,8 @@
     reconciling,
     onClientChange,
     onNewWorkspace,
+    onPickWorkspaces,
+    onManageWorkspaces,
     onServerChange,
     onAddServer,
     onServerContext,
@@ -29,6 +31,10 @@
     reconciling: boolean;
     onClientChange: (client: string) => void;
     onNewWorkspace: () => void;
+    /** About to open the workspace picker: a chance to re-read the list. */
+    onPickWorkspaces: () => void;
+    /** The picker's "Manage workspaces…" entry. */
+    onManageWorkspaces: () => void;
     onServerChange: (port: string) => void;
     onAddServer: () => void;
     onServerContext: (e: MouseEvent) => void;
@@ -52,12 +58,16 @@
   }
 
   const NEW_WS = "__new_ws__";
+  const MANAGE_WS = "__manage_ws__";
   function onWsPick(e: Event) {
     const sel = e.currentTarget as HTMLSelectElement;
     const v = sel.value;
-    if (v === NEW_WS) {
-      sel.value = conn.client; // don't leave "New…" selected
-      onNewWorkspace();
+    // The two action entries are not workspaces: put the selection back before
+    // opening anything, or the picker is left showing "New…" as if it were one.
+    if (v === NEW_WS || v === MANAGE_WS) {
+      sel.value = conn.client;
+      if (v === NEW_WS) onNewWorkspace();
+      else onManageWorkspaces();
       return;
     }
     onClientChange(v);
@@ -94,7 +104,14 @@
 
     <label class="ws" title="● workspace bound to this machine (Host)   ○ shared / another host">
       Workspace
-      <select class="mono" value={conn.client} onchange={onWsPick} disabled={!connected}>
+      <select
+    class="mono"
+    value={conn.client}
+    onchange={onWsPick}
+    onpointerdown={onPickWorkspaces}
+    onfocus={onPickWorkspaces}
+    disabled={!connected}
+  >
         <option value="">— select —</option>
         {#each clients as c (c.client)}
           <option value={c.client}>
@@ -104,6 +121,7 @@
           </option>
         {/each}
         <option value={NEW_WS}>＋ New workspace…</option>
+      <option value={MANAGE_WS}>⚙ Manage workspaces…</option>
       </select>
     </label>
   </div>

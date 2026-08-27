@@ -138,6 +138,10 @@ function startKeepAlive() {
       }
       if (browse.rootPath) p4.dirs(h.conn(), browse.rootPath).catch(() => {}); // keep cache warm
       void pending.checkExternalChanges(); // external checkouts show within a tick
+      // A workspace created elsewhere (p4v, another machine) used to appear only
+      // after a reconnect. Measured at 0.05s for this user's 7 workspaces, so
+      // there is no reason to hold a stale list.
+      void connection.refreshClients();
     } catch {
       if (connected) {
         connected = false;
@@ -175,6 +179,33 @@ export const connection = {
   get serverVersion() {
     return serverVersion;
   },
+  /** Re-read the workspace list. Cheap (`p4 clients -u <user>`: 0.05s here), so
+   *  it runs on the keepalive tick and again when the picker is about to open —
+   *  a native select does not repaint a popup that is already showing, so the
+   *  list has to be current BEFORE it opens. */
+  async refreshClients() {
+    if (!h || !connected) return;
+    const conn = h.conn();
+    if (!conn.port) return;
+    try {
+      const list = await p4.clients(conn);
+      if (h.conn().port !== conn.port) return; // server switched mid-fetch
+      // Only write when something actually changed. Replacing the array on every
+      // tick would re-render the picker's options — and a native select does not
+      // take kindly to that while its popup is open.
+      const fingerprint = (l: P4Record[]) =>
+        l
+          .map((c) => `${c.client}|${c.Stream ?? ""}|${c.Root ?? ""}|${c.Host ?? ""}`)
+          .sort()
+          .join(";");
+      if (fingerprint(list) === fingerprint(clients)) return;
+      setClientList(list);
+      saveClientsFor(conn.port, list);
+    } catch {
+      /* keep the list we have */
+    }
+  },
+
   get clients() {
     return clients;
   },
@@ -451,6 +482,62 @@ export const connection = {
     saveClientsFor(conn.port, list);
     await connection.selectClient(name.trim());
   },
+  /** Read one workspace's spec, for the manage dialog. */
+  clientSpec(client: string) {
+    return p4.clientSpec(h!.conn(), client);
+  },
+  /** Change a workspace's root, stream, host or description.
+   *
+   *  Editing the workspace currently in use changes what the app is looking at —
+   *  a new root or stream means a different tree — so it is re-opened afterwards
+   *  rather than left describing the old one. */
+  async saveWorkspace(v: {
+    client: string;
+    root: string;
+    stream: string;
+    host: string;
+    description: string;
+  }) {
+    if (!h) return;
+    const conn = h.conn();
+    await p4.clientSave(conn, v.client, v.root, v.stream, v.host, v.description);
+    await connection.refreshClients();
+    h.setNotice(`Workspace ${v.client} updated.`);
+    if (conn.client === v.client) await connection.selectClient(v.client);
+  },
+  /** Rename a workspace. p4 moves its pending changes, shelves, opened files and
+   *  have-list across; what it will NOT do is rename a client with opened streams
+   *  or promoted shelves, and it refuses a name that already exists — its own
+   *  words come back in that case.
+   *
+   *  Renaming the one in use leaves the app pointed at a name that no longer
+   *  exists, so it re-selects under the new one. Every cache scope is keyed by
+   *  client name, so this also starts that workspace's caches afresh rather than
+   *  reading another workspace's leftovers. */
+  async renameWorkspace(from: string, to: string) {
+    if (!h) return;
+    const conn = h.conn();
+    await p4.clientRename(conn, from, to);
+    await connection.refreshClients();
+    h.setNotice(`Workspace ${from} renamed to ${to}.`);
+    if (conn.client === from) await connection.selectClient(to);
+  },
+  /** Delete a workspace. p4 refuses while it holds opened files or pending
+   *  changes and says so; that text is what the caller reports. Deleting the one
+   *  in use leaves nothing selected, which is the honest state. */
+  async deleteWorkspace(client: string) {
+    if (!h) return;
+    const conn = h.conn();
+    await p4.clientDelete(conn, client);
+    await connection.refreshClients();
+    h.setNotice(`Workspace ${client} deleted.`);
+    if (conn.client === client) await connection.selectClient("");
+  },
+  /** This machine's host name, for the manage dialog's "bound to this machine". */
+  get clientHost() {
+    return clientHost;
+  },
+
   /** A P4V-style default workspace name: user_host_NNNN (fresh number each call). */
   suggestWorkspaceName(): string {
     const clean = (s: string) => s.replace(/[^A-Za-z0-9_.-]+/g, "").trim();

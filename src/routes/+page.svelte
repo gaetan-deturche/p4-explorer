@@ -42,6 +42,7 @@
   import LoginDialog from "$lib/components/LoginDialog.svelte";
   import ApprovalDialog from "$lib/components/ApprovalDialog.svelte";
   import NewWorkspaceDialog from "$lib/components/NewWorkspaceDialog.svelte";
+  import ManageWorkspacesDialog from "$lib/components/ManageWorkspacesDialog.svelte";
   import SyncProgressDialog from "$lib/components/SyncProgressDialog.svelte";
   import SyncErrorDialog from "$lib/components/SyncErrorDialog.svelte";
   import UpdateDialog from "$lib/components/UpdateDialog.svelte";
@@ -190,6 +191,7 @@
   let serverCtx = $state<{ x: number; y: number } | null>(null);
   let addServerOpen = $state(false);
   let newWorkspaceOpen = $state(false);
+  let manageWsOpen = $state(false); // the picker's "Manage workspaces…" dialog
 
   // Center tab. History/details pane lives in $lib/history.svelte.ts; the depot
   // tree, streams/repo tabs and index live in $lib/browse.svelte.ts.
@@ -1031,6 +1033,8 @@
     {reconciling}
     onClientChange={(c) => connection.selectClient(c)}
     onNewWorkspace={() => (newWorkspaceOpen = true)}
+    onPickWorkspaces={() => void connection.refreshClients()}
+    onManageWorkspaces={() => (manageWsOpen = true)}
     onServerChange={(p) => connection.switchServerTo(p)}
     onAddServer={() => (addServerOpen = true)}
     onServerContext={(e) => {
@@ -1636,6 +1640,23 @@
       connection.addAndSwitch(port);
     }}
     onCancel={() => (addServerOpen = false)}
+  />
+{/if}
+
+{#if manageWsOpen}
+  <ManageWorkspacesDialog
+    clients={connection.clients}
+    localClients={connection.localClients}
+    current={conn.client}
+    clientHost={connection.clientHost}
+    loadSpec={(c) => connection.clientSpec(c)}
+    onSave={(v) => connection.saveWorkspace(v)}
+    onRename={(from, to) => connection.renameWorkspace(from, to)}
+    onDelete={(c) => connection.deleteWorkspace(c)}
+    pickFolder={(s) => connection.pickFolder(s)}
+    loadStreams={() => connection.loadStreams()}
+    {askConfirm}
+    onClose={() => (manageWsOpen = false)}
   />
 {/if}
 

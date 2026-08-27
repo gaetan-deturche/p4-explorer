@@ -335,6 +335,21 @@ export function appLog(line: string): void {
   void invoke("app_log", { line }).catch(() => {});
 }
 
+/** A workspace spec, as the manage dialog reads it. */
+export type ClientSpec = {
+  client: string;
+  owner: string;
+  host: string;
+  root: string;
+  stream: string;
+  description: string;
+  options: string;
+  submitOptions: string;
+  lineEnd: string;
+  access: string;
+  update: string;
+};
+
 export const p4 = {
   info: (conn: P4Conn) => call("p4_info", { conn }),
   clients: (conn: P4Conn) => call("p4_clients", { conn }),
@@ -424,6 +439,22 @@ export const p4 = {
   unchangedOpen: (conn: P4Conn) => g<string[]>("p4_unchanged_open", { conn }),
   /** Why a sync could not overwrite these paths — one entry per file. */
   syncBlockers: (conn: P4Conn, files: string[]) => g<SyncBlocker[]>("p4_sync_blockers", { conn, files }),
+  /** One workspace's spec. */
+  clientSpec: (conn: P4Conn, client: string) => g<ClientSpec>("p4_client_spec", { conn, client }),
+  /** Change a workspace's root / stream / host / description. */
+  clientSave: (
+    conn: P4Conn,
+    client: string,
+    root: string,
+    stream: string,
+    host: string,
+    description: string,
+  ) => g<void>("p4_client_save", { conn, client, root, stream, host, description }),
+  /** Delete a workspace; p4's reason comes back on refusal. */
+  clientDelete: (conn: P4Conn, client: string) => g<void>("p4_client_delete", { conn, client }),
+  /** Rename a workspace, moving its pending work with it. */
+  clientRename: (conn: P4Conn, from: string, to: string) =>
+    g<void>("p4_client_rename", { conn, from, to }),
   /** Depot paths that differ from these only in case (one file on Windows). */
   caseTwins: (conn: P4Conn, files: string[]) =>
     g<{ file: string; twin: string }[]>("p4_case_twins", { conn, files }),

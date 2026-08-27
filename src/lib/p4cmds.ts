@@ -81,6 +81,10 @@ export const P4_COMMANDS: P4Cmd[] = [
   // here or safe mode waves it through. p4_revert_local reverts open files and
   // cleans offline ones — the most destructive thing in the Pending tab.
   { key: "p4_revert_local", label: "revert / clean (discard local changes)", read: false },
+  { key: "p4_client_spec", label: "client -o (read a workspace spec)", read: true },
+  { key: "p4_client_save", label: "client -i (change a workspace)", read: false },
+  { key: "p4_client_delete", label: "client -d (delete a workspace)", read: false },
+  { key: "p4_client_rename", label: "renameclient", read: false },
   { key: "p4_unchanged_open", label: "diff -sr (opened but unchanged)", read: true },
   { key: "p4_sync_blockers", label: "fstat (why a sync was refused)", read: true },
   { key: "p4_case_twins", label: "dirs/files (case-clash check)", read: true },
