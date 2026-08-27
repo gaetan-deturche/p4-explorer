@@ -632,24 +632,26 @@ pub async fn p4_revert_local(
             .filter_map(|r| r.get("depotFile").and_then(|v| v.as_str()).map(str::to_string))
             .collect();
 
+        // Notes carry the reasons: p4's per-file warnings AND, just as important,
+        // the error text when a command fails outright. Dropping the Err was how a
+        // `p4 clean` that could not replace the file on disk left no trace outside
+        // the Commands tab.
         let mut notes: Vec<String> = Vec::new();
-        if !open.is_empty() {
-            let mut a = vec!["revert".to_string()];
-            a.extend(open.clone());
-            let argv: Vec<&str> = a.iter().map(String::as_str).collect();
-            if let Ok((_recs, mut n)) = p4::run_notes(&conn, &argv) {
-                notes.append(&mut n);
+        let mut run_step = |verb: &str, paths: &[String]| {
+            if paths.is_empty() {
+                return;
             }
-        }
+            let mut a = vec![verb.to_string()];
+            a.extend(paths.iter().cloned());
+            let argv: Vec<&str> = a.iter().map(String::as_str).collect();
+            match p4::run_notes(&conn, &argv) {
+                Ok((_recs, mut n)) => notes.append(&mut n),
+                Err(e) => notes.push(explain(&e)),
+            }
+        };
+        run_step("revert", &open);
         let offline: Vec<String> = files.iter().filter(|f| !open.contains(f)).cloned().collect();
-        if !offline.is_empty() {
-            let mut a = vec!["clean".to_string()];
-            a.extend(offline.clone());
-            let argv: Vec<&str> = a.iter().map(String::as_str).collect();
-            if let Ok((_recs, mut n)) = p4::run_notes(&conn, &argv) {
-                notes.append(&mut n);
-            }
-        }
+        run_step("clean", &offline);
 
         // Verify: still open, or still differing from the depot?
         let mut args = vec!["opened"];
@@ -684,6 +686,24 @@ pub async fn p4_revert_local(
     .map_err(|e| e.to_string())?
 }
 
+/// p4's failure text, with the cases worth naming named.
+///
+/// The one that brought this about: `p4 clean` retries the replace ten times and
+/// then reports a rename failure, which is Windows saying another program holds
+/// the file open — the editor, or a scanner. That is actionable; "failed to
+/// rename after 10 attempts" on its own is not.
+fn explain(err: &str) -> String {
+    let low = err.to_lowercase();
+    if low.contains("rename") && (low.contains("attempts") || low.contains("exist")) {
+        return format!(
+            "p4 could not replace the file on disk: another program is holding it open \
+             (the editor, or a scanner). Close it and try again. — {}",
+            err.trim()
+        );
+    }
+    err.trim().to_string()
+}
+
 /// The verdict for one file. `notes` are p4's warnings for the whole run — the
 /// only place a per-file refusal is explained, since those come back with exit
 /// status 0.
@@ -701,11 +721,13 @@ fn outcome(
         .filter(|n| n.contains(file) || n.contains(leaf))
         .collect();
     if !still_open && !still_dirty {
+        // Clean now — but if p4 complained on the way, say what it said rather
+        // than reporting a silent success.
         return RevertOutcome {
             file: file.to_string(),
             ok: true,
             how: if was_open { "reverted".into() } else { "cleaned".into() },
-            message: String::new(),
+            message: mine.join(" — "),
         };
     }
     let why = if !mine.is_empty() {
@@ -910,6 +932,30 @@ mod revert_tests {
         let r = outcome("//d/a.uasset", false, false, true, &notes);
         assert!(!r.ok);
         assert!(r.message.contains("not opened on this client"));
+    }
+
+    #[test]
+    fn a_locked_file_is_named_as_such() {
+        // The real text p4 produced, which on its own tells the user nothing.
+        let raw = "rename: failed to rename Zoo_3C.umap after 10 attempts: \n                   Impossible de creer un fichier deja existant";
+        let out = explain(raw);
+        assert!(out.contains("another program is holding it open"));
+        assert!(out.contains("after 10 attempts"), "p4's own words are kept too");
+    }
+
+    #[test]
+    fn an_unrelated_error_passes_through() {
+        assert_eq!(explain("  //depot/a - no such file(s).  "), "//depot/a - no such file(s).");
+    }
+
+    #[test]
+    fn a_file_left_clean_still_reports_what_p4_said() {
+        // A command can fail on one file and leave another clean; the clean one is
+        // a success, but a complaint about it must not vanish.
+        let notes = vec!["Zoo_3C.umap - p4 grumbled".to_string()];
+        let r = outcome("//d/Zoo_3C.umap", false, false, false, &notes);
+        assert!(r.ok);
+        assert_eq!(r.message, "Zoo_3C.umap - p4 grumbled");
     }
 
     #[test]

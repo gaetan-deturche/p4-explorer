@@ -1288,6 +1288,18 @@ export const pending = {
         // file that is not open — and the row simply came back at the next scan.
         const results = await p4.revertLocal(h!.conn(), files);
         const failed = results.filter((r) => !r.ok);
+        // p4 can complain about a file it nonetheless left clean; that is a notice,
+        // not a failure, but it must not be silent either.
+        const moaned = results.filter((r) => r.ok && r.message);
+        if (moaned.length && !failed.length) {
+          // 0: it waits to be dismissed. This lands minutes after the click on a
+          // file p4 struggled with, so a fading banner would be gone before the
+          // user looks back.
+          h!.setNotice(
+            `${moaned.length === 1 ? moaned[0].file.split("/").pop() : `${moaned.length} files`}: ${moaned[0].message}`,
+            0,
+          );
+        }
         if (failed.length) {
           const lines = failed.map((r) => `${r.file.split("/").pop()} — ${r.message}`);
           // Thrown, so `mutate` rolls the optimistic removal back: these rows

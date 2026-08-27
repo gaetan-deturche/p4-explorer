@@ -132,15 +132,27 @@
   }
 
   // Transient status helpers (auto-clear).
+  /** A notice fades on its own; `ms = 0` makes it wait to be dismissed, for the
+   *  ones that arrive long after the click that caused them. */
   function setNotice(m: string, ms = 4000) {
     notice = m;
     notifications.add("notice", m);
-    window.setTimeout(() => (notice = ""), ms);
+    if (ms > 0) window.setTimeout(() => (notice = ""), ms);
   }
-  function setError(m: string, ms = 6000) {
+  /** Errors STAY until dismissed.
+   *
+   *  Clearing themselves after six seconds is fine for a message that arrives
+   *  while you are looking, and useless for the ones that matter most: a revert
+   *  that fails because another program holds the file reports four minutes after
+   *  the click (p4 retries the replace ten times), long after you have looked
+   *  away. The banner appeared and vanished, and the only evidence left was the
+   *  Commands tab. An error worth showing is worth acknowledging.
+   *
+   *  `ms` is still honoured for a caller that explicitly wants a transient one. */
+  function setError(m: string, ms?: number) {
     error = m;
     notifications.add("error", m);
-    window.setTimeout(() => (error = ""), ms);
+    if (ms !== undefined) window.setTimeout(() => (error = ""), ms);
   }
 
   // Feature stores wired in onMount: sync ($lib/sync.svelte.ts), history, browse,
@@ -1033,10 +1045,16 @@
   {#if error || notice}
     <div class="toasts">
       {#if error}
-        <div class="error mono">{error}</div>
+        <div class="error mono">
+          <span class="etext">{error}</span>
+          <button class="x" title="Dismiss" onclick={() => (error = "")}>✕</button>
+        </div>
       {/if}
       {#if notice}
-        <div class="notice">{notice}</div>
+        <div class="notice">
+          <span class="etext">{notice}</span>
+          <button class="x" title="Dismiss" onclick={() => (notice = "")}>✕</button>
+        </div>
       {/if}
     </div>
   {/if}
@@ -1701,12 +1719,55 @@
   .error {
     background: var(--warn);
     color: white;
+    /* Room for the dismiss button, and the text wraps rather than being clipped:
+       a failure explains itself in a sentence or two. */
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+  }
+  .error .etext {
+    flex: 1;
     white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .error .x {
+    flex: none;
+    padding: 0 2px;
+    background: none;
+    border: 0;
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+    opacity: 0.75;
+  }
+  .error .x:hover {
+    opacity: 1;
   }
   .notice {
     background: var(--have-bg);
     color: var(--have);
     border: 1px solid var(--have);
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+  }
+  .notice .etext {
+    flex: 1;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .notice .x {
+    flex: none;
+    padding: 0 2px;
+    background: none;
+    border: 0;
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+    opacity: 0.75;
+  }
+  .notice .x:hover {
+    opacity: 1;
   }
   .cols {
     flex: 1;
