@@ -151,6 +151,104 @@ export interface MergeData {
 }
 
 /** A changelist's Swarm review status (id 0 = requested, not yet created). */
+/** One review's participants, versions and state — the review WINDOW's subject,
+ *  where ReviewRow is a row in the list. */
+export interface ReviewDetail {
+  id: number;
+  state: string;
+  stateLabel: string;
+  author: string;
+  description: string;
+  updated: number;
+  testStatus: string;
+  reviewers: Reviewer[];
+  versions: ReviewVersion[];
+  changes: string[];
+  commits: string[];
+}
+export interface Reviewer {
+  user: string;
+  /** 1 = up, -1 = down, 0 = has not voted. */
+  vote: number;
+  votedVersion: number;
+  /** Their vote is older than the current version, so it no longer stands for
+   *  what is on the review now. */
+  stale: boolean;
+  required: boolean;
+  isAuthor: boolean;
+}
+export interface ReviewVersion {
+  n: number; // 1-based, as Swarm numbers them
+  change: string; // the changelist holding THIS version's files
+  pending: boolean; // shelved (true) or submitted
+  user: string;
+  time: number;
+}
+/** One user on the server. */
+export interface UserRow {
+  user: string;
+  fullName: string;
+  email: string;
+}
+
+/** One Swarm comment on a review. Anchored ones carry the file, the version and
+ *  the line they were written against. */
+export interface Comment {
+  id: number;
+  body: string;
+  user: string;
+  time: number;
+  updated: number;
+  edited: boolean;
+  /** "comment" | "open" | "addressed" | "verified" — Swarm's task workflow. */
+  taskState: string;
+  /** Swarm's `closed` flag: the thread is archived. */
+  closed: boolean;
+  file: string; // "" for a comment on the review as a whole
+  version: number;
+  leftLine: number;
+  rightLine: number;
+  /** The diff lines Swarm stored with the anchor, prefixes included. */
+  content: string[];
+  parent: number; // the comment this replies to; 0 = a new thread
+  /** Nothing but the Unreal plugin's own bookkeeping — not a comment a person
+   *  wrote, and hidden everywhere. */
+  bookkeeping: boolean;
+  assetFile: string;
+  assetCategory: string;
+}
+/** Where to attach a new comment. */
+export interface CommentAnchor {
+  file: string;
+  version: number;
+  leftLine: number;
+  rightLine: number;
+  content: string[];
+  parent: number;
+}
+/** Which snapshot to read a file at: a version, or the depot revisions that
+ *  version was written against. */
+export interface VersionRef {
+  change: string;
+  pending: boolean;
+  label: string;
+  /** Read each file's base revision instead of the version's own content — the
+   *  comparison point that answers "what does this version change?". */
+  base: boolean;
+}
+/** What this user may do to a review, straight from Swarm — the window offers
+ *  these and nothing else, rather than guessing at permissions. */
+export interface Transitions {
+  items: { key: string; label: string }[];
+  blocked: string[];
+}
+/** One file, compared between two versions of a review. */
+export interface VersionFile {
+  depotFile: string;
+  status: "changed" | "same" | "added" | "removed";
+  sizeA: number;
+  sizeB: number;
+}
 export interface ReviewInfo {
   id: number;
   state: string; // needsReview | needsRevision | approved | rejected | archived | requested
@@ -302,9 +400,37 @@ export function openFileHistoryWindow(conn: P4Conn, depotFile: string): Promise<
   return invoke<void>("open_file_history_window", { conn, depotFile });
 }
 
-/** Open the in-app side-by-side diff window on a materialized pair. */
-export function openDiffWindow(pair: DiffPair): Promise<void> {
-  return invoke<void>("open_diff_window", { pair });
+/** Open (or re-focus) the window for one review. */
+export function openReviewWindow(conn: P4Conn, id: number): Promise<void> {
+  return invoke<void>("open_review_window", { conn, id });
+}
+
+/** Which review discussion a diff window is part of, and what each pane shows.
+ *  `leftVersion` 0 means the pane shows the BASE of `leftOf`. */
+export interface CommentTarget {
+  review: number;
+  file: string;
+  leftVersion: number;
+  leftOf: number;
+  rightVersion: number;
+}
+
+/** Open the in-app side-by-side diff window on a materialized pair.
+ *
+ *  `conn` + `comments` turn on the comment layer: with them the window can read
+ *  and post Swarm comments on the lines it is showing. Both or neither. */
+export function openDiffWindow(
+  pair: DiffPair,
+  conn: P4Conn | null = null,
+  comments: CommentTarget | null = null,
+): Promise<void> {
+  return invoke<void>("open_diff_window", { pair, conn, comments });
+}
+
+/** The connection and comment target a diff window was opened with. Rejects for
+ *  an ordinary diff, which has no discussion to join. */
+export function diffJob(job: string): Promise<{ conn: P4Conn; comments: CommentTarget }> {
+  return invoke<{ conn: P4Conn; comments: CommentTarget }>("diff_job", { job });
 }
 
 // Gate every backend call through safe mode (the allow decision + labels live in
@@ -414,6 +540,46 @@ export const p4 = {
   swarmUrl: (conn: P4Conn) => g<string>("swarm_url", { conn }),
   /** A page of Swarm reviews; every filter is applied server-side. */
   swarmReviews: (conn: P4Conn, query: ReviewQuery) => g<ReviewPage>("swarm_reviews", { conn, query }),
+  /** Everyone on the server: the id p4 and Swarm key on, plus the name people
+   *  know each other by. Used to resolve a half-typed name in a filter. */
+  users: (conn: P4Conn) => g<UserRow[]>("p4_users", { conn }),
+  /** Every comment on a review, oldest first. */
+  swarmComments: (conn: P4Conn, review: number) => g<Comment[]>("swarm_comments", { conn, review }),
+  /** Post a comment: on the review, on a line of a version's diff (anchor), or
+   *  as a reply (anchor.parent). Swarm mails the participants immediately. */
+  swarmAddComment: (
+    conn: P4Conn,
+    review: number,
+    body: string,
+    anchor: CommentAnchor | null,
+    taskState = "comment",
+  ) => g<Comment>("swarm_add_comment", { conn, review, body, anchor, taskState }),
+  /** Edit a body, move a task state, archive or unarchive a thread. */
+  swarmEditComment: (
+    conn: P4Conn,
+    id: number,
+    body: string | null,
+    taskState: string | null,
+    closed: boolean | null,
+  ) => g<Comment>("swarm_edit_comment", { conn, id, body, taskState, closed }),
+  /** The task states Swarm will accept for this comment (it names them when it
+   *  refuses one, which is the only way this version exposes them). */
+  swarmTaskTransitions: (conn: P4Conn, id: number) =>
+    g<string[]>("swarm_task_transitions", { conn, id }),
+  /** Everything about one review: reviewers with their votes, and its versions. */
+  swarmReviewDetail: (conn: P4Conn, id: number) =>
+    g<ReviewDetail>("swarm_review_detail", { conn, id }),
+  /** The state changes Swarm will accept from THIS user on THIS review. */
+  swarmTransitions: (conn: P4Conn, id: number) => g<Transitions>("swarm_transitions", { conn, id }),
+  /** Approve / reject / archive / ask for revision. Returns the new state label. */
+  swarmSetState: (conn: P4Conn, id: number, state: string) =>
+    g<string>("swarm_set_state", { conn, id, state }),
+  /** Which files differ between two versions of a review (digest comparison). */
+  reviewVersionFiles: (conn: P4Conn, a: VersionRef, b: VersionRef) =>
+    g<VersionFile[]>("review_version_files", { conn, a, b }),
+  /** One file as it stood at two versions, materialized for the diff window. */
+  diffPairVersions: (conn: P4Conn, depotFile: string, a: VersionRef, b: VersionRef) =>
+    g<DiffPair>("diff_pair_versions", { conn, depotFile, a, b }),
   /** Write a review's shelf out as a patch so the apply pipeline can take it. */
   reviewPatch: (conn: P4Conn, change: string) => g<ReviewPatch>("review_patch", { conn, change }),
   /** Copy a review's binary/added files verbatim (p4 print of the shelved rev). */

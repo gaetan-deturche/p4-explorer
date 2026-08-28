@@ -42,6 +42,8 @@
     onOpenDiff,
     onContext,
     onFileContext,
+    onOpenReview,
+    users = [],
   }: {
     rows: ReviewRow[];
     loading: boolean;
@@ -74,6 +76,10 @@
     onOpenDiff: (depotFile: string, rev: number, change: string, submitted: boolean) => void;
     onContext: (r: ReviewRow, e: MouseEvent) => void;
     onFileContext?: (f: P4Record, r: ReviewRow, e: MouseEvent) => void;
+    /** Open the review window on this review; a shelf has no review to open. */
+    onOpenReview?: (r: ReviewRow) => void;
+    /** Everyone on the server, for the user field's typeahead. */
+    users?: { user: string; fullName: string }[];
   } = $props();
 
   type Expanded = {
@@ -330,8 +336,18 @@
       <option value="reviewer">Reviewer</option>
     </select>
 
+    <!-- A native typeahead over the whole user list: Swarm keys on the exact id
+         ("leo-paul" is not "leo-paul.couturier"), so picking one is worth making
+         easy. A partial still works — the query resolves it — and the label
+         carries the full name, which is how people are actually known. -->
+    <datalist id="userlist">
+      {#each users as u (u.user)}
+        <option value={u.user} label={u.fullName ? `${u.user} — ${u.fullName}` : u.user}></option>
+      {/each}
+    </datalist>
     <input
       class="userbox"
+      list="userlist"
       placeholder="any user"
       value={userDraft}
       oninput={(e) => (userDraft = e.currentTarget.value)}
@@ -395,10 +411,11 @@
             class="rv"
             class:contextsel={contextReview === r.id}
             onclick={() => toggle(r)}
+            ondblclick={() => r.kind !== "shelf" && onOpenReview?.(r)}
             oncontextmenu={(e) => onContext(r, e)}
             title={r.kind === "shelf"
               ? `Shelved changelist @${r.change} — no review has been asked for it\n${r.description}`
-              : `Review ${r.id}\n${r.description}\n\nshelf: @${r.change}`}
+              : `Review ${r.id}\n${r.description}\n\nDouble-click to open the review window.\n\nshelf: @${r.change}`}
           >
             <span class="tw">{s?.open ? "▾" : "▸"}</span>
             <!-- A shelf has no review number, so its changelist identifies the

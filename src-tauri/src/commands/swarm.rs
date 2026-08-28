@@ -273,6 +273,150 @@ pub async fn swarm_shelved_no_review(
     .map_err(|e| format!("shelved-changelist scan failed: {e}"))?
 }
 
+/// How many people one half-typed name may stand for. Past this the filter has
+/// stopped being a filter, and a URL with hundreds of author[] values is not
+/// something to send at a server on the strength of two characters.
+const MAX_MATCHED_USERS: usize = 40;
+
+/// Lower-case and strip the accents, so a name typed on a plain keyboard reaches
+/// the account it belongs to. Our own list has "Léo-Paul Couturier" in it, and
+/// nobody types that é into a filter box.
+fn fold(s: &str) -> String {
+    s.to_lowercase()
+        .chars()
+        .map(|c| match c {
+            'à' | 'á' | 'â' | 'ã' | 'ä' | 'å' | 'ą' => 'a',
+            'ç' | 'ć' | 'č' => 'c',
+            'è' | 'é' | 'ê' | 'ë' | 'ę' | 'ě' => 'e',
+            'ì' | 'í' | 'î' | 'ï' => 'i',
+            'ñ' | 'ń' => 'n',
+            'ò' | 'ó' | 'ô' | 'õ' | 'ö' | 'ø' => 'o',
+            'ù' | 'ú' | 'û' | 'ü' | 'ů' => 'u',
+            'ý' | 'ÿ' => 'y',
+            'ł' => 'l',
+            'ś' | 'š' => 's',
+            'ź' | 'ż' | 'ž' => 'z',
+            'ř' => 'r',
+            other => other,
+        })
+        .collect()
+}
+
+/// The user ids a piece of typed text stands for.
+///
+/// An exact id wins outright — someone who typed a whole id means that person,
+/// even if it is also a prefix of somebody else's. Otherwise every typed word has
+/// to appear somewhere in the id, the full name or the email: that makes
+/// "leo-paul", "couturier", "Leo-Paul Couturier" and "couturier leo" all reach the
+/// same account, and it is why the email is included — ours are dotted
+/// differently from the ids (leo.paul.couturier@ vs leo-paul.couturier).
+fn match_users(users: &[(String, String, String)], typed: &str) -> Vec<String> {
+    let needle = fold(typed.trim());
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    for (id, _, _) in users {
+        if fold(id) == needle {
+            return vec![id.clone()];
+        }
+    }
+    let words: Vec<&str> = needle.split_whitespace().collect();
+    let mut matches: Vec<String> = Vec::new();
+    for (id, full, email) in users {
+        let hay = format!("{} {} {}", fold(id), fold(full), fold(email));
+        if words.iter().all(|w| hay.contains(w)) {
+            matches.push(id.clone());
+        }
+    }
+    matches.truncate(MAX_MATCHED_USERS);
+    matches
+}
+
+/// `match_users` against the server's own list.
+fn resolve_users(conn: &P4Conn, typed: &str) -> Result<Vec<String>, String> {
+    let recs = p4::run(conn, &["users"])?;
+    let users: Vec<(String, String, String)> = recs
+        .iter()
+        .filter_map(|r| {
+            let id = r.get("User").and_then(|u| u.as_str())?.to_string();
+            Some((
+                id,
+                r.get("FullName").and_then(|f| f.as_str()).unwrap_or("").to_string(),
+                r.get("Email").and_then(|e| e.as_str()).unwrap_or("").to_string(),
+            ))
+        })
+        .collect();
+    Ok(match_users(&users, typed))
+}
+
+#[cfg(test)]
+mod user_match_tests {
+    use super::match_users;
+
+    /// The real rows, verbatim from `p4 users` on our server.
+    fn users() -> Vec<(String, String, String)> {
+        [
+            ("leo-paul.couturier", "Léo-Paul Couturier", "leo.paul.couturier@sloclap.com"),
+            ("gaetan.deturche", "Gaetan DETURCHE", "gaetan.deturche@sloclap.com"),
+            ("gaetan.fillardet", "Gaetan Fillardet", "gaetan.fillardet@sloclap.com"),
+            ("jerome.charles", "Jerome CHARLES", "jerome.charles@sloclap.com"),
+        ]
+        .iter()
+        .map(|(a, b, c)| (a.to_string(), b.to_string(), c.to_string()))
+        .collect()
+    }
+
+    #[test]
+    fn a_half_typed_id_finds_the_account() {
+        // The bug: "leo-paul" is not "leo-paul.couturier", so Swarm matched
+        // nobody and the tab showed an empty list.
+        assert_eq!(match_users(&users(), "leo-paul"), vec!["leo-paul.couturier"]);
+        assert_eq!(match_users(&users(), "couturier"), vec!["leo-paul.couturier"]);
+    }
+
+    #[test]
+    fn an_accent_nobody_types_is_folded_away() {
+        // The list says "Léo-Paul Couturier"; a filter box gets plain letters.
+        assert_eq!(match_users(&users(), "Leo-Paul Couturier"), vec!["leo-paul.couturier"]);
+        assert_eq!(match_users(&users(), "léo-paul"), vec!["leo-paul.couturier"]);
+    }
+
+    #[test]
+    fn the_words_may_come_in_any_order() {
+        assert_eq!(match_users(&users(), "couturier leo"), vec!["leo-paul.couturier"]);
+    }
+
+    #[test]
+    fn an_email_reaches_its_owner() {
+        // Ours are dotted differently from the ids, so the id alone is not enough.
+        assert_eq!(
+            match_users(&users(), "leo.paul.couturier@sloclap.com"),
+            vec!["leo-paul.couturier"]
+        );
+    }
+
+    #[test]
+    fn a_name_two_people_share_finds_both() {
+        // Swarm ORs repeated author[] values, so both are asked for — measured on
+        // the live server (19 + 1 rows for two authors).
+        assert_eq!(match_users(&users(), "gaetan"), vec!["gaetan.deturche", "gaetan.fillardet"]);
+    }
+
+    #[test]
+    fn an_exact_id_means_that_person_alone() {
+        // Even when it is a substring of nothing else, the exact match short
+        // circuits: someone who typed a whole id has already chosen.
+        assert_eq!(match_users(&users(), "gaetan.deturche"), vec!["gaetan.deturche"]);
+        assert_eq!(match_users(&users(), "GAETAN.DETURCHE"), vec!["gaetan.deturche"]);
+    }
+
+    #[test]
+    fn nobody_matches_nonsense() {
+        assert!(match_users(&users(), "zzz").is_empty());
+        assert!(match_users(&users(), "   ").is_empty());
+    }
+}
+
 /// A page of reviews matching `query`. Errors are reported in the page rather
 /// than thrown, so the tab can say *why* it is empty.
 #[tauri::command]
@@ -291,6 +435,23 @@ pub async fn swarm_reviews(conn: P4Conn, query: ReviewQuery) -> Result<ReviewPag
             return Ok(empty("Not logged in — Swarm needs a valid P4 ticket."));
         };
 
+        // Whom the typed text stands for. Swarm keys on the exact user id, so
+        // "leo-paul" matched nobody until this: it is resolved against the user
+        // list, and every match is asked for.
+        let who: Vec<String> = if query.user.is_empty() {
+            Vec::new()
+        } else {
+            match resolve_users(&conn, &query.user) {
+                Ok(list) if list.is_empty() => {
+                    return Ok(empty(&format!("No user matches \u{201c}{}\u{201d}.", query.user)))
+                }
+                Ok(list) => list,
+                // The user list could not be read: fall back to the text as
+                // typed, which is right whenever it IS an exact id.
+                Err(_) => vec![query.user.clone()],
+            }
+        };
+
         let max = query.max.clamp(1, 200);
         // Filtering happens here, not on the server, so ask for more per request
         // than the caller wants: a 100-row page costs the same as a 25-row one,
@@ -302,15 +463,16 @@ pub async fn swarm_reviews(conn: P4Conn, query: ReviewQuery) -> Result<ReviewPag
             for s in &query.states {
                 url.push_str(&format!("&state[]={}", esc(s)));
             }
-            if !query.user.is_empty() {
+            for u in &who {
                 match query.role.as_str() {
-                    "author" => url.push_str(&format!("&author[]={}", esc(&query.user))),
-                    "reviewer" => url.push_str(&format!("&participants[]={}", esc(&query.user))),
-                    // "any": Swarm ANDs distinct filters, so asking for both at once
-                    // would return only reviews the user authored AND reviews on
-                    // themselves. Authored is the useful half; the role toggle is
-                    // there for the other one.
-                    _ => url.push_str(&format!("&author[]={}", esc(&query.user))),
+                    // "any" falls in with "author": Swarm ANDs distinct filters, so
+                    // asking for both at once would return only reviews the user
+                    // authored AND reviews on themselves. Authored is the useful
+                    // half; the role toggle is there for the other one. Repeated
+                    // values of ONE filter are ORed, which is what lets a
+                    // half-typed name stand for several people.
+                    "reviewer" => url.push_str(&format!("&participants[]={}", esc(u))),
+                    _ => url.push_str(&format!("&author[]={}", esc(u))),
                 }
             }
             if !query.keywords.is_empty() {

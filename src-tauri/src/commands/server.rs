@@ -11,13 +11,47 @@ pub async fn swarm_url(conn: P4Conn) -> Result<String, String> {
 }
 
 /// Swarm base URL with any trailing slash removed (empty if unconfigured).
-fn swarm_base(conn: &P4Conn) -> String {
+pub(crate) fn swarm_base(conn: &P4Conn) -> String {
     let out = p4::run_raw(conn, &["property", "-l", "-n", "P4.Swarm.URL"]).unwrap_or_default();
     out.lines()
         .next()
         .and_then(|l| l.splitn(2, '=').nth(1))
         .map(|s| s.trim().trim_end_matches('/').to_string())
         .unwrap_or_default()
+}
+
+/// One user on the server: the id p4 and Swarm both key on, plus what a person
+/// would recognise them by.
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserRow {
+    pub user: String,
+    pub full_name: String,
+    pub email: String,
+}
+
+/// Everyone on the server. Cheap enough to ask for outright (163 users in 0.09 s
+/// on ours), which is what makes resolving a half-typed name possible.
+#[tauri::command]
+pub async fn p4_users(conn: P4Conn) -> Result<Vec<UserRow>, String> {
+    let recs = run(conn, v(&["users"])).await?;
+    let mut out: Vec<UserRow> = recs
+        .iter()
+        .filter_map(|r| {
+            let user = r.get("User").and_then(|u| u.as_str())?.to_string();
+            Some(UserRow {
+                user,
+                full_name: r
+                    .get("FullName")
+                    .and_then(|f| f.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                email: r.get("Email").and_then(|e| e.as_str()).unwrap_or("").to_string(),
+            })
+        })
+        .collect();
+    out.sort_by(|a, b| a.user.cmp(&b.user));
+    Ok(out)
 }
 
 /// A changelist's Swarm review status.

@@ -13,6 +13,7 @@ export const P4_COMMANDS: P4Cmd[] = [
   // reads (allowed by default)
   { key: "p4_info", label: "info", read: true },
   { key: "p4_clients", label: "clients", read: true },
+  { key: "p4_users", label: "users", read: true },
   { key: "p4_dirs", label: "dirs", read: true },
   { key: "p4_files", label: "files", read: true },
   { key: "p4_changes", label: "changes", read: true },
@@ -107,6 +108,26 @@ export const P4_COMMANDS: P4Cmd[] = [
   { key: "p4_set_description", label: "change description", read: false },
   { key: "p4_login", label: "login", read: false },
   { key: "p4_trust", label: "trust", read: false },
+  { key: "swarm_review_detail", label: "swarm review (detail)", read: true },
+  { key: "swarm_transitions", label: "swarm review (allowed actions)", read: true },
+  { key: "review_version_files", label: "describe / fstat (compare review versions)", read: true },
+  { key: "diff_pair_versions", label: "print (diff review versions)", read: true },
+  { key: "open_review_window", label: "review (window)", read: true },
+  { key: "review_job", label: "review (window)", read: true },
+  // Changes the review's state on the server, for everyone. Not a p4 write, but
+  // a write all the same, and the one action in the review window that is not
+  // undoable from the app.
+  { key: "swarm_set_state", label: "swarm review (approve / reject)", read: false },
+  { key: "swarm_comments", label: "swarm comments (read)", read: true },
+  { key: "diff_job", label: "diff (window)", read: true },
+  { key: "comments_notify_immediately", label: "swarm comments (read)", read: true },
+  // Asking Swarm which task states it accepts is a REJECTED patch — it changes
+  // nothing, which is why it counts as a read.
+  { key: "swarm_task_transitions", label: "swarm comments (read)", read: true },
+  // Posting mails everyone on the review the moment it lands (this server has no
+  // /comments/notify route to batch with), so it is a non-read twice over.
+  { key: "swarm_add_comment", label: "swarm comment (post)", read: false },
+  { key: "swarm_edit_comment", label: "swarm comment (edit / task / archive)", read: false },
 ];
 
 export const P4_CMD_BY_KEY: Record<string, P4Cmd> = Object.fromEntries(

@@ -5,7 +5,14 @@
 //! carries. Keeping a copy per tab is how the Reviews tab shipped without the
 //! Unreal branch (v0.15.0).
 
-import { p4, openDiffWindow, type DiffPair, type P4Conn } from "$lib/p4";
+import {
+  p4,
+  openDiffWindow,
+  type CommentTarget,
+  type DiffPair,
+  type P4Conn,
+  type VersionRef,
+} from "$lib/p4";
 import { editor, isUnrealAsset, unrealAssetName } from "$lib/editor.svelte";
 
 /** Which two sides to diff — `rev`: a submitted revision vs its predecessor
@@ -14,7 +21,19 @@ import { editor, isUnrealAsset, unrealAssetName } from "$lib/editor.svelte";
 export type DiffSource =
   | { kind: "rev"; file: string; rev: number }
   | { kind: "shelved"; file: string; rev: number; change: string }
-  | { kind: "local"; file: string };
+  | { kind: "local"; file: string }
+  | {
+      kind: "versions";
+      file: string;
+      a: VersionRef;
+      b: VersionRef;
+      /** The review these versions belong to, and the version number each side
+       *  shows (0 on the left = the base of the right one). With these the diff
+       *  window can join the review's discussion. */
+      review: number;
+      aVersion: number;
+      bVersion: number;
+    };
 
 /** Materialize both sides on disk (Unreal's diff tool and the in-app window
  *  both take files, not a command). */
@@ -26,11 +45,13 @@ function diffPair(conn: P4Conn, src: DiffSource): Promise<DiffPair> {
       return p4.diffPairShelved(conn, src.file, src.rev, src.change);
     case "local":
       return p4.diffPairLocal(conn, src.file);
+    case "versions":
+      return p4.diffPairVersions(conn, src.file, src.a, src.b);
   }
 }
 
 /** Hand the same two sides to the configured external P4DIFF tool instead. */
-function openExternal(conn: P4Conn, src: DiffSource): Promise<void> {
+async function openExternal(conn: P4Conn, src: DiffSource): Promise<void> {
   switch (src.kind) {
     case "rev":
       return p4.openDiff(conn, src.file, src.rev);
@@ -38,7 +59,26 @@ function openExternal(conn: P4Conn, src: DiffSource): Promise<void> {
       return p4.openDiffShelved(conn, src.file, src.rev, src.change);
     case "local":
       return p4.openDiffLocal(conn, src.file);
+    case "versions":
+      // No p4 command compares two arbitrary shelves, so there is nothing to
+      // hand an external tool: the in-app window is the only path for this one.
+      return openDiffWindow(await diffPair(conn, src), conn, commentTarget(src));
   }
+}
+
+/** The review discussion this diff belongs to, when it belongs to one. Only a
+ *  review-version diff does: Swarm anchors comments to (review, version, line),
+ *  and nothing else on screen has those. */
+function commentTarget(src: DiffSource): CommentTarget | null {
+  if (src.kind !== "versions" || !src.review) return null;
+  return {
+    review: src.review,
+    file: src.file,
+    leftVersion: src.aVersion,
+    // A base pane belongs to the version it is the base of.
+    leftOf: src.aVersion === 0 ? src.bVersion : src.aVersion,
+    rightVersion: src.bVersion,
+  };
 }
 
 /** Open a file's diff in whichever tool applies. Never throws: a failure is
@@ -72,7 +112,7 @@ export async function openDiff(
         8000,
       );
     } else if (editor.diffTool === "inapp") {
-      await openDiffWindow(await diffPair(conn, src));
+      await openDiffWindow(await diffPair(conn, src), conn, commentTarget(src));
     } else {
       await openExternal(conn, src);
     }

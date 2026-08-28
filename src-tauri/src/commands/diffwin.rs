@@ -38,7 +38,7 @@ fn base_name(depot_file: &str) -> &str {
 /// (locked and cached), so reusing a name would collide or show stale content —
 /// and the read-only attribute `p4 print` sets is cleared (UE's -diff copies
 /// the file, and the copy inherits the attribute).
-fn print_side(conn: &P4Conn, spec: &str, file_tag: &str) -> Result<String, String> {
+pub(crate) fn print_side(conn: &P4Conn, spec: &str, file_tag: &str) -> Result<String, String> {
     let uniq = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
@@ -578,15 +578,72 @@ pub async fn write_local_file(path: String, text: String) -> Result<(), String> 
     .map_err(|e| format!("write task failed: {e}"))?
 }
 
+/// What a diff window needs in order to take part in a review's discussion: the
+/// review, the file, and which review version each pane is showing (0 on the
+/// left = the base of the right one, which is how Swarm anchors its own base
+/// column). Absent for an ordinary diff, which has no discussion to join.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommentTarget {
+    pub review: u64,
+    pub file: String,
+    pub left_version: u64,
+    /// For a base pane: the version it is the base of.
+    pub left_of: u64,
+    pub right_version: u64,
+}
+
+/// A diff window's connection and comment target, fetched by the window itself.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiffJob {
+    pub conn: P4Conn,
+    pub comments: CommentTarget,
+}
+
+fn diff_jobs() -> &'static std::sync::Mutex<std::collections::HashMap<String, DiffJob>> {
+    static R: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, DiffJob>>> =
+        std::sync::OnceLock::new();
+    R.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// The job a diff window was opened with, or an error when it has none — an
+/// ordinary diff, where the window simply shows no comment layer.
+#[tauri::command]
+pub fn diff_job(job: String) -> Result<DiffJob, String> {
+    diff_jobs()
+        .lock()
+        .map_err(|_| "window registry poisoned")?
+        .get(&job)
+        .cloned()
+        .ok_or_else(|| format!("no diff job named {job}"))
+}
+
 /// Open the in-app diff window on the `/diff` route. Each call gets its own
 /// window (unique label), like an external diff tool would.
+///
+/// `conn` + `comments` are set only for a diff of a review's versions: with them
+/// the window can read and post Swarm comments on the lines it is showing.
 #[tauri::command]
-pub async fn open_diff_window(app: AppHandle, pair: DiffPair) -> Result<(), String> {
+pub async fn open_diff_window(
+    app: AppHandle,
+    pair: DiffPair,
+    conn: Option<P4Conn>,
+    comments: Option<CommentTarget>,
+) -> Result<(), String> {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let label = format!("diff-{n}");
+    let mut job = String::new();
+    if let (Some(conn), Some(comments)) = (conn, comments) {
+        job = label.clone();
+        diff_jobs()
+            .lock()
+            .map_err(|_| "window registry poisoned")?
+            .insert(job.clone(), DiffJob { conn, comments });
+    }
     let url = format!(
-        "diff?left={}&right={}&ll={}&rl={}&title={}&edit={}&note={}",
+        "diff?left={}&right={}&ll={}&rl={}&title={}&edit={}&note={}&job={}",
         enc(&pair.left),
         enc(&pair.right),
         enc(&pair.left_label),
@@ -594,6 +651,7 @@ pub async fn open_diff_window(app: AppHandle, pair: DiffPair) -> Result<(), Stri
         enc(&pair.title),
         if pair.right_editable { "1" } else { "0" },
         enc(&pair.unresolved_note),
+        enc(&job),
     );
     let title = format!("Diff — {}", pair.title);
     let win = WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(url.into()))

@@ -9,10 +9,12 @@
     setClipboard,
     openFileHistoryWindow,
     openBlameWindow,
+    openReviewWindow,
     p4,
     type P4Conn,
     type P4Record,
     type ReviewRow,
+    type UserRow,
     type FileHolders,
   } from "$lib/p4";
   import { localPathFor } from "$lib/cache";
@@ -387,6 +389,20 @@
     return items;
   }
 
+  // Everyone on the server, for the review filter's user typeahead. Fetched once
+  // per connection: it is one cheap p4 call and it never changes mid-session.
+  let userList = $state<UserRow[]>([]);
+  let userListFor = "";
+  $effect(() => {
+    const key = `${conn.port}|${conn.user}`;
+    if (!conn.user || key === userListFor) return;
+    userListFor = key;
+    void p4
+      .users(conn)
+      .then((u) => (userList = u))
+      .catch(() => (userList = []));
+  });
+
   // --- reviews: context menu over the Swarm review list ----------------------
   let reviewCtx = $state<{ x: number; y: number; r: ReviewRow } | null>(null);
 
@@ -402,6 +418,14 @@
     // number — everything else here works the same, because a review's content
     // IS a shelved changelist.
     const shelfOnly = r.kind === "shelf";
+    // A shelf has no review to open: no reviewers, no versions, no state.
+    if (!shelfOnly) {
+      items.push({
+        label: "Open review window…",
+        action: () => void openReviewWindow(conn, r.id).catch((e) => setError(String(e))),
+      });
+      items.push({ label: "", sep: true });
+    }
     items.push({
       label: "Apply to workspace…",
       disabled: !r.change,
@@ -1199,6 +1223,9 @@
             e.preventDefault();
             reviewCtx = { x: e.clientX, y: e.clientY, r };
           }}
+          users={userList}
+          onOpenReview={(r) =>
+            void openReviewWindow(conn, r.id).catch((e) => setError(String(e)))}
           onFileContext={(f, r, e) =>
             (shelvedCtx = {
               x: e.clientX,

@@ -15,7 +15,17 @@
   import { endingLabel, renderLine } from "$lib/invisibles";
   import { cacheGet, cacheSet } from "$lib/store.svelte";
   import { langForFile, tokenizeLines, type TokenRun } from "$lib/syntax";
+  import ApprovalDialog from "$lib/components/ApprovalDialog.svelte";
   import MergeResult from "$lib/components/MergeResult.svelte";
+  import CommentThread from "$lib/components/CommentThread.svelte";
+  import {
+    anchorFor,
+    placeComment,
+    threadsOf,
+    type AnchorRow,
+    type PaneVersion,
+    type Thread,
+  } from "$lib/comments";
   import OverviewRuler, { type Mark } from "$lib/components/OverviewRuler.svelte";
   import {
     visualColumn,
@@ -48,7 +58,17 @@
     type History,
     type MergeAction,
   } from "$lib/mergedoc";
-  import { setClipboard, writeLocalFile } from "$lib/p4";
+  import {
+    p4,
+    diffJob,
+    emptyConn,
+    setClipboard,
+    writeLocalFile,
+    type Comment,
+    type CommentAnchor,
+    type CommentTarget,
+    type P4Conn,
+  } from "$lib/p4";
 
   // Opened by the Rust `open_diff_window` command with both sides materialized.
   const params = new URLSearchParams(window.location.search);
@@ -141,6 +161,194 @@
     void maxCols;
     requestAnimationFrame(measurePan);
   });
+
+  // --- review comments -------------------------------------------------------
+  // Present only when this window was opened on two versions of a review: those
+  // are the only diffs Swarm can anchor a comment to (it stores review, version
+  // and line).
+  const job = new URLSearchParams(window.location.search).get("job") ?? "";
+  let conn = $state<P4Conn>(emptyConn());
+  let target = $state<CommentTarget | null>(null);
+  let comments = $state<Comment[]>([]);
+  let cLoading = $state(false);
+  let cBusy = $state(false);
+  let cError = $state("");
+  let showComments = $state(true);
+  /** The line a new comment is being written against. */
+  let compose = $state<{ side: "left" | "right"; row: number; line: number } | null>(null);
+  let composeDraft = $state("");
+  let composeTask = $state(false);
+  /** Thread the panel should scroll to and flash, after a marker click. */
+  let focusThread = $state(0);
+
+  const leftPane = $derived<PaneVersion>({
+    version: target?.leftVersion ?? 0,
+    of: target?.leftOf ?? 0,
+  });
+  const rightPane = $derived<PaneVersion>({ version: target?.rightVersion ?? 0, of: 0 });
+
+  const threads = $derived<Thread[]>(threadsOf(comments).filter((th) => !th.root.closed));
+  /** Threads that belong to a line on screen, by side and line number. */
+  const placed = $derived.by(() => {
+    const left = new Map<number, Thread[]>();
+    const right = new Map<number, Thread[]>();
+    const elsewhere: Thread[] = [];
+    for (const th of threads) {
+      const at = placeComment(th, leftPane, rightPane);
+      if (!at) {
+        elsewhere.push(th);
+        continue;
+      }
+      const m = at.side === "left" ? left : right;
+      const list = m.get(at.line) ?? [];
+      list.push(th);
+      m.set(at.line, list);
+    }
+    return { left, right, elsewhere };
+  });
+
+  /** Every row of the rendered diff, flattened: what each side has on it, which
+   *  is what an anchor and its snippet are built from. */
+  const flatRows = $derived.by(() => {
+    const out: AnchorRow[] = [];
+    blocks.forEach((b, i) => {
+      const rightLines = ds?.doc.regions[i]?.lines ?? [];
+      const n = rows[i];
+      for (let k = 0; k < n; k++) {
+        const hasL = k < b.left.length;
+        const hasR = k < rightLines.length;
+        out.push({
+          type:
+            b.kind === "same" ? "same" : hasL && hasR ? "mod" : hasL ? "del" : "add",
+          leftNo: hasL ? starts[i].l + k : 0,
+          rightNo: hasR ? starts[i].r + k : 0,
+          leftText: hasL ? b.left[k] : "",
+          rightText: hasR ? rightLines[k] : "",
+        });
+      }
+    });
+    return out;
+  });
+  /** Line number -> row index, per side, for placing a marker at a thread's line. */
+  const rowOfLine = $derived.by(() => {
+    const left = new Map<number, number>();
+    const right = new Map<number, number>();
+    flatRows.forEach((r, i) => {
+      if (r.leftNo) left.set(r.leftNo, i);
+      if (r.rightNo) right.set(r.rightNo, i);
+    });
+    return { left, right };
+  });
+  /** Markers to draw in a column: y in px and the threads at that row. */
+  function markersFor(side: "left" | "right") {
+    const m = side === "left" ? placed.left : placed.right;
+    const index = side === "left" ? rowOfLine.left : rowOfLine.right;
+    const out: { y: number; line: number; threads: Thread[] }[] = [];
+    for (const [line, list] of m) {
+      const row = index.get(line);
+      if (row === undefined) continue; // the line is not in this diff
+      out.push({ y: row * LH, line, threads: list });
+    }
+    return out.sort((a, b) => a.y - b.y);
+  }
+
+  async function loadComments() {
+    if (!target) return;
+    cLoading = true;
+    cError = "";
+    try {
+      const all = await p4.swarmComments(conn, target.review);
+      // Only this file's discussion. Comments on the review as a whole belong to
+      // the review window, where they are not repeated under every file.
+      comments = all.filter((c) => c.file === target!.file);
+    } catch (e) {
+      cError = String(e);
+    } finally {
+      cLoading = false;
+    }
+  }
+
+  async function commentWrite(fn: () => Promise<unknown>) {
+    if (cBusy) return;
+    cBusy = true;
+    cError = "";
+    try {
+      await fn();
+      await loadComments();
+    } catch (e) {
+      cError = String(e);
+    } finally {
+      cBusy = false;
+    }
+  }
+
+  /** Alt+click a line to comment on it — in either pane, without a per-row
+   *  handler on thousands of rows, and without touching the shared right-hand
+   *  renderer. The row is arithmetic: every row is exactly LH tall. */
+  function onGridClick(e: MouseEvent) {
+    if (!target || !e.altKey) return;
+    const el = e.target as HTMLElement | null;
+    const col = el?.closest(".col:not(.gut), .resultcol") as HTMLElement | null;
+    if (!col) return;
+    const side: "left" | "right" = col.classList.contains("resultcol") ? "right" : "left";
+    const row = Math.floor((e.clientY - col.getBoundingClientRect().top) / LH);
+    const r = flatRows[row];
+    if (!r) return;
+    const line = side === "left" ? r.leftNo : r.rightNo;
+    if (!line) {
+      cError = "That row does not exist on this side, so there is no line to comment on.";
+      return;
+    }
+    e.preventDefault();
+    compose = { side, row, line };
+    composeDraft = "";
+    composeTask = false;
+    showComments = true;
+  }
+
+  function addComment() {
+    const t2 = target;
+    const c = compose;
+    if (!t2 || !c) return;
+    const pane = c.side === "left" ? leftPane : rightPane;
+    const a = anchorFor(t2.file, pane, flatRows, c.row, c.side);
+    if (!a) {
+      cError = "Could not work out what to anchor this comment to.";
+      return;
+    }
+    const body = composeDraft.trim();
+    if (!body) return;
+    void commentWrite(async () => {
+      await p4.swarmAddComment(conn, t2.review, body, a, composeTask ? "open" : "comment");
+      compose = null;
+      composeDraft = "";
+    });
+  }
+
+  function replyTo(th: Thread, body: string) {
+    const t2 = target;
+    if (!t2) return Promise.resolve();
+    const a: CommentAnchor = {
+      file: th.file,
+      version: th.version,
+      leftLine: th.leftLine,
+      rightLine: th.rightLine,
+      content: th.root.content,
+      parent: th.root.id,
+    };
+    return commentWrite(() => p4.swarmAddComment(conn, t2.review, body, a));
+  }
+
+  /** Scroll the panes so a thread's line is in view, and flash it in the panel. */
+  function goToThread(th: Thread) {
+    focusThread = th.root.id;
+    const at = placeComment(th, leftPane, rightPane);
+    if (!at) return;
+    const index = at.side === "left" ? rowOfLine.left : rowOfLine.right;
+    const row = index.get(at.line);
+    if (row === undefined || !scrollEl) return;
+    scrollEl.scrollTo({ top: Math.max(0, row * LH - scrollEl.clientHeight / 3) });
+  }
 
   const gridCols = $derived(
     single
@@ -673,6 +881,17 @@ initSplit(leftText.trim() === "");
   onMount(async () => {
     // Before the first diff, so the very first blocks already honour the option.
     await loadOptions();
+    // A diff of two review versions carries a job: the connection and the review
+    // anchor. Anything else has none, and simply shows no comment layer.
+    if (job) {
+      void diffJob(job)
+        .then((j) => {
+          conn = j.conn;
+          target = j.comments;
+          void loadComments();
+        })
+        .catch(() => {});
+    }
     try {
       const [l, r] = await Promise.all([
         invoke<string>("read_text_file", { path: leftPath }),
@@ -724,7 +943,26 @@ initSplit(leftText.trim() === "");
 
 {#snippet noToolbar(_region: number)}{/snippet}
 
-<svelte:window onkeydown={onWindowKey} onresize={measurePan} />
+<!-- Comment markers for one pane. An overlay rather than part of the rows: the
+     right pane is the shared MergeResult, and rows are a uniform height, so a
+     line's y is arithmetic. -->
+{#snippet markers(side: "left" | "right")}
+  {#each markersFor(side) as m (m.line)}
+    <button
+      class="cmark"
+      class:task={m.threads.some((th) => th.openTask)}
+      style="top:{m.y}px"
+      title={`${m.threads.length} comment thread(s) on line ${m.line}`}
+      onclick={(e) => {
+        e.stopPropagation();
+        showComments = true;
+        goToThread(m.threads[0]);
+      }}
+    >≡</button>
+  {/each}
+{/snippet}
+
+<svelte:window onkeydown={onWindowKey} onresize={measurePan} onclick={onGridClick} />
 
 <div class="wrap">
   <div class="bar">
@@ -780,6 +1018,7 @@ initSplit(leftText.trim() === "");
   {:else if loading || !ds}
     <div class="dim pad">Loading…</div>
   {:else}
+    <div class="body">
     <div class="viewport" onwheel={onPanWheel}>
       <div class="scroll" class:hasbar={canPan} bind:this={scrollEl}>
       <div
@@ -811,6 +1050,7 @@ initSplit(leftText.trim() === "");
               {@render pane(b.left, b.lhot, starts[i].l, leftKind(i), rows[i] - b.left.length)}
             </div>
           {/each}
+          {@render markers("left")}
         </div>
 
         <!-- One button per remaining change: revert that block to the other side.
@@ -850,6 +1090,7 @@ initSplit(leftText.trim() === "");
             toolbar={noToolbar}
             onAction={apply}
           />
+          {@render markers("right")}
         </div>
         </div>
       </div>
@@ -885,8 +1126,106 @@ initSplit(leftText.trim() === "");
         <OverviewRuler {marks} offsetRight={barWidth} onPick={jumpTo} onSeek={seek} />
       {/if}
     </div>
+    {#if target && showComments}
+      <div class="cpanel">
+        <div class="chead">
+          Comments
+          <span class="dim small">
+            — review #{target.review}{cLoading ? " · loading…" : ""}
+          </span>
+          <span class="grow"></span>
+          <button class="link" onclick={() => void loadComments()} disabled={cLoading}>refresh</button>
+          <button class="link" onclick={() => (showComments = false)}>hide</button>
+        </div>
+        <div class="cbody">
+          {#if cError}
+            <div class="err mono small">{cError}</div>
+          {/if}
+
+          {#if compose}
+            <div class="composer">
+              <div class="small">
+                New comment on
+                <b>{compose.side === "left" ? leftLabel : rightLabel}</b>
+                line {compose.line}
+              </div>
+              <pre class="snip mono">{#each anchorFor(target.file, compose.side === "left" ? leftPane : rightPane, flatRows, compose.row, compose.side)?.content ?? [] as l}<span
+                    class:add={l.startsWith("+")}
+                    class:del={l.startsWith("-")}>{l}
+</span>{/each}</pre>
+              <textarea
+                bind:value={composeDraft}
+                rows="3"
+                placeholder="Comment on this line…"
+                onkeydown={(e) => {
+                  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+                    e.preventDefault();
+                    addComment();
+                  } else if (e.key === "Escape") {
+                    e.preventDefault();
+                    compose = null;
+                  }
+                }}
+              ></textarea>
+              <div class="crow">
+                <button disabled={cBusy || !composeDraft.trim()} onclick={addComment}>Comment</button>
+                <label class="opt" title="Swarm tracks an open task until someone marks it addressed and verified.">
+                  <input type="checkbox" bind:checked={composeTask} />
+                  as a task
+                </label>
+                <button class="link" onclick={() => (compose = null)}>cancel</button>
+              </div>
+              <div class="dim small">Ctrl+Enter posts — everyone on the review is mailed.</div>
+            </div>
+          {:else}
+            <div class="dim small hint">Alt+click a line in either pane to comment on it.</div>
+          {/if}
+
+          {#each threads as th (th.root.id)}
+            {@const at = placeComment(th, leftPane, rightPane)}
+            <div class="tw" class:focus={focusThread === th.root.id}>
+              <button
+                class="tgo link"
+                onclick={() => goToThread(th)}
+                title={at ? "Go to this line" : "This comment is on another version of the review"}
+              >
+                {#if at}
+                  {at.side === "left" ? leftLabel : rightLabel} line {at.line}
+                {:else if th.file}
+                  v{th.version} — not shown here
+                {:else}
+                  on the review
+                {/if}
+              </button>
+              <CommentThread
+                thread={th}
+                me={conn.user}
+                busy={cBusy}
+                onReply={(b) => replyTo(th, b)}
+                onEdit={(c, b) =>
+                  commentWrite(() => p4.swarmEditComment(conn, c.id, b, null, null))}
+                onTask={(c, s) =>
+                  commentWrite(() => p4.swarmEditComment(conn, c.id, null, s, null))}
+                onArchive={(c, cl) =>
+                  commentWrite(() => p4.swarmEditComment(conn, c.id, null, null, cl))}
+                taskStates={(c) => p4.swarmTaskTransitions(conn, c.id).catch(() => [])}
+              />
+            </div>
+          {/each}
+          {#if threads.length === 0 && !cLoading}
+            <div class="dim small">Nothing has been said about this file yet.</div>
+          {/if}
+        </div>
+      </div>
+    {/if}
+    </div>
   {/if}
 </div>
+
+<!-- Safe mode queues its approvals per window: without this, saving an edit or
+     posting a comment from here would wait on a dialog only the main window
+     renders. -->
+<ApprovalDialog />
 
 <style>
   :global(body) {
@@ -1001,11 +1340,138 @@ initSplit(leftText.trim() === "");
   .hspace {
     height: 1px;
   }
-  .viewport {
-    position: relative;
+  .body {
     flex: 1;
     min-height: 0;
     display: flex;
+  }
+  .viewport {
+    position: relative;
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
+    display: flex;
+  }
+  /* The comment panel: its own column beside the panes, so the diff keeps every
+     pixel it had when there is nothing to discuss. */
+  .cpanel {
+    flex: 0 0 340px;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    border-left: 1px solid var(--border, #333);
+    background: var(--bg-panel, #232323);
+  }
+  .chead {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 8px;
+    border-bottom: 1px solid var(--border, #333);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .chead .dim,
+  .chead .link {
+    text-transform: none;
+    letter-spacing: normal;
+  }
+  .cbody {
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+    padding: 6px;
+  }
+  .small {
+    font-size: 11px;
+  }
+  .hint {
+    padding-bottom: 6px;
+  }
+  .composer {
+    border: 1px solid var(--border, #333);
+    border-radius: 4px;
+    padding: 6px;
+    margin-bottom: 8px;
+  }
+  .composer textarea {
+    width: 100%;
+    box-sizing: border-box;
+    font-family: var(--mono, ui-monospace, Consolas, monospace);
+    font-size: 12px;
+    resize: vertical;
+  }
+  .snip {
+    margin: 4px 0;
+    padding: 4px 6px;
+    max-height: 6em;
+    overflow: auto;
+    background: rgba(255, 255, 255, 0.04);
+    border-radius: 3px;
+    font-size: 11px;
+    white-space: pre;
+  }
+  .snip .add {
+    color: #7ec97e;
+  }
+  .snip .del {
+    color: #f08a8a;
+  }
+  .crow {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding-top: 4px;
+  }
+  .tw {
+    border-radius: 4px;
+    margin-bottom: 4px;
+  }
+  .tw.focus {
+    outline: 1px solid var(--accent, #4a7);
+  }
+  .tgo {
+    display: block;
+    font-size: 11px;
+    padding-bottom: 2px;
+  }
+  button.link {
+    background: none;
+    border: none;
+    padding: 0;
+    color: inherit;
+    font: inherit;
+    font-size: 11px;
+    text-decoration: underline;
+    cursor: pointer;
+    opacity: 0.85;
+  }
+  button.link:hover {
+    opacity: 1;
+  }
+  /* The marker beside a commented line. Inside the scrolling column, so it moves
+     with the code it belongs to. */
+  .cmark {
+    position: absolute;
+    left: 0;
+    width: 1em;
+    height: 17.4px;
+    padding: 0;
+    line-height: 17.4px;
+    background: none;
+    border: none;
+    color: var(--accent, #4a7);
+    font-size: 11px;
+    cursor: pointer;
+    z-index: 2;
+  }
+  .cmark.task {
+    color: #e0b060;
+  }
+  .cmark:hover {
+    background: color-mix(in srgb, var(--accent, #4a7) 25%, transparent);
   }
   /* Room for the pinned pan bar, so it does not sit on top of the last line. */
   .scroll.hasbar {
@@ -1104,6 +1570,7 @@ initSplit(leftText.trim() === "");
     opacity: 0.5;
   }
   .resultcol {
+    position: relative; /* the comment markers are absolute inside it */
     background: rgba(255, 255, 255, 0.02);
     /* Same as .col: sideways here, vertical on the grid. */
     overflow-x: auto;
