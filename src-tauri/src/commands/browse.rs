@@ -203,10 +203,258 @@ pub async fn p4_new_client(
 }
 
 /// Sub-directories of a depot path (`p4 dirs <path>/*`).
+///
+/// Falls back to the client's own view when p4d refuses the listing: see
+/// `dirs_from_view`.
 #[tauri::command]
 pub async fn p4_dirs(conn: P4Conn, path: String) -> Res {
     let pattern = format!("{}/*", path.trim_end_matches('/'));
-    run(conn, v(&["dirs", &pattern])).await
+    match run(conn.clone(), v(&["dirs", &pattern])).await {
+        Err(e) if e.contains("too twisted") => dirs_from_view(conn, &path).await.map_err(|_| e),
+        other => other,
+    }
+}
+
+/// One line of a client view, split into its two sides.
+#[derive(Debug, Clone, PartialEq)]
+struct ViewLine {
+    exclude: bool,
+    /// An overlay (`+`) line adds to what came before instead of replacing it.
+    overlay: bool,
+    depot: String,
+    /// The client side with the leading `//<client>/` removed.
+    client: String,
+}
+
+/// The view of `client`, in order.
+fn client_view(conn: &P4Conn, client: &str) -> Result<Vec<ViewLine>, String> {
+    let form = p4::run_raw(conn, &["client", "-o", client])?;
+    let mut out = Vec::new();
+    let mut in_view = false;
+    for line in form.lines() {
+        if line.starts_with("View:") {
+            in_view = true;
+            continue;
+        }
+        if !in_view {
+            continue;
+        }
+        let s = line.trim();
+        if s.is_empty() || s.starts_with('#') {
+            continue;
+        }
+        if !s.starts_with("//") && !s.starts_with("-//") && !s.starts_with("+//") {
+            break; // a following field: the view is over
+        }
+        let Some((depot, client_side)) = s.split_once(char::is_whitespace) else { continue };
+        let prefix = format!("//{client}/");
+        let Some(rest) = client_side.trim().strip_prefix(&prefix) else { continue };
+        out.push(ViewLine {
+            exclude: depot.starts_with('-'),
+            overlay: depot.starts_with('+'),
+            depot: depot.trim_start_matches(['-', '+']).to_string(),
+            client: rest.to_string(),
+        });
+    }
+    Ok(out)
+}
+
+/// The components of a client-side pattern before its first wildcard.
+fn fixed_head(pattern: &str) -> Vec<&str> {
+    pattern
+        .split('/')
+        .take_while(|c| !c.contains('*') && !c.contains("..."))
+        .collect()
+}
+
+/// Does this client pattern cover EVERYTHING under `dir`?
+///
+/// Only a pattern ending in a bare `...` can: `Binaries/...` covers the whole
+/// directory, `.../Intermediate/...` covers one at any depth, and `....pyc`
+/// covers only some files in it — which is why p4 keeps a directory whose
+/// contents are partly excluded, and drops one whose contents are all excluded.
+fn covers_all_of(pattern: &str, dir: &[&str]) -> bool {
+    let pat: Vec<&str> = pattern.split('/').collect();
+    fn walk(pat: &[&str], dir: &[&str]) -> bool {
+        // The pattern is consumed exactly when a bare `...` is all that is left.
+        if dir.is_empty() {
+            return pat == ["..."];
+        }
+        match pat.first() {
+            None => false,
+            Some(&"...") => {
+                // `...` spans any number of components, including none.
+                walk(&pat[1..], dir) || walk(pat, &dir[1..])
+            }
+            Some(&c) => {
+                if c.contains('*') || c.contains("...") {
+                    // A wildcard within a component matches this one component.
+                    walk(&pat[1..], &dir[1..])
+                } else if c == dir[0] {
+                    walk(&pat[1..], &dir[1..])
+                } else {
+                    false
+                }
+            }
+        }
+    }
+    walk(&pat, dir)
+}
+
+/// Is this client directory excluded from the workspace?
+///
+/// p4's rule is that the last matching line wins, so a later include re-admits
+/// what an earlier exclusion removed. Only lines that cover the WHOLE directory
+/// count: a line excluding some files inside it leaves the directory itself.
+fn dir_excluded(view: &[ViewLine], dir: &[&str]) -> bool {
+    let mut excluded = false;
+    for line in view {
+        if covers_all_of(&line.client, dir) {
+            excluded = line.exclude;
+        }
+    }
+    excluded
+}
+
+/// A directory the view puts at the level being listed, and the depot path to
+/// report it under.
+#[derive(Debug, Clone, PartialEq)]
+struct ViewDir {
+    name: String,
+    depot: String,
+}
+
+/// What the view says about one directory query, without asking p4d to invert
+/// the whole map.
+///
+/// `prefix` is the client path being listed, relative to the client root ("" for
+/// the root itself). Two things can put a directory at that level:
+///
+///   * a line whose CLIENT side is fixed past that level — `Rig/Shared/...`
+///     names `Rig` at the root, whatever its depot side looks like. This is the
+///     half p4d cannot express as a depot pattern, and the reason it refuses the
+///     whole listing.
+///   * a line whose wildcard reaches that level — `//depot/main/...` mapped to
+///     `...` means the real depot directories under `//depot/main/<prefix>` are
+///     the answer, which p4d lists happily when asked in DEPOT syntax.
+///
+/// Returns (directories named by the mapping, depot paths to list). Later lines
+/// replace earlier ones for the same subtree, as p4 does, unless they are
+/// overlays.
+fn view_query(view: &[ViewLine], prefix: &str) -> (Vec<ViewDir>, Vec<String>) {
+    let want: Vec<&str> = if prefix.is_empty() { Vec::new() } else { prefix.split('/').collect() };
+    let mut named: Vec<ViewDir> = Vec::new();
+    let mut roots: Vec<String> = Vec::new();
+
+    for line in view.iter().filter(|l| !l.exclude) {
+        let comps: Vec<&str> = line.client.split('/').collect();
+        let fixed = fixed_head(&line.client);
+        if !want.iter().zip(fixed.iter()).all(|(a, b)| a == b) {
+            continue; // this line has nothing to do with the directory asked for
+        }
+        let depot_fixed: Vec<&str> = fixed_head(&line.depot);
+        if fixed.len() > want.len() {
+            let name = fixed[want.len()].to_string();
+            // When the named directory IS this line's mapping point, p4 reports
+            // the grafted depot's own path (measured: `Shared` under //client/Rig
+            // comes back as //Rig/main). One level higher there is no depot path
+            // to give — precisely the case p4d refuses — so the caller supplies
+            // one from the mapping it is browsing through.
+            let depot = if fixed.len() == want.len() + 1 { depot_fixed.join("/") } else { String::new() };
+            named.push(ViewDir { name, depot });
+        } else if comps.len() > fixed.len() {
+            let mut base = depot_fixed.join("/");
+            for extra in want.iter().skip(fixed.len()) {
+                base.push('/');
+                base.push_str(extra);
+            }
+            if line.overlay {
+                roots.push(base);
+            } else {
+                roots = vec![base]; // a later line supersedes an earlier one
+            }
+        }
+    }
+    named.sort_by(|a, b| a.name.cmp(&b.name));
+    named.dedup_by(|a, b| a.name == b.name);
+    roots.dedup();
+    (named, roots)
+}
+
+/// List a client directory that p4d refuses to list in one go.
+///
+/// Measured on this server: 89 of 400 client specs cannot answer
+/// `p4 dirs //client/*` at all ("Client map too twisted for directory list",
+/// MsgDm 439 / EV_TOOBIG) because a second depot is grafted two or more levels
+/// into the client — `//Rig/main/... //client/Rig/Shared/...`. Every deeper
+/// level answers fine, and `p4 dirs` in DEPOT syntax always does, so the listing
+/// is assembled from the view instead: the directories a mapping names outright,
+/// plus the real ones under each depot root the query reaches, minus the ones
+/// the view excludes.
+///
+/// Answers in depot syntax, like `p4 dirs` itself, so callers need no special
+/// case: what they get back is what they translate and descend into, and every
+/// deeper level is one p4d can answer for itself.
+async fn dirs_from_view(conn: P4Conn, path: &str) -> Res {
+    let client = conn.client.clone();
+    if client.is_empty() {
+        return Err("no client".into());
+    }
+    let prefix = path
+        .trim_end_matches('/')
+        .strip_prefix(&format!("//{client}"))
+        .ok_or("not a client path")?
+        .trim_start_matches('/')
+        .to_string();
+
+    let view = {
+        let conn = conn.clone();
+        tauri::async_runtime::spawn_blocking(move || client_view(&conn, &conn.client))
+            .await
+            .map_err(|e| format!("view task failed: {e}"))??
+    };
+    let (named, roots) = view_query(&view, &prefix);
+
+    let mut out: Vec<p4::Record> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut keep = |out: &mut Vec<p4::Record>, name: &str, depot: &str| {
+        if name.is_empty() || !seen.insert(name.to_string()) {
+            return;
+        }
+        let mut dir: Vec<&str> = if prefix.is_empty() { Vec::new() } else { prefix.split('/').collect() };
+        dir.push(name);
+        if dir_excluded(&view, &dir) {
+            return; // p4 omits a directory whose every file the view excludes
+        }
+        let mut rec = p4::Record::new();
+        rec.insert("dir".to_string(), serde_json::Value::String(depot.to_string()));
+        out.push(rec);
+    };
+
+    for root in &roots {
+        let Ok(recs) = run(conn.clone(), v(&["dirs", &format!("{root}/*")])).await else { continue };
+        for r in recs {
+            let dir = r.get("dir").and_then(|d| d.as_str()).unwrap_or("").to_string();
+            let name = dir.rsplit('/').next().unwrap_or("").to_string();
+            keep(&mut out, &name, &dir);
+        }
+    }
+    // The mapping's own directories last: a name the depot side already supplied
+    // keeps the depot's path, which is what p4 would have returned.
+    let fallback_base = roots.first().cloned().unwrap_or_else(|| format!("//{client}"));
+    for d in named {
+        let depot = if d.depot.is_empty() {
+            format!("{fallback_base}/{}", d.name)
+        } else {
+            d.depot.clone()
+        };
+        keep(&mut out, &d.name, &depot);
+    }
+    out.sort_by(|a, b| {
+        let k = |r: &p4::Record| r.get("dir").and_then(|d| d.as_str()).unwrap_or("").to_lowercase();
+        k(a).cmp(&k(b))
+    });
+    Ok(out)
 }
 
 /// Files directly under a depot path, with have/head status for the synced
@@ -224,6 +472,114 @@ pub async fn p4_files(conn: P4Conn, path: String) -> Res {
         ]),
     )
     .await
+}
+
+#[cfg(test)]
+mod twisted_tests {
+    use super::{covers_all_of, dir_excluded, view_query, ViewLine};
+
+    fn v(depot: &str, client: &str) -> ViewLine {
+        ViewLine { exclude: false, overlay: false, depot: depot.into(), client: client.into() }
+    }
+    fn x(depot: &str, client: &str) -> ViewLine {
+        ViewLine { exclude: true, overlay: false, depot: depot.into(), client: client.into() }
+    }
+
+    /// The real CurioData view, which p4d cannot list at the root.
+    fn curio_data() -> Vec<ViewLine> {
+        vec![
+            v("//Curiosity-Data/main/...", "..."),
+            v("//Rig/main/...", "Rig/Shared/..."),
+            x("//Curiosity-Data/....pyc", "....pyc"),
+            x("//Curiosity-Data/.../.mayaSwatches/...", ".../.mayaSwatches/..."),
+        ]
+    }
+
+    #[test]
+    fn the_root_is_the_depot_root_plus_what_the_graft_names() {
+        let (named, roots) = view_query(&curio_data(), "");
+        // The graft names `Rig` outright — the level p4d cannot express, since
+        // there is no depot directory that stands for it.
+        assert_eq!(named.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(), vec!["Rig"]);
+        assert_eq!(named[0].depot, "", "no depot path exists for this level");
+        assert_eq!(roots, vec!["//Curiosity-Data/main"]);
+    }
+
+    #[test]
+    fn at_the_graft_point_the_grafted_depot_is_named() {
+        // Measured: `dirs //client/Rig/*` reports `Shared` as //Rig/main.
+        let (named, roots) = view_query(&curio_data(), "Rig");
+        assert_eq!(named.len(), 1);
+        assert_eq!((named[0].name.as_str(), named[0].depot.as_str()), ("Shared", "//Rig/main"));
+        assert_eq!(roots, vec!["//Curiosity-Data/main/Rig"]);
+    }
+
+    #[test]
+    fn a_later_line_supersedes_an_earlier_one() {
+        // Measured: `dirs //client/Rig/Shared/*` answers from //Rig/main alone,
+        // though the root mapping covers that path too.
+        let (named, roots) = view_query(&curio_data(), "Rig/Shared");
+        assert!(named.is_empty());
+        assert_eq!(roots, vec!["//Rig/main"]);
+    }
+
+    #[test]
+    fn a_level_no_mapping_names_asks_only_the_depot_that_holds_it() {
+        let (named, roots) = view_query(&curio_data(), "Characters/01_Creatures");
+        assert!(named.is_empty());
+        assert_eq!(roots, vec!["//Curiosity-Data/main/Characters/01_Creatures"]);
+    }
+
+    #[test]
+    fn the_rematch_shape_names_its_graft_too() {
+        let view = vec![
+            v("//Rematch-Engine/Dev/Main/...", "..."),
+            v("//Rematch/Dev/Main/...", "Games/Runtime/..."),
+        ];
+        let (named, roots) = view_query(&view, "");
+        assert_eq!(named[0].name, "Games");
+        assert_eq!(roots, vec!["//Rematch-Engine/Dev/Main"]);
+        let (named, _) = view_query(&view, "Games");
+        assert_eq!((named[0].name.as_str(), named[0].depot.as_str()), ("Runtime", "//Rematch/Dev/Main"));
+    }
+
+    #[test]
+    fn a_wholly_excluded_directory_is_dropped() {
+        // Measured on the _1973 client: Binaries, Saved, Intermediate,
+        // DerivedDataCache and Restricted are all absent from `dirs //client/*`,
+        // while Build — excluded nowhere — is listed.
+        let view = vec![
+            v("//Curiosity/main/...", "..."),
+            x("//Curiosity/main/Binaries/...", "Binaries/..."),
+            x("//Curiosity/.../Intermediate/...", ".../Intermediate/..."),
+            x("//Curiosity/....p4config", "....p4config"),
+        ];
+        assert!(dir_excluded(&view, &["Binaries"]));
+        assert!(dir_excluded(&view, &["Intermediate"]), "at the root");
+        assert!(dir_excluded(&view, &["Engine", "Source", "Intermediate"]), "at any depth");
+        assert!(!dir_excluded(&view, &["Build"]));
+        // A rule that excludes SOME files leaves the directory itself.
+        assert!(!dir_excluded(&view, &["Config"]));
+    }
+
+    #[test]
+    fn a_later_include_puts_a_directory_back() {
+        let view = vec![
+            v("//d/main/...", "..."),
+            x("//d/main/Engine/...", "Engine/..."),
+            v("//d/main/Engine/...", "Engine/..."),
+        ];
+        assert!(!dir_excluded(&view, &["Engine"]));
+    }
+
+    #[test]
+    fn only_a_trailing_ellipsis_covers_a_whole_directory() {
+        assert!(covers_all_of("Binaries/...", &["Binaries"]));
+        assert!(covers_all_of(".../obj/...", &["a", "b", "obj"]));
+        assert!(!covers_all_of("....pyc", &["Scripts"]), "a file rule, not a directory one");
+        assert!(!covers_all_of("Engine/Saved/...", &["Engine"]), "only part of Engine");
+        assert!(!covers_all_of("Binaries/...", &["Build"]));
+    }
 }
 
 /// Submitted changelists affecting a depot path (newest first). `before`, when
