@@ -279,10 +279,26 @@ pub async fn p4_describe(conn: P4Conn, change: String) -> Res {
 }
 
 /// Revision history of a single file, one row per revision (newest first).
+///
+/// `follow` adds `-i`, which walks back through the branch the file was created
+/// from. It is what makes a migrated depot readable: our own move to
+/// //CuriosityP4/Dev/Main branched every file rather than re-adding it, so
+/// without `-i` a file's history begins at "Initial copy of the game" and blame
+/// credits the whole file to whoever ran the migration.
+///
+/// `filelog -i` answers with one record per file in the lineage, each carrying
+/// its own `depotFile`, and `explode_indexed` copies that onto every row - so a
+/// pre-migration row names the OLD path, and acting on it (diff, blame) reaches
+/// the file those revision numbers actually belong to.
 #[tauri::command]
-pub async fn p4_filelog(conn: P4Conn, file: String, max: u32) -> Res {
+pub async fn p4_filelog(conn: P4Conn, file: String, max: u32, follow: Option<bool>) -> Res {
     let max = max.to_string();
-    let recs = run(conn, v(&["filelog", "-l", "-m", &max, &file])).await?;
+    let mut args: Vec<&str> = vec!["filelog", "-l"];
+    if follow.unwrap_or(false) {
+        args.push("-i");
+    }
+    args.extend(["-m", &max, &file]);
+    let recs = run(conn, args.iter().map(|s| s.to_string()).collect()).await?;
     let mut out = Vec::new();
     for rec in &recs {
         out.extend(p4::explode_indexed(rec, "rev"));

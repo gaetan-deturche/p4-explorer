@@ -15,6 +15,7 @@
   import OverviewRuler, { type Mark } from "$lib/components/OverviewRuler.svelte";
   import ContextMenu from "$lib/components/ContextMenu.svelte";
   import { langForFile, tokenizeLines, type TokenRun } from "$lib/syntax";
+  import { cacheGet, cacheSet } from "$lib/store.svelte";
   import { openDiff } from "$lib/opendiff";
   import { editor } from "$lib/editor.svelte";
   import { shortcuts } from "$lib/shortcuts.svelte";
@@ -37,6 +38,10 @@
   let notice = $state("");
   let loading = $state(true);
   let tokens = $state<TokenRun[][] | null>(null);
+  /** Follow the branch this file was created from. ON by default, for the reason
+   *  the History tab has it: a migrated depot credits every line to whoever ran
+   *  the migration otherwise. */
+  let follow = $state(true);
 
   function setNotice(m: string, ms = 4000) {
     notice = m;
@@ -54,16 +59,8 @@
       revSpec = job.revSpec ?? "";
       void editor.init(); // openDiff reads the diff-tool choice from this store
       void shortcuts.init(); // honour rebindings here too
-      const b = await p4.annotate(conn, file, revSpec);
-      blame = b;
-      const lang = langForFile(file);
-      if (lang) {
-        tokens = await tokenizeLines(
-          b.lines.map((l) => l.text).join("\n"),
-          lang,
-          matchMedia("(prefers-color-scheme: dark)").matches,
-        );
-      }
+      follow = ((await cacheGet("nav", "follow-branches")) ?? "1") === "1";
+      await load();
     } catch (e) {
       error = String(e);
     } finally {
@@ -71,10 +68,43 @@
     }
   });
 
+  /** (Re)read the blame. Syntax colouring is redone with it: the text can change
+   *  when the credit does not (a different revision of the file). */
+  async function load() {
+    const b = await p4.annotate(conn, file, revSpec, follow);
+    blame = b;
+    const lang = langForFile(file);
+    if (lang) {
+      tokens = await tokenizeLines(
+        b.lines.map((l) => l.text).join("\n"),
+        lang,
+        matchMedia("(prefers-color-scheme: dark)").matches,
+      );
+    }
+  }
+
+  /** The preference is shared with the History tab — it is one idea, not two. */
+  async function setFollow(v: boolean) {
+    follow = v;
+    cacheSet("nav", "follow-branches", v ? "1" : "0");
+    loading = true;
+    try {
+      await load();
+    } catch (e) {
+      error = String(e);
+    } finally {
+      loading = false;
+    }
+  }
+
   /** Consecutive lines from one changelist. The gutter is drawn once per run. */
   interface Run {
     change: string;
     rev: string;
+    /** Set when this change's revision belongs to another file (a line written
+     *  before this path was branched): the revision number means nothing on the
+     *  file on screen, so every action on the run uses this instead. */
+    file: string;
     user: string;
     date: string;
     from: number; // 0-based index of the first line
@@ -86,7 +116,15 @@
       const last = out[out.length - 1];
       if (last && last.change === l.change) last.count++;
       else
-        out.push({ change: l.change, rev: l.rev, user: l.user, date: l.date, from: i, count: 1 });
+        out.push({
+          change: l.change,
+          rev: l.rev,
+          file: l.file,
+          user: l.user,
+          date: l.date,
+          from: i,
+          count: 1,
+        });
     }
     return out;
   });
@@ -168,7 +206,8 @@
       );
       return;
     }
-    void openDiff(conn, { kind: "rev", file, rev: Number(r.rev) }, setNotice);
+    // A pre-branch revision belongs to the path it was written in.
+    void openDiff(conn, { kind: "rev", file: r.file || file, rev: Number(r.rev) }, setNotice);
   }
   /** Blame the file as it was BEFORE this change — the revision below the one
    *  the change produced. This is how you walk past a reformat or a rename to
@@ -183,7 +222,7 @@
       setNotice("@" + r.change + " added this file — there is nothing before it.", 6000);
       return;
     }
-    void openBlameWindow(conn, file, "#" + (rev - 1)).catch((e) => (error = String(e)));
+    void openBlameWindow(conn, r.file || file, "#" + (rev - 1)).catch((e) => (error = String(e)));
   }
 
   // --- gutter context menu ---------------------------------------------------
@@ -241,6 +280,14 @@
     {#if blame}
       <span class="dim">{blame.lines.length} lines · {runs.length} blocks</span>
     {/if}
+    <!-- Whether the credit walks back past the branch this file came from. -->
+    <label
+      class="opt"
+      title="Credit lines written before this file was branched into this path to whoever wrote them (p4 annotate -i), instead of to whoever branched it."
+    >
+      <input type="checkbox" checked={follow} onchange={(e) => void setFollow(e.currentTarget.checked)} />
+      branch history
+    </label>
     <button onclick={close}>Close</button>
   </div>
 
@@ -340,6 +387,16 @@
   }
   .grow {
     flex: 1;
+  }
+  .opt {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    color: var(--text-dim, #999);
+    cursor: pointer;
+    white-space: nowrap;
   }
   .dim {
     opacity: 0.65;

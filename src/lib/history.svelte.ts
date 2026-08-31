@@ -15,6 +15,8 @@ import {
   storeSetMem,
   hydrate,
   storeClearScope,
+  cacheGet,
+  cacheSet,
 } from "$lib/store.svelte";
 
 type Hooks = {
@@ -44,6 +46,12 @@ let deepening = $state(false); // an explicit "load older history" fetch is runn
 let selectedChange = $state(""); // details-pane selection
 let descRows = $state<P4Record[]>([]);
 let descLoading = $state(false);
+// Follow the branch a file was created from (p4 filelog -i). ON by default: our
+// depot migration branched every file into //CuriosityP4/Dev/Main, so without it
+// a file's history begins at "Initial copy of the game" and everything older is
+// invisible. Costs almost nothing - 0.089s vs 0.101s on a 51-revision file.
+let followBranches = $state(true);
+let followLoaded = false;
 
 async function safe<T>(fn: () => Promise<T[]>): Promise<T[]> {
   try {
@@ -108,6 +116,25 @@ function writeHist(client: string, id: string, e: HistEntry, memOnly = false): v
 export const history = {
   init(hooks: Hooks) {
     h = hooks;
+    // Read the preference once per window; unset means on.
+    if (!followLoaded) {
+      followLoaded = true;
+      void cacheGet("nav", "follow-branches").then((v) => {
+        followBranches = (v ?? "1") === "1";
+      });
+    }
+  },
+  get followBranches() {
+    return followBranches;
+  },
+  /** Turn branch-following on or off and re-read the current file's history.
+   *  Folder history is unaffected: `p4 changes` on a path has no lineage to
+   *  follow, so the toggle is only offered for a file. */
+  setFollowBranches(v: boolean) {
+    if (v === followBranches) return;
+    followBranches = v;
+    cacheSet("nav", "follow-branches", v ? "1" : "0");
+    if (curMode() === "file" && currentId) void history.selectFile(currentId.slice(2));
   },
   get mode() {
     void histVer;
@@ -164,7 +191,9 @@ export const history = {
     deepening = true;
     try {
       if (e.mode === "file") {
-        const rev = await safe(() => p4.filelog(h!.conn(), h!.toQuery(e.subject), e.rows.length + extra));
+        const rev = await safe(() =>
+          p4.filelog(h!.conn(), h!.toQuery(e.subject), e.rows.length + extra, followBranches),
+        );
         if (seq !== loadSeq) return;
         if (rev.length > e.rows.length) writeHist(client, id, { ...e, rows: rev });
         return;
@@ -311,7 +340,7 @@ export const history = {
     let threw = false;
     const fstatP = safe(() => p4.fstat(h!.conn(), q));
     try {
-      rev = await p4.filelog(h!.conn(), q, 200);
+      rev = await p4.filelog(h!.conn(), q, 200, followBranches);
     } catch {
       threw = true;
     }
@@ -351,7 +380,12 @@ export const history = {
         descRows = [];
       }
     } else {
-      const row = e.rows.find((r) => r.rev === e.have);
+      // A revision of the file itself: with branch history followed, the path it
+      // was branched from contributes its own #1, #2, ... and matching those
+      // would select a changelist that never touched this file.
+      const row = e.rows.find(
+        (r) => r.rev === e.have && (!r.depotFile || String(r.depotFile) === e.subject),
+      );
       if (row?.change) history.selectChange(row.change);
       else {
         selectedChange = "";

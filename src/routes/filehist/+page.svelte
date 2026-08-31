@@ -85,6 +85,14 @@
     const r = rows.find((x) => String(x.change) === change);
     return r?.rev ? Number(r.rev) : 0;
   }
+  /** The file a row's revision belongs to. With branch history followed, rows
+   *  from before this file was branched into its current path carry the path
+   *  they were written in, and their revision numbers mean nothing on this one. */
+  function fileOf(change: string): string {
+    const r = rows.find((x) => String(x.change) === change);
+    const f = r?.depotFile ? String(r.depotFile) : "";
+    return f || file;
+  }
 
   // --- row actions -----------------------------------------------------------
   /** This revision against the one before it. */
@@ -94,7 +102,7 @@
       setNotice("This row has no revision number — the server answered with changelists only.", 6000);
       return;
     }
-    void openDiff(conn, { kind: "rev", file, rev }, setNotice);
+    void openDiff(conn, { kind: "rev", file: fileOf(change), rev }, setNotice);
   }
 
   /** Take one file's share of a changelist back out: it is opened at the
@@ -210,7 +218,9 @@
    *  because annotate wants a revision spec. */
   function blameAt(change: string) {
     const rev = revOf(change);
-    void openBlameWindow(conn, file, rev ? `#${rev}` : "").catch((e) => (error = String(e)));
+    void openBlameWindow(conn, fileOf(change), rev ? `#${rev}` : "").catch(
+      (e) => (error = String(e)),
+    );
   }
 
   function close() {
@@ -258,6 +268,8 @@
         onContextMenu={openCtx}
         onDeepen={() => history.deepen()}
         deepening={history.deepening}
+        followBranches={history.followBranches}
+        onFollowBranches={(v) => history.setFollowBranches(v)}
       />
     </div>
     <div

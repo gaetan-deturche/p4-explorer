@@ -16,6 +16,8 @@
     onContextMenu,
     onDeepen,
     deepening = false,
+    followBranches = true,
+    onFollowBranches,
   }: {
     mode: "folder" | "file";
     subject: string;
@@ -29,17 +31,33 @@
     onContextMenu?: (change: string, e: MouseEvent) => void;
     onDeepen?: () => void; // fetch older history (search covers loaded rows only)
     deepening?: boolean;
+    /** File mode only: whether the log follows the branch the file came from. */
+    followBranches?: boolean;
+    onFollowBranches?: (v: boolean) => void;
   } = $props();
 
   // Changelist number the workspace is synced to (the "you are here" anchor).
   // An empty have on a LOADED history means nothing under the subject is synced
   // (fresh workspace) — anchor 0 so every row reads as not-yet-pulled, instead
   // of the all-white "everything synced" look NaN produced.
+  /** Whether a row is a revision of the SUBJECT file rather than of a file it was
+   *  branched from. Revision numbers are per file, so every "is this the one we
+   *  have" test has to ask this first: with branch history followed, the old
+   *  path contributes its own #1, #2, ... */
+  function isOwn(r: P4Record): boolean {
+    const f = r.depotFile ? String(r.depotFile) : "";
+    return !f || f === subject;
+  }
+  /** The row's own revision, or "" for a row from further up the lineage. */
+  function ownRev(r: P4Record): string {
+    return isOwn(r) ? String(r.rev ?? "") : "";
+  }
+
   const anchorNum = $derived.by(() => {
     if (rows.length === 0) return NaN;
     if (mode === "folder") return haveChange ? Number(haveChange) : 0;
     if (!haveRev) return 0;
-    const r = rows.find((x) => x.rev === haveRev);
+    const r = rows.find((x) => isOwn(x) && x.rev === haveRev);
     return r ? Number(r.change) : NaN;
   });
 
@@ -163,7 +181,9 @@
     if (!key) return;
     const sel = mode === "folder" ? `[data-change="${key}"]` : `[data-rev="${key}"]`;
     const present = () =>
-      mode === "folder" ? rows.some((r) => r.change === key) : rows.some((r) => r.rev === key);
+      mode === "folder"
+        ? rows.some((r) => r.change === key)
+        : rows.some((r) => isOwn(r) && r.rev === key);
     // A filter would hide it: clear the query rather than silently doing nothing.
     if (query.trim() && present()) query = "";
     if (!present() && onDeepen && !exhausted && !deepening) {
@@ -233,6 +253,22 @@
       bind:value={query}
       spellcheck="false"
     />
+    {#if mode === "file" && onFollowBranches}
+      <!-- A migrated depot's history starts at the migration without this: every
+           file was branched into the new path, so its own log holds only what
+           happened since. -->
+      <label
+        class="opt"
+        title="Follow the branch this file was created from (p4 filelog -i), so revisions from before it was branched into this path are listed too. Those rows name the file they belong to."
+      >
+        <input
+          type="checkbox"
+          checked={followBranches}
+          onchange={(e) => onFollowBranches?.(e.currentTarget.checked)}
+        />
+        branch history
+      </label>
+    {/if}
     {#if mode === "folder" && haveChange}
       <button
         class="synced-badge"
@@ -325,17 +361,23 @@
           </tr>
         </thead>
         <tbody>
-          {#each shown as r (r.rev)}
+          {#each shown as r (String(r.depotFile ?? '') + '#' + r.rev)}
             <tr
-              data-rev={r.rev}
-              class:have={r.rev === haveRev}
+              data-rev={ownRev(r)}
+              class:have={isOwn(r) && r.rev === haveRev}
               class:ahead={isAhead(r)}
               class:selected={r.change === selectedChange}
               onclick={() => onSelectChange(r.change)}
               oncontextmenu={(e) => onContextMenu?.(r.change, e)}
             >
               <td class="mono">
-                {#if r.rev === haveRev}<span class="you">▸</span>{/if}#{r.rev}
+                {#if isOwn(r) && r.rev === haveRev}<span class="you">▸</span>{/if}#{r.rev}
+                {#if !isOwn(r)}
+                  <span
+                    class="from"
+                    title={`This revision belongs to ${r.depotFile} — the file this one was branched from. Its revision numbers are its own.`}>⤴</span
+                  >
+                {/if}
               </td>
               <td class="mono">@{r.change}</td>
               <td class="dim">{fmtTime(r.time)}</td>
@@ -387,6 +429,10 @@
     display: flex;
     flex-direction: column;
     height: 100%;
+    /* Without this the panel is as wide as its widest MIN-content — the search
+       input plus the nowrap toggle — and the parent's overflow:hidden then clips
+       whatever sticks out past the pane. */
+    min-width: 0;
     background: var(--bg-panel);
   }
   .head {
@@ -394,6 +440,7 @@
     align-items: center;
     gap: 10px;
     padding: 6px 10px;
+    min-width: 0; /* so the children below may shrink rather than overflow */
     border-bottom: 1px solid var(--border);
   }
   .title {
@@ -405,10 +452,25 @@
     flex: 1;
   }
   .search {
-    flex: none;
-    width: 15rem;
+    flex: 0 1 15rem;
+    min-width: 4rem;
     font-size: 12px;
     padding: 2px 8px;
+  }
+  /* A revision from further up the lineage: it belongs to another path. */
+  .from {
+    color: var(--text-dim, #999);
+    cursor: help;
+  }
+  .opt {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    color: var(--text-dim, #999);
+    cursor: pointer;
+    white-space: nowrap;
   }
   .synced-badge {
     cursor: pointer;

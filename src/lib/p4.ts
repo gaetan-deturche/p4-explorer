@@ -320,6 +320,9 @@ export function writeLocalFile(path: string, text: string): Promise<void> {
 
 /** One line of a file, with the change that introduced it. */
 export interface BlameLine {
+  /** Set when this line's revision belongs to another file — a line written
+   *  before this path was branched. Empty for the ordinary case. */
+  file: string;
   change: string;
   /** The revision that change produced; empty when filelog didn't reach it. */
   rev: string;
@@ -490,7 +493,12 @@ export const p4 = {
   changesExact: (conn: P4Conn, spec: string, max = 1) =>
     call("p4_changes_exact", { conn, spec, max }),
   describe: (conn: P4Conn, change: string) => call("p4_describe", { conn, change }),
-  filelog: (conn: P4Conn, file: string, max = 100) => call("p4_filelog", { conn, file, max }),
+  /** A file's revisions. `follow` walks back through the branch it was created
+   *  from (p4's -i), which is what makes history readable across a depot
+   *  migration: rows from before it name the OLD path, so acting on one reaches
+   *  the file its revision number belongs to. */
+  filelog: (conn: P4Conn, file: string, max = 100, follow = false) =>
+    call("p4_filelog", { conn, file, max, follow }),
   fstat: (conn: P4Conn, file: string) => call("p4_fstat", { conn, file }),
   sync: (conn: P4Conn, path?: string) => call("p4_sync", { conn, path: path ?? null }),
   reconcile: (conn: P4Conn, path: string) => call("p4_reconcile", { conn, path }),
@@ -685,8 +693,10 @@ export const p4 = {
   revert: (conn: P4Conn, depotFile: string) => call("p4_revert", { conn, depotFile }),
   /** Blame: every line with the changelist that introduced it. `revSpec` is a
    *  p4 suffix ("#8", "@=1234") or "" for the head revision. */
-  annotate: (conn: P4Conn, depotFile: string, revSpec = "") =>
-    g<Blame>("p4_annotate", { conn, depotFile, revSpec }),
+  /** Blame `file`. `follow` credits lines written before this path was branched
+   *  to whoever wrote them, rather than to whoever branched it. */
+  annotate: (conn: P4Conn, depotFile: string, revSpec = "", follow = false) =>
+    g<Blame>("p4_annotate", { conn, depotFile, revSpec, follow }),
   /** Check out / mark for add / mark for delete. One p4 call per file so a
    *  refusal can be attributed; `change` empty = the default changelist. */
   openFiles: (conn: P4Conn, verb: "edit" | "add" | "delete", files: string[], change = "") =>

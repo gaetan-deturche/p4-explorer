@@ -29,6 +29,11 @@ pub struct BlameLine {
     /// The file revision that changelist produced, when it can be resolved from
     /// filelog — empty otherwise, and then the line offers no diff.
     pub rev: String,
+    /// The file that revision belongs to, when it is NOT the one being blamed:
+    /// with branch history followed, a line written before the depot migration
+    /// belongs to the path it was written in, and its revision number means
+    /// nothing on this one. Empty for the ordinary case.
+    pub file: String,
     pub user: String,
     pub date: String,
     pub text: String,
@@ -49,7 +54,10 @@ pub struct Blame {
 /// otherwise be wrong on every line of the view — silently.
 fn to_lines(
     recs: &[p4::Record],
-    rev_of: &std::collections::HashMap<String, String>,
+    rev_of: &std::collections::HashMap<String, (String, String)>,
+    // The file being blamed: a revision belonging to any OTHER file (a line
+    // written before this path was branched) names its own.
+    blamed: &str,
 ) -> Vec<BlameLine> {
     recs.iter()
         // The header record has no `data`; every line record does.
@@ -59,8 +67,10 @@ fn to_lines(
             // `lower` is the change that INTRODUCED the line; `upper` is merely
             // the one it still survives in, which is the head for most lines.
             let change = get("lower");
+            let (rev, from) = rev_of.get(&change).cloned().unwrap_or_default();
             BlameLine {
-                rev: rev_of.get(&change).cloned().unwrap_or_default(),
+                rev,
+                file: if from.is_empty() || from == blamed { String::new() } else { from },
                 change,
                 user: get("user"),
                 date: get("time"),
@@ -72,29 +82,52 @@ fn to_lines(
 }
 
 /// Blame `file`, optionally at `rev_spec` ("#8", "@=1234", "" = head).
+///
+/// `follow` adds `-i`, so lines written before the file was branched into this
+/// path are credited to whoever wrote them rather than to whoever branched it.
+/// On our migrated depot that is the difference between 2 authors and 39.
 #[tauri::command]
 pub async fn p4_annotate(
     conn: P4Conn,
     depot_file: String,
     rev_spec: String,
+    follow: Option<bool>,
 ) -> Result<Blame, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        let follow = follow.unwrap_or(false);
         let spec = format!("{depot_file}{rev_spec}");
-        let recs = p4::run(&conn, &["annotate", "-u", "-c", &spec])?;
+        let mut args: Vec<&str> = vec!["annotate", "-u", "-c"];
+        if follow {
+            args.push("-i");
+        }
+        args.push(&spec);
+        let recs = p4::run(&conn, &args)?;
         if recs.is_empty() {
             return Err(format!("no annotation for {spec}"));
         }
         // change -> the revision it produced, so a line can offer "diff this".
         // One extra call; annotate itself only ever names changelists.
-        let mut rev_of: std::collections::HashMap<String, String> =
+        // change -> (revision, the file that revision belongs to). The path
+        // matters once branch history is followed: revision 48 of a line's
+        // history lives in the depot the file was branched FROM, and `filelog -i`
+        // says so per record, which `explode_indexed` copies onto every row.
+        let mut rev_of: std::collections::HashMap<String, (String, String)> =
             std::collections::HashMap::new();
-        if let Ok(log) = p4::run(&conn, &["filelog", "-m", "500", &depot_file]) {
+        let mut log_args: Vec<&str> = vec!["filelog"];
+        if follow {
+            log_args.push("-i");
+        }
+        log_args.extend(["-m", "500", &depot_file]);
+        if let Ok(log) = p4::run(&conn, &log_args) {
             for r in &log {
                 for row in p4::explode_indexed(r, "rev") {
                     let c = row.get("change").and_then(|v| v.as_str()).unwrap_or("");
                     let v = row.get("rev").and_then(|v| v.as_str()).unwrap_or("");
+                    let f = row.get("depotFile").and_then(|v| v.as_str()).unwrap_or("");
                     if !c.is_empty() && !v.is_empty() {
-                        rev_of.entry(c.to_string()).or_insert_with(|| v.to_string());
+                        rev_of
+                            .entry(c.to_string())
+                            .or_insert_with(|| (v.to_string(), f.to_string()));
                     }
                 }
             }
@@ -112,7 +145,7 @@ pub async fn p4_annotate(
             .unwrap_or("")
             .to_string();
 
-        let lines = to_lines(&recs, &rev_of);
+        let lines = to_lines(&recs, &rev_of, &file);
         if lines.is_empty() {
             return Err(format!(
                 "{spec} has no text to annotate — binary files cannot be blamed"
@@ -168,7 +201,7 @@ mod tests {
 
     #[test]
     fn the_header_record_is_not_a_line() {
-        let lines = to_lines(&captured(), &HashMap::new());
+        let lines = to_lines(&captured(), &HashMap::new(), "//d/f.cpp");
         assert_eq!(lines.len(), 2, "the header carries no data and is not blamed");
         assert!(lines[0].text.starts_with("// Copyright"));
     }
@@ -177,7 +210,7 @@ mod tests {
     fn the_change_is_lower_not_upper() {
         // The trap: `upper` is the head change on nearly every line, so reading
         // it would credit one person with authoring the entire file.
-        let lines = to_lines(&captured(), &HashMap::new());
+        let lines = to_lines(&captured(), &HashMap::new(), "//d/f.cpp");
         assert_eq!(lines[0].change, "134476");
         assert_eq!(lines[1].change, "142419", "a later line keeps its own change");
         assert_ne!(lines[1].change, "197204", "never the head change");
@@ -185,7 +218,7 @@ mod tests {
 
     #[test]
     fn the_newline_goes_but_the_text_survives() {
-        let lines = to_lines(&captured(), &HashMap::new());
+        let lines = to_lines(&captured(), &HashMap::new(), "//d/f.cpp");
         assert!(!lines[0].text.ends_with('\n'));
         // Quotes and punctuation must survive intact — this is source code.
         assert_eq!(lines[1].text, "#include \"Characters/CYBaseAI.h\"");
@@ -194,9 +227,25 @@ mod tests {
     #[test]
     fn revisions_come_from_the_filelog_map() {
         let mut rev_of = HashMap::new();
-        rev_of.insert("134476".to_string(), "1".to_string());
-        let lines = to_lines(&captured(), &rev_of);
+        rev_of.insert("134476".to_string(), ("1".to_string(), "//d/f.cpp".to_string()));
+        let lines = to_lines(&captured(), &rev_of, "//d/f.cpp");
         assert_eq!(lines[0].rev, "1", "mapped to the revision that change produced");
+        assert_eq!(lines[0].file, "", "the file being blamed needs no second name");
         assert_eq!(lines[1].rev, "", "an unmapped change offers no diff, never a wrong one");
+    }
+
+    #[test]
+    fn a_line_from_before_the_branch_names_its_own_file() {
+        // With branch history followed, this line's change lives in the depot the
+        // file was branched FROM, and revision 48 means nothing on the new path -
+        // exactly the case our //CuriosityP4 migration created.
+        let mut rev_of = HashMap::new();
+        rev_of.insert(
+            "134476".to_string(),
+            ("48".to_string(), "//Curiosity/main/Source/f.cpp".to_string()),
+        );
+        let lines = to_lines(&captured(), &rev_of, "//CuriosityP4/Dev/Main/Games/f.cpp");
+        assert_eq!(lines[0].rev, "48");
+        assert_eq!(lines[0].file, "//Curiosity/main/Source/f.cpp");
     }
 }

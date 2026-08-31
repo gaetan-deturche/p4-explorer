@@ -1285,6 +1285,8 @@
               onContextMenu={openHistContext}
               onDeepen={() => history.deepen()}
               deepening={history.deepening}
+              followBranches={history.followBranches}
+              onFollowBranches={(v) => history.setFollowBranches(v)}
             />
           </div>
           <div
