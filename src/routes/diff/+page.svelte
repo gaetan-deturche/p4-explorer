@@ -13,6 +13,7 @@
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { diffLines, lineEndings, lineKey, type DiffRow } from "$lib/linediff";
   import { endingLabel, renderLine } from "$lib/invisibles";
+  import { rowWindow } from "$lib/rowwindow";
   import { cacheGet, cacheSet } from "$lib/store.svelte";
   import { langForFile, tokenizeLines, type TokenRun } from "$lib/syntax";
   import ApprovalDialog from "$lib/components/ApprovalDialog.svelte";
@@ -355,6 +356,24 @@
       ? "0 0 minmax(0, 1fr)"
       : `minmax(0, ${split}fr) 1.6rem minmax(0, ${1 - split}fr)`,
   );
+  // --- what is on screen -----------------------------------------------------
+  // Only the visible rows are rendered. Both panes do this: at 17942 lines this
+  // window was building a quarter of a million nodes, and every scroll frame
+  // paid for them.
+  const OVERSCAN = 24;
+  let viewTop = $state(0);
+  let viewH = $state(1200);
+  function readView() {
+    if (!scrollEl) return;
+    viewTop = scrollEl.scrollTop;
+    viewH = scrollEl.clientHeight;
+  }
+  /** The rows of a block worth rendering, and the padding that stands in for the
+   *  rest of it. */
+  function windowOf(top: number, lines: number) {
+    return rowWindow(viewTop, viewH, top, lines, LH, OVERSCAN);
+  }
+
   // --- horizontal panning ----------------------------------------------------
   // A scrollbar under each pane, and the panes move together: side by side, the
   // panes show the same columns of two versions of a file, so panning one and not
@@ -919,18 +938,30 @@ initSplit(leftText.trim() === "");
   from: number,
   kind: string,
   fill = 0,
+  top = 0,
 )}
-  {#each lines as line, k}
+  {@const win = windowOf(top, lines.length)}
+  {@const first = win.first}
+  {@const last = win.last}
+  <!-- The rows outside the window, as one box each: the rows that ARE drawn keep
+       their flow position, so the block height and the void below still hold. -->
+  {#if win.padBefore > 0}
+    <div class="pad" style="height:{win.padBefore * LH}px" aria-hidden="true"></div>
+  {/if}
+  {#each lines.slice(first, last + 1) as line, k}
     <div class="line k-{kind}"><span class="mk">{kind === "del" ? "-" : ""}</span><span class="ln"
-        >{from + k}</span
+        >{from + first + k}</span
       ><span class="src"
-        >{#each renderLine(line, tokens.get(line), { invisibles, hot: hots[k] }) as seg}<span
+        >{#each renderLine(line, tokens.get(line), { invisibles, hot: hots[first + k] }) as seg}<span
             style:color={seg.color}
             class:ghost={seg.ghost}
             class:hot={seg.hot}>{seg.text}</span
           >{:else}<span> </span>{/each}</span
       ></div>
   {/each}
+  {#if win.padAfter > 0}
+    <div class="pad" style="height:{win.padAfter * LH}px" aria-hidden="true"></div>
+  {/if}
   <!-- Rows this side does not HAVE: the block is taller because the other side
        has more lines. Hatched, because a blank row is indistinguishable from a
        real empty line — only the line numbers gave it away. Drawn as ONE element
@@ -1020,7 +1051,13 @@ initSplit(leftText.trim() === "");
   {:else}
     <div class="body">
     <div class="viewport" onwheel={onPanWheel}>
-      <div class="scroll" class:hasbar={canPan} bind:this={scrollEl}>
+      <div
+        class="scroll"
+        class:hasbar={canPan}
+        bind:this={scrollEl}
+        bind:clientHeight={viewH}
+        onscroll={readView}
+      >
       <div
         class="grid mono"
         class:single
@@ -1047,7 +1084,7 @@ initSplit(leftText.trim() === "");
               data-change={b.kind === "same" ? undefined : i}
               style="top:{tops[i]}px; height:{rows[i] * LH}px"
             >
-              {@render pane(b.left, b.lhot, starts[i].l, leftKind(i), rows[i] - b.left.length)}
+              {@render pane(b.left, b.lhot, starts[i].l, leftKind(i), rows[i] - b.left.length, tops[i])}
             </div>
           {/each}
           {@render markers("left")}
@@ -1480,7 +1517,11 @@ initSplit(leftText.trim() === "");
   .scroll {
     flex: 1;
     overflow: auto;
-    min-height: 0;
+    min-height: 0;    /* Rows come and go as this scrolls, and Chromium's scroll anchoring reacts to
+       that by "correcting" scrollTop toward whatever element it had anchored to
+       — which, when the anchor is a row we just replaced with a spacer, throws
+       the view a long way at random. A virtualized list has to opt out. */
+    overflow-anchor: none;
   }
   .grid {
     display: grid;
@@ -1591,6 +1632,10 @@ initSplit(leftText.trim() === "");
        positioned box. Never narrower than the pane, so backgrounds still span. */
     width: max(100%, var(--content-w, 100%));
     overflow: hidden;
+  }
+  /* Stands in for rows outside the window: height only. */
+  .pad {
+    flex: none;
   }
   .line {
     display: flex;

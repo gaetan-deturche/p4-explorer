@@ -10,6 +10,14 @@
     pct: number;
     /** Tick colour, matching the panes: add | del | mod | conflict | done. */
     kind: "add" | "del" | "mod" | "conflict" | "done";
+    /** Overrides `kind` when the host has a colour of its own. Blame does: its
+     *  blocks are not changes against anything, so the diff palette would read
+     *  as "something differs here" when nothing does. */
+    color?: string;
+    /** How much of the document the block covers, 0..1. Given one, the tick is
+     *  drawn as tall as the block instead of as a point — which is what makes
+     *  the strip a map of the blocks rather than of their starts. */
+    span?: number;
     title: string;
     /** Passed back on click so the host can scroll to the right thing. */
     index: number;
@@ -55,8 +63,11 @@
 >
   {#each marks as m (m.index)}
     <button
-      class="tick {m.kind}"
-      style="top:{m.pct * 100}%"
+      class="tick {m.color ? '' : m.kind}"
+      class:spanned={!!m.span}
+      style="top:{m.pct * 100}%{m.span ? `; height: max(3px, ${m.span * 100}%)` : ''}{m.color
+        ? `; background: ${m.color}`
+        : ''}"
       title={m.title}
       onclick={(e) => {
         e.stopPropagation();
@@ -92,6 +103,14 @@
     height: 5px;
     left: 0;
     right: 0;
+  }
+  /* A tick that stands for a whole block keeps its height on hover — its height
+     is an inline style, so the rule above cannot shrink it — and brightens
+     instead, since widening alone is hard to see on a tall band. */
+  .tick.spanned:hover {
+    left: 0;
+    right: 0;
+    filter: brightness(1.35);
   }
   /* The same scale as the panes: green is kept, orange is dropped, red needs a
      decision. A block changed on both sides shows both halves. */

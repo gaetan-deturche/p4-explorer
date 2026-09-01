@@ -8,6 +8,15 @@ const host = process.env.TAURI_DEV_HOST;
 export default defineConfig(async () => ({
   plugins: [sveltekit()],
 
+  // The syntax highlighter runs in a module worker, and it dynamically imports
+  // its engine, themes and grammars — so its bundle is split across chunks,
+  // which Vite's default IIFE worker format cannot emit ("Invalid value 'iife'
+  // for option output.format ... UMD and IIFE output formats are not supported
+  // for code-splitting builds"). ES workers can.
+  worker: {
+    format: "es",
+  },
+
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //
   // 1. prevent Vite from obscuring rust errors

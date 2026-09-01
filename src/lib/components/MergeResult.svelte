@@ -10,6 +10,7 @@
   import { selectionsOf, type Caret, type DocState, type MergeAction } from "$lib/mergedoc";
   import { shortcuts } from "$lib/shortcuts.svelte";
   import { renderLine } from "$lib/invisibles";
+  import { rowWindow } from "$lib/rowwindow";
   import type { TokenRun } from "$lib/syntax";
 
   // NOT named `state`: that shadows the $state rune, and `$state` would then read
@@ -90,6 +91,34 @@
   /** The focus caret: what scrolling and the input sink follow. */
   const caretAt = $derived(caretsAt[docState.focus] ?? caretsAt.find((c) => c) ?? null);
 
+  // --- what is on screen -----------------------------------------------------
+  // Only the visible rows are rendered: a big file otherwise puts every line of
+  // every region in the DOM, and scrolling then costs a style recalc and a
+  // repaint over hundreds of thousands of nodes.
+  const OVERSCAN = 24; // rows either side, so a fast scroll shows no blank band
+  let viewTop = $state(0);
+  let viewH = $state(1200);
+
+  /** The rows of one region worth rendering. */
+  function windowOf(i: number, lines: number) {
+    const r = docState.doc.regions[i];
+    const base = tops[i] + (r.conflict ? toolbarHeight : 0);
+    return rowWindow(viewTop, viewH, base, lines, lineHeight, OVERSCAN);
+  }
+  /** Regions with any row on screen. The rest are an empty box of the right
+   *  height, which is all the layout needs from them. */
+  const visRegions = $derived.by(() => {
+    const out = new Set<number>();
+    docState.doc.regions.forEach((r, i) => {
+      const h = (rows[i] ?? r.lines.length) * lineHeight + (r.conflict ? toolbarHeight : 0);
+      if (tops[i] < viewTop + viewH + OVERSCAN * lineHeight &&
+          tops[i] + h > viewTop - OVERSCAN * lineHeight) {
+        out.add(i);
+      }
+    });
+    return out;
+  });
+
   let probe: HTMLSpanElement | undefined = $state();
   /** x of each caret, measured — same index as `caretsAt`. */
   let caretLefts = $state<number[]>([]);
@@ -168,6 +197,21 @@
   // rest, and this pane lives in its own window — so the registry is loaded here.
   onMount(() => {
     void shortcuts.init();
+    // The scroller is the host's, not ours, so the window is read from it.
+    const box = scrollBox();
+    if (!box) return;
+    const read = () => {
+      viewTop = box.scrollTop;
+      viewH = box.clientHeight;
+    };
+    read();
+    box.addEventListener("scroll", read, { passive: true });
+    const ro = new ResizeObserver(read);
+    ro.observe(box);
+    return () => {
+      box.removeEventListener("scroll", read);
+      ro.disconnect();
+    };
   });
 
   /** Keep the caret visible without yanking the view around, in both directions:
@@ -476,13 +520,32 @@
       {#if r.conflict}
         <div class="bar" style="height:{toolbarHeight}px">{@render toolbar(r.region)}</div>
       {/if}
-      {#each r.lines as line, k (k)}
-        <div class="rl k-{kind}" style="height:{lineHeight}px">
-          <span class="mk">{MARK[kind] ?? ""}</span><span class="ln">{starts[i] + k}</span><span
-            class="code">{@render codeOf(line, r.region, k)}</span
-          >
-        </div>
-      {/each}
+      {#if visRegions.has(i)}
+        {@const win = windowOf(i, r.lines.length)}
+        {@const first = win.first}
+        {@const last = win.last}
+        <!-- The rows above and below the window, as one box each: the rows keep
+             their flow position, so the region's height, its hatched void and
+             every style below still hold. -->
+        {#if win.padBefore > 0}
+          <div class="pad" style="height:{win.padBefore * lineHeight}px" aria-hidden="true"></div>
+        {/if}
+        {#each r.lines.slice(first, last + 1) as line, k (first + k)}
+          <div class="rl k-{kind}" style="height:{lineHeight}px">
+            <span class="mk">{MARK[kind] ?? ""}</span><span class="ln">{starts[i] + first + k}</span
+            ><span class="code">{@render codeOf(line, r.region, first + k)}</span>
+          </div>
+        {/each}
+        {#if win.padAfter > 0}
+          <div
+            class="pad"
+            style="height:{win.padAfter * lineHeight}px"
+            aria-hidden="true"
+          ></div>
+        {/if}
+      {:else}
+        <div class="pad" style="height:{r.lines.length * lineHeight}px" aria-hidden="true"></div>
+      {/if}
       <!-- Rows this side does not have (the other side is longer). Hatched, so a
            void never looks like a real empty line — one element for the whole
            run, so the diagonals stay continuous across rows. -->
@@ -531,8 +594,16 @@
 </div>
 
 <style>
+  /* Stands in for rows outside the window: height only, so everything below it
+     sits where it would have. */
+  .pad {
+    flex: none;
+  }
   .pane {
     position: relative;
+    /* See the scrollers: rows are swapped as this pane scrolls, and scroll
+       anchoring must not chase them. */
+    overflow-anchor: none;
     /* The host window sets --content-w from its longest line (monospace, so it is
        arithmetic); the pane is at least that wide or the column has nothing to
        scroll to. */

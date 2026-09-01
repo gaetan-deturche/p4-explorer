@@ -119,9 +119,16 @@ function core(): Promise<HighlighterCore> {
 const MAX_CHARS = 2_000_000; // skip highlighting on huge files (diff still works)
 
 /** Tokenize `text` into per-line colored runs, or null (too big / lang failed).
- *  Line i of the result colors line i+1 of `text` (after \r\n normalization —
+ *
+ *  This is the work itself, and it does not yield once it starts: Shiki walks
+ *  the file as a state machine — a line inside a block comment is only known to
+ *  be inside one from the lines before it — so it can be split neither by line
+ *  nor by visible window. On a big file that is seconds, which is why the worker
+ *  below exists; this is called from inside it, or as its fallback.
+ *
+ *  Line i of the result colors line i+1 of `text` (after CRLF normalization,
  *  matching linediff's splitLines). */
-export async function tokenizeLines(
+export async function tokenizeLinesSync(
   text: string,
   lang: string,
   dark: boolean,
@@ -142,4 +149,57 @@ export async function tokenizeLines(
   } catch {
     return null; // unhighlighted is fine
   }
+}
+
+// --- off the main thread ----------------------------------------------------
+
+/** The worker, created on first use and kept: starting one costs a module load
+ *  and an engine init, and every window here tokenizes more than once (a diff
+ *  does both sides, and again after an edit). Left null once it has failed, so a
+ *  webview that cannot run module workers simply pays the old cost. */
+let worker: Worker | null = null;
+let workerDead = false;
+let nextId = 1;
+const pending = new Map<number, (lines: TokenRun[][] | null) => void>();
+
+function ensureWorker(): Worker | null {
+  if (worker || workerDead) return worker;
+  try {
+    worker = new Worker(new URL("./syntax.worker.ts", import.meta.url), { type: "module" });
+    worker.onmessage = (e: MessageEvent<{ id: number; lines: TokenRun[][] | null }>) => {
+      const done = pending.get(e.data.id);
+      if (!done) return; // a reply nobody is waiting for any more
+      pending.delete(e.data.id);
+      done(e.data.lines);
+    };
+    worker.onerror = () => {
+      // Whatever is in flight resolves uncoloured rather than hanging forever.
+      for (const done of pending.values()) done(null);
+      pending.clear();
+      worker?.terminate();
+      worker = null;
+      workerDead = true;
+    };
+  } catch {
+    workerDead = true;
+  }
+  return worker;
+}
+
+/** Tokenize `text` into per-line colored runs, off the main thread where the
+ *  webview allows it. Same contract as `tokenizeLinesSync`, which it falls back
+ *  to; a caller paints its text first and repaints when this resolves. */
+export function tokenizeLines(
+  text: string,
+  lang: string,
+  dark: boolean,
+): Promise<TokenRun[][] | null> {
+  if (text.length > MAX_CHARS) return Promise.resolve(null);
+  const w = ensureWorker();
+  if (!w) return tokenizeLinesSync(text, lang, dark);
+  const id = nextId++;
+  return new Promise((resolve) => {
+    pending.set(id, resolve);
+    w.postMessage({ id, text, lang, dark });
+  });
 }

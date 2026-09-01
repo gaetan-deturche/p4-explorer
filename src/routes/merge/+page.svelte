@@ -3,6 +3,7 @@
   import { invoke } from "@tauri-apps/api/core";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { langForFile, tokenizeLines, type TokenRun } from "$lib/syntax";
+  import { rowWindow } from "$lib/rowwindow";
   import MergeResult from "$lib/components/MergeResult.svelte";
   import OverviewRuler, { type Mark } from "$lib/components/OverviewRuler.svelte";
   import {
@@ -390,6 +391,24 @@
     origin = next;
   }
 
+  // --- what is on screen -----------------------------------------------------
+  // Only the visible rows are rendered, in all three panes: a merge of an 18k
+  // line file otherwise builds several hundred thousand nodes, and every scroll
+  // frame pays for them.
+  const OVERSCAN = 24;
+  let viewTop = $state(0);
+  let viewH = $state(1200);
+  function readView() {
+    if (!scrollEl) return;
+    viewTop = scrollEl.scrollTop;
+    viewH = scrollEl.clientHeight;
+  }
+  /** The rows of a region worth rendering, and the padding that stands in for
+   *  the rest of it. */
+  function windowOf(top: number, lines: number) {
+    return rowWindow(viewTop, viewH, top, lines, LH, OVERSCAN);
+  }
+
   let scrollEl: HTMLDivElement | undefined = $state();
   /** The native scrollbar's width, so the ruler sits beside it rather than under. */
   const barWidth = $derived(scrollEl ? scrollEl.offsetWidth - scrollEl.clientWidth : 0);
@@ -574,15 +593,26 @@
 </script>
 
 <!-- Read-only pane content: mark, line number, coloured code. -->
-{#snippet pane(lines: string[], from: number, kind: string)}
-  {#each lines as line, k}
+{#snippet pane(lines: string[], from: number, kind: string, top = 0)}
+  {@const win = windowOf(top, lines.length)}
+  {@const first = win.first}
+  {@const last = win.last}
+  <!-- The rows outside the window, as one box each, so the rows that ARE drawn
+       keep their flow position inside the region. -->
+  {#if win.padBefore > 0}
+    <div class="pad" style="height:{win.padBefore * LH}px" aria-hidden="true"></div>
+  {/if}
+  {#each lines.slice(first, last + 1) as line, k}
     <div class="line k-{kind}"><span class="mk">{MARK[kind] ?? ""}</span><span class="ln"
-        >{from + k}</span
+        >{from + first + k}</span
       ><span class="src"
         >{#if tokens.get(line)}{#each tokens.get(line) ?? [] as run}<span
               style:color={run.color}>{run.content}</span>{/each}{:else}{line || " "}{/if}</span
       ></div>
   {/each}
+  {#if win.padAfter > 0}
+    <div class="pad" style="height:{win.padAfter * LH}px" aria-hidden="true"></div>
+  {/if}
 {/snippet}
 
 <!-- The buttons over a conflict, rendered inside the result pane's own strip. -->
@@ -660,7 +690,13 @@
     <div class="dim pad">Loading…</div>
   {:else}
     <div class="viewport" onwheel={onPanWheel}>
-      <div class="scroll" class:hasbar={canPan} bind:this={scrollEl}>
+      <div
+        class="scroll"
+        class:hasbar={canPan}
+        bind:this={scrollEl}
+        bind:clientHeight={viewH}
+        onscroll={readView}
+      >
       <div class="grid mono" style="--content-w: calc(4.2em + {maxCols}ch + 20px)">
         <div class="head">{data.theirsLabel}</div>
         <div class="head link"></div>
@@ -684,7 +720,7 @@
               style="top:{tops[i]}px; height:{rows[i] * LH + (r.kind === 'conflict' ? TOOLBAR : 0)}px"
             >
               {#if r.kind === "conflict"}<div class="strip"></div>{/if}
-              {@render pane(side(r, "theirs"), starts[i].t, sideKind(r, "theirs"))}
+              {@render pane(side(r, "theirs"), starts[i].t, sideKind(r, "theirs"), tops[i] + (r.kind === "conflict" ? TOOLBAR : 0))}
             </div>
           {/each}
         </div>
@@ -754,7 +790,7 @@
               style="top:{tops[i]}px; height:{rows[i] * LH + (r.kind === 'conflict' ? TOOLBAR : 0)}px"
             >
               {#if r.kind === "conflict"}<div class="strip"></div>{/if}
-              {@render pane(side(r, "ours"), starts[i].o, sideKind(r, "ours"))}
+              {@render pane(side(r, "ours"), starts[i].o, sideKind(r, "ours"), tops[i] + (r.kind === "conflict" ? TOOLBAR : 0))}
             </div>
           {/each}
         </div>
@@ -914,7 +950,12 @@
     flex: 1;
     overflow: auto;
     min-height: 0;
-  }
+      /* Rows come and go as this scrolls, and Chromium's scroll anchoring reacts to
+       that by "correcting" scrollTop toward whatever element it had anchored to
+       — which, when the anchor is a row we just replaced with a spacer, throws
+       the view a long way at random. A virtualized list has to opt out. */
+    overflow-anchor: none;
+}
   .grid {
     display: grid;
     grid-template-columns: minmax(0, 1fr) 1.4rem minmax(0, 1fr) 1.4rem minmax(0, 1fr);
@@ -1000,6 +1041,10 @@
   .arrow.open {
     color: #e0555a;
     font-weight: 600;
+  }
+  /* Stands in for rows outside the window: height only. */
+  .pad {
+    flex: none;
   }
   .line {
     display: flex;

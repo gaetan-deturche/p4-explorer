@@ -26,6 +26,7 @@
     openBlameWindow,
     type P4Conn,
     type Blame,
+    type BlameLine,
   } from "$lib/p4";
 
   const id = new URLSearchParams(window.location.search).get("id") ?? "";
@@ -173,18 +174,107 @@
   }
 
   const total = $derived(Math.max(1, blame?.lines.length ?? 1));
-  // One tick per change, at its place in the file: the strip reads as a map of
-  // how the file is layered, including the parts scrolled out of sight.
-  const marks = $derived<Mark[]>(
-    runs.map((r, i) => ({
-      pct: r.from / total,
-      kind: "mod" as const,
-      title: "@" + r.change + " · " + r.user + " · " + r.date,
-      index: i,
-    })),
-  );
+  // One band per change, as tall as the block and in the same colour the block
+  // has in the code: the strip is a map of how the file is layered, including
+  // the parts scrolled out of sight. It deliberately does NOT use the diff
+  // palette the ruler defaults to — nothing here differs from anything, and
+  // green/orange ticks read as though something did.
+  const marks = $derived.by<Mark[]>(() => {
+    // A band under about two pixels cannot be read, and a file like
+    // HLSLMaterialTranslator.cpp has 2880 blocks — at full density the strip is
+    // a rainbow with a DOM node per block. Consecutive runs are merged until a
+    // band is worth drawing, and it takes the colour of the longest run in it,
+    // so the strip shows who dominates each stretch of the file.
+    const MIN = 0.003; // ~2px on a 700px strip
+    const out: Mark[] = [];
+    let i = 0;
+    while (i < runs.length) {
+      let end = i;
+      let lines = runs[i].count;
+      let biggest = i;
+      while (lines / total < MIN && end + 1 < runs.length) {
+        end += 1;
+        lines += runs[end].count;
+        if (runs[end].count > runs[biggest].count) biggest = end;
+      }
+      const r = runs[biggest];
+      const merged = end - i + 1;
+      out.push({
+        pct: runs[i].from / total,
+        span: lines / total,
+        color: shade(r.change, 0.7),
+        kind: "mod" as const, // unused: `color` wins
+        title:
+          "@" + r.change + " · " + r.user + " · " + r.date +
+          (merged > 1 ? ` · and ${merged - 1} more change${merged > 2 ? "s" : ""} here` : ""),
+        index: biggest,
+      });
+      i = end + 1;
+    }
+    return out;
+  });
 
+  /** Row height: 12px * 1.45, as the diff window uses. Rows are placed by
+   *  arithmetic, so this and the CSS must agree exactly. */
+  const LH = 17.4;
   let scrollEl = $state<HTMLDivElement>();
+  let scrollTop = $state(0);
+  let viewH = $state(600);
+
+  /** The window of lines worth rendering, with a little either side so a fast
+   *  scroll does not show a blank band before the next frame. */
+  const OVERSCAN = 24;
+  const first = $derived(Math.max(0, Math.floor(scrollTop / LH) - OVERSCAN));
+  const last = $derived(
+    Math.min(total - 1, Math.ceil((scrollTop + viewH) / LH) + OVERSCAN),
+  );
+  const visLines = $derived.by(() => {
+    const out: { i: number; l: BlameLine }[] = [];
+    const lines = blame?.lines ?? [];
+    for (let i = first; i <= last && i < lines.length; i++) out.push({ i, l: lines[i] });
+    return out;
+  });
+  /** The runs overlapping that window — the gutter cells to draw. The index
+   *  comes along: `hot` is a run index, and looking it up per row would search
+   *  all 2880 of them on every frame. */
+  const visRuns = $derived(
+    runs
+      .map((r, ri) => ({ r, ri }))
+      .filter(({ r }) => r.from + r.count > first && r.from <= last),
+  );
+  /** The code column is as wide as the longest line, so the horizontal scrollbar
+   *  does not change size as rows come and go. Computed once per blame. */
+  const maxCols = $derived.by(() => {
+    let n = 40;
+    for (const l of blame?.lines ?? []) if (l.text.length > n) n = l.text.length;
+    return n;
+  });
+  /** Same for the provenance column, whose width used to come from its content. */
+  const gutCols = $derived.by(() => {
+    let n = 18;
+    for (const r of runs) {
+      const w = ("@" + r.change).length + r.user.length + 12;
+      if (w > n) n = w;
+    }
+    return Math.min(n, 44);
+  });
+
+  function onScroll() {
+    if (!scrollEl) return;
+    scrollTop = scrollEl.scrollTop;
+    viewH = scrollEl.clientHeight;
+  }
+  /** Which run is under the pointer, from the pointer's y — one listener for the
+   *  whole file instead of two per row. */
+  function onHover(e: MouseEvent) {
+    if (!scrollEl) return;
+    const y = e.clientY - scrollEl.getBoundingClientRect().top + scrollEl.scrollTop;
+    hot = runOf.get(Math.floor(y / LH)) ?? -1;
+  }
+  /** The native scrollbar's width, so the ruler sits beside the slider rather
+   *  than over it. Sparse ticks let the slider show through between them; bands
+   *  do not, which is how this long-standing omission became visible. */
+  const barWidth = $derived(scrollEl ? scrollEl.offsetWidth - scrollEl.clientWidth : 0);
   /** Rows here are uniform, so a fraction of the scroll height IS the line. */
   function scrollToFraction(f: number) {
     if (!scrollEl) return;
@@ -306,9 +396,23 @@
     <div class="pad dim">Annotating…</div>
   {:else if blame}
     <div class="viewport">
-      <div class="scroll" bind:this={scrollEl} onwheel={onPanWheel}>
-        <div class="grid mono">
-          {#each runs as r, ri (r.from)}
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div
+        class="scroll"
+        bind:this={scrollEl}
+        bind:clientHeight={viewH}
+        onscroll={onScroll}
+        onwheel={onPanWheel}
+        onmousemove={onHover}
+        onmouseleave={() => (hot = -1)}
+      >
+        <!-- As tall as the file and as wide as its longest line, so the
+             scrollbars mean what they say while only the visible rows exist. -->
+        <div
+          class="canvas mono"
+          style="height:{total * LH}px; width: max(100%, calc({gutCols}ch + {String(total).length + 1}ch + {maxCols}ch + 24px)); --gut-w:{gutCols}ch; --lno-w:{String(total).length + 1}ch"
+        >
+          {#each visRuns as { r, ri } (r.from)}
             <!-- One gutter cell per run, spanning its lines: the provenance is
                  written where the change begins, not on every row. -->
             <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -316,11 +420,8 @@
             <div
               class="gut"
               class:hot={hot === ri}
-              style="grid-row: {r.from + 1} / span {r.count}; background: {shade(r.change, 0.14)};
-                     border-left: 3px solid {shade(r.change, 0.95)}"
+              style="top:{r.from * LH}px; height:{r.count * LH}px; background: {shade(r.change, 0.14)}; border-left: 3px solid {shade(r.change, 0.95)}"
               title={"@" + r.change + " · " + r.user + " · " + r.date + (r.rev ? " · produced #" + r.rev : "") + "\nClick to diff this change · right-click for more"}
-              onmouseenter={() => (hot = ri)}
-              onmouseleave={() => (hot = -1)}
               onclick={() => diffChange(r)}
               oncontextmenu={(e) => {
                 e.preventDefault();
@@ -333,32 +434,24 @@
             </div>
           {/each}
 
-          {#each blame.lines as l, i (i)}
-            <!-- svelte-ignore a11y_no_static_element_interactions -->
+          {#each visLines as { i, l } (i)}
             <div
-              class="lno dim"
+              class="row"
               class:hot={hot === runOf.get(i)}
               class:blockstart={startsRun.has(i)}
-              style="grid-row: {i + 1}; background: {shade(l.change, 0.07)}"
-              onmouseenter={() => (hot = runOf.get(i) ?? -1)}
-              onmouseleave={() => (hot = -1)}
+              style="top:{i * LH}px; background: {shade(l.change, 0.07)}"
             >
-              {i + 1}
+              <span class="lno dim">{i + 1}</span><span class="code"
+                >{#if tokens && tokens[i]}{#each tokens[i] as run}<span style:color={run.color}
+                      >{run.content}</span
+                    >{/each}{:else}{l.text}{/if}</span
+              >
             </div>
-            <!-- svelte-ignore a11y_no_static_element_interactions -->
-            <div
-              class="code"
-              class:hot={hot === runOf.get(i)}
-              class:blockstart={startsRun.has(i)}
-              style="grid-row: {i + 1}; background: {shade(l.change, 0.07)}"
-              onmouseenter={() => (hot = runOf.get(i) ?? -1)}
-              onmouseleave={() => (hot = -1)}
-            >{#if tokens && tokens[i]}{#each tokens[i] as run}<span style:color={run.color}>{run.content}</span>{/each}{:else}{l.text}{/if}</div>
           {/each}
         </div>
       </div>
       {#if marks.length}
-        <OverviewRuler {marks} onPick={jumpToRun} onSeek={scrollToFraction} />
+        <OverviewRuler {marks} offsetRight={barWidth} onPick={jumpToRun} onSeek={scrollToFraction} />
       {/if}
     </div>
   {/if}
@@ -423,22 +516,36 @@
   }
   .scroll {
     flex: 1;
-    overflow: auto;
+    overflow: auto;    /* Rows come and go as this scrolls, and Chromium's scroll anchoring reacts to
+       that by "correcting" scrollTop toward whatever element it had anchored to
+       — which, when the anchor is a row we just replaced with a spacer, throws
+       the view a long way at random. A virtualized list has to opt out. */
+    overflow-anchor: none;
   }
-  .grid {
-    display: grid;
-    /* provenance | line number | code */
-    /* The code column is at least as wide as its widest line, so a line longer
-       than the window makes the GRID wider than the scroller and the window's own
-       horizontal scrollbar appears — reachable, unlike a scrollbar inside a
-       file-tall pane. It still stretches to fill when the lines are short, so the
-       per-change wash and the hover still span the row. */
-    grid-template-columns: max-content max-content minmax(max-content, 1fr);
-    align-items: stretch;
+  /* Only the visible rows exist, so they are placed by arithmetic rather than by
+     the grid: a file-tall canvas keeps the scrollbar honest, and its width comes
+     from the longest line so the horizontal scrollbar does not resize as rows
+     come and go. */
+  .canvas {
+    position: relative;
     font-size: 12px;
-    line-height: 1.45;
+    line-height: 17.4px;
+  }
+  .row {
+    position: absolute;
+    left: 0;
+    right: 0;
+    height: 17.4px;
+    display: flex;
+    align-items: flex-start;
+    white-space: pre;
   }
   .gut {
+    position: absolute;
+    left: 0;
+    width: var(--gut-w);
+    box-sizing: border-box;
+    z-index: 1;
     display: flex;
     gap: 8px;
     align-items: flex-start;
@@ -464,6 +571,8 @@
     font-variant-numeric: tabular-nums;
   }
   .lno {
+    flex: none;
+    width: var(--lno-w);
     padding: 0 8px 0 6px;
     text-align: right;
     font-variant-numeric: tabular-nums;
@@ -473,15 +582,17 @@
     padding-right: 12px;
     white-space: pre;
   }
-  /* A rule at each block's first line, across all three columns — two adjacent
-     blocks can still land on close hues, and the rule settles it. */
-  .lno.blockstart,
-  .code.blockstart {
+  /* A rule at each block's first line — two adjacent blocks can still land on
+     close hues, and the rule settles it. */
+  .row.blockstart {
     border-top: 1px solid var(--border);
   }
   /* Hover wins over the per-change wash, which is set inline. */
-  .lno.hot,
-  .code.hot {
+  .row.hot {
     background: var(--bg-hover) !important;
+  }
+  /* The code starts after the provenance column, which floats above it. */
+  .lno {
+    margin-left: var(--gut-w);
   }
 </style>
