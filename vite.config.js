@@ -14,7 +14,9 @@ export default defineConfig(async () => ({
   // for option output.format ... UMD and IIFE output formats are not supported
   // for code-splitting builds"). ES workers can.
   worker: {
-    format: "es",
+    // Cast: in a checked .js the literal widens to `string`, which no longer
+    // matches vite's `'es' | 'iife'`.
+    format: /** @type {"es"} */ ("es"),
   },
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
