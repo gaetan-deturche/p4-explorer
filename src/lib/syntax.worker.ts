@@ -1,35 +1,61 @@
-//! Syntax highlighting, off the main thread.
+//! Syntax highlighting, off the main thread — and the state that goes with it.
 //!
-//! Shiki tokenizes a whole file in one call, because the grammar is a state
-//! machine: a line inside a block comment is only known to be inside one from
-//! the lines before it. That cannot be split into "just the visible rows", and
-//! on a big file it is seconds of work — 17942 lines of HLSLMaterialTranslator
-//! took 1.3s in a plain node run, and a diff tokenizes BOTH sides — during which
-//! the window did not respond at all.
+//! A TextMate grammar is a state machine, so a file cannot be coloured from the
+//! middle: what a line means depends on the lines before it. Shiki hands that
+//! state out and takes it back, but a `GrammarState` is a live object and cannot
+//! be posted between threads — so it stays HERE, and the window is what crosses.
 //!
-//! So it runs here instead. The pane paints its text immediately, uncoloured,
-//! and repaints when the runs arrive.
+//! The main thread opens a session over a file and then asks for the rows it is
+//! about to draw; each answer is ~60 lines of runs rather than the whole file's
+//! (69710 of them for HLSLMaterialTranslator.cpp, which is what the one-shot
+//! version had to clone back).
 
-import { tokenizeLinesSync, type TokenRun } from "./syntax";
+import { makeTokenizer, type TokenRun } from "./syntax";
+import { TokenSession } from "./tokensession";
 
-export interface TokenRequest {
+interface Open {
+  k: "open";
+  req: number;
   id: number;
   text: string;
   lang: string;
   dark: boolean;
 }
-export interface TokenReply {
+interface Win {
+  k: "win";
+  req: number;
   id: number;
-  lines: TokenRun[][] | null;
+  from: number;
+  count: number;
+}
+interface Close {
+  k: "close";
+  req: number;
+  id: number;
 }
 
-self.onmessage = async (e: MessageEvent<TokenRequest>) => {
-  const { id, text, lang, dark } = e.data;
-  let lines: TokenRun[][] | null = null;
+const sessions = new Map<number, TokenSession>();
+const post = (msg: { req: number; lines?: number; runs?: TokenRun[][] }) =>
+  (self as unknown as Worker).postMessage(msg);
+
+self.onmessage = async (e: MessageEvent<Open | Win | Close>) => {
+  const m = e.data;
   try {
-    lines = await tokenizeLinesSync(text, lang, dark);
+    if (m.k === "open") {
+      const tk = await makeTokenizer(m.lang, m.dark);
+      if (!tk) return post({ req: m.req, lines: -1 });
+      const session = new TokenSession(m.text, tk);
+      sessions.set(m.id, session);
+      // Nothing is tokenized yet: the state is walked only as far as the first
+      // window asked for, so opening a file costs nothing.
+      post({ req: m.req, lines: session.lineCount });
+    } else if (m.k === "win") {
+      const session = sessions.get(m.id);
+      post({ req: m.req, runs: session ? session.window(m.from, m.count) : [] });
+    } else {
+      sessions.delete(m.id);
+    }
   } catch {
-    lines = null; // unhighlighted is fine
+    post({ req: m.req, lines: -1, runs: [] }); // uncoloured is fine
   }
-  (self as unknown as Worker).postMessage({ id, lines } satisfies TokenReply);
 };

@@ -14,7 +14,7 @@
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import OverviewRuler, { type Mark } from "$lib/components/OverviewRuler.svelte";
   import ContextMenu from "$lib/components/ContextMenu.svelte";
-  import { langForFile, tokenizeLines, type TokenRun } from "$lib/syntax";
+  import { langForFile, openSyntax, type SyntaxSession, type TokenRun } from "$lib/syntax";
   import { cacheGet, cacheSet } from "$lib/store.svelte";
   import { openDiff } from "$lib/opendiff";
   import { editor } from "$lib/editor.svelte";
@@ -38,7 +38,13 @@
   let error = $state("");
   let notice = $state("");
   let loading = $state(true);
-  let tokens = $state<TokenRun[][] | null>(null);
+  /** Colours for the lines that have been drawn, by line index — filled in as
+   *  the view moves rather than computed for the whole file, which on an 18k
+   *  line file was seconds of work for the ~60 rows on screen. */
+  let tokens = $state<(TokenRun[] | undefined)[]>([]);
+  let syntax: SyntaxSession | null = null;
+  /** The window already asked for, so scrolling within it costs nothing. */
+  let coloured = "";
   /** Follow the branch this file was created from. ON by default, for the reason
    *  the History tab has it: a migrated depot credits every line to whoever ran
    *  the migration otherwise. */
@@ -69,20 +75,45 @@
     }
   });
 
-  /** (Re)read the blame. Syntax colouring is redone with it: the text can change
-   *  when the credit does not (a different revision of the file). */
+  /** (Re)read the blame. The colouring session is opened with it: the text can
+   *  change when the credit does not (a different revision of the file). */
   async function load() {
     const b = await p4.annotate(conn, file, revSpec, follow);
     blame = b;
+    syntax?.close();
+    syntax = null;
+    tokens = [];
+    coloured = "";
     const lang = langForFile(file);
-    if (lang) {
-      tokens = await tokenizeLines(
-        b.lines.map((l) => l.text).join("\n"),
-        lang,
-        matchMedia("(prefers-color-scheme: dark)").matches,
-      );
-    }
+    if (!lang) return;
+    syntax = await openSyntax(
+      b.lines.map((l) => l.text).join("\n"),
+      lang,
+      matchMedia("(prefers-color-scheme: dark)").matches,
+    );
+    colourWindow();
   }
+
+  /** Colour the rows about to be drawn. Cheap to call on every scroll: the
+   *  session walks the grammar's state only as far as it has to, and a window
+   *  already asked for is skipped. */
+  function colourWindow() {
+    const s = syntax;
+    if (!s) return;
+    const key = `${first}:${last}`;
+    if (key === coloured) return;
+    coloured = key;
+    void s.window(first, last - first + 1).then((runs) => {
+      const next = tokens.slice();
+      runs.forEach((r, k) => (next[first + k] = r));
+      tokens = next;
+    });
+  }
+  $effect(() => {
+    void first;
+    void last;
+    colourWindow();
+  });
 
   /** The preference is shared with the History tab — it is one idea, not two. */
   async function setFollow(v: boolean) {

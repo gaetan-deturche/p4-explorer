@@ -15,7 +15,7 @@
   import { endingLabel, renderLine } from "$lib/invisibles";
   import { rowWindow } from "$lib/rowwindow";
   import { cacheGet, cacheSet } from "$lib/store.svelte";
-  import { langForFile, tokenizeLines, type TokenRun } from "$lib/syntax";
+  import { langForFile, openSyntax, type SyntaxSession, type TokenRun } from "$lib/syntax";
   import ApprovalDialog from "$lib/components/ApprovalDialog.svelte";
   import MergeResult from "$lib/components/MergeResult.svelte";
   import CommentThread from "$lib/components/CommentThread.svelte";
@@ -852,20 +852,15 @@ initSplit(leftText.trim() === "");
     return p.split(/[\\/]/).pop() ?? p;
   }
   // Tokens are keyed by line TEXT, so a line you just typed has no entry and
-  // renders with no colour at all. Re-tokenizing is debounced rather than done per
-  // keystroke: it runs the highlighter over a whole side, which is what keeps a
-  // line inside a block comment or a multi-line string coloured correctly — an
-  // isolated line has no context to colour it by.
+  // renders with no colour at all. The session is reopened after an edit rather
+  // than per keystroke: it is the text that changed, and a session is how the
+  // grammar's state is carried across it.
   let recolorTimer: number | null = null;
   function scheduleRecolor() {
     if (recolorTimer !== null) clearTimeout(recolorTimer);
     recolorTimer = window.setTimeout(() => {
       recolorTimer = null;
-      if (!ds) return;
-      void recolor(
-        blocks.flatMap((b) => b.left),
-        ds.doc.regions.flatMap((r) => r.lines),
-      );
+      void openRight();
     }, 250);
   }
 
@@ -874,28 +869,83 @@ initSplit(leftText.trim() === "");
    *  this it starts again from what is on screen. */
   const TOKEN_CAP = 20_000;
 
-  async function recolor(left: string[], right: string[]) {
-    // The window TITLE carries revisions ("foo.cpp#12 vs #14") and has no trailing
-    // extension, so the language has to come from the paths.
-    const lang = langForFile(base(rightPath)) ?? langForFile(base(leftPath));
+  /** The language, from the paths: the window TITLE carries revisions
+   *  ("foo.cpp#12 vs #14") and has no trailing extension. */
+  const lang = $derived(langForFile(base(rightPath)) ?? langForFile(base(leftPath)));
+  const dark = () => window.matchMedia("(prefers-color-scheme: dark)").matches;
+
+  // One colouring session per side. The grammar is a state machine, so a line is
+  // coloured from the lines before it — which is why a side is a session over
+  // the WHOLE text, even though only a window of it is ever asked for.
+  let leftSyntax: SyntaxSession | null = null;
+  let rightSyntax: SyntaxSession | null = null;
+  let painted = "";
+
+  async function openLeft() {
     if (!lang) return;
-    const dark = window.matchMedia("(prefers-color-scheme: dark)").matches;
-    const map = new Map(tokens);
-    if (map.size > TOKEN_CAP) map.clear(); // both sides are passed in, so it refills
-    for (const lines of [left, right]) {
-      if (!lines.some((l) => !map.has(l))) continue;
-      try {
-        const runs = await tokenizeLines(lines.join("\n"), lang, dark);
-        if (!runs) continue;
-        lines.forEach((l, i) => {
-          if (runs[i] && !map.has(l)) map.set(l, runs[i]);
-        });
-      } catch {
-        /* colour is optional */
-      }
-    }
-    tokens = map;
+    leftSyntax?.close();
+    leftSyntax = await openSyntax(blocks.flatMap((b) => b.left).join("\n"), lang, dark());
+    painted = "";
+    colourWindow();
   }
+  async function openRight() {
+    if (!lang || !ds) return;
+    rightSyntax?.close();
+    rightSyntax = await openSyntax(
+      ds.doc.regions.flatMap((r) => r.lines).join("\n"),
+      lang,
+      dark(),
+    );
+    painted = "";
+    colourWindow();
+  }
+
+  /** The visible line range on one side, as absolute 0-based indices into that
+   *  side's file — which is what a session is addressed by. */
+  function visibleRange(side: "left" | "right"): [number, number] | null {
+    let lo = Infinity;
+    let hi = -Infinity;
+    blocks.forEach((b, i) => {
+      const lines = side === "left" ? b.left.length : (ds?.doc.regions[i]?.lines.length ?? 0);
+      if (!lines) return;
+      const w = windowOf(tops[i], lines);
+      if (w.last < w.first) return; // this block is off screen
+      const base0 = (side === "left" ? starts[i].l : starts[i].r) - 1;
+      lo = Math.min(lo, base0 + w.first);
+      hi = Math.max(hi, base0 + w.last);
+    });
+    return hi >= lo ? [lo, hi] : null;
+  }
+
+  /** Colour the rows about to be drawn, on both sides. Cheap on every scroll: a
+   *  window already asked for is skipped, and the session walks the grammar only
+   *  as far as it must. */
+  function colourWindow() {
+    const l = visibleRange("left");
+    const r = visibleRange("right");
+    const key = `${l?.[0]},${l?.[1]},${r?.[0]},${r?.[1]}`;
+    if (key === painted) return;
+    painted = key;
+    const leftLines = blocks.flatMap((b) => b.left);
+    const rightLines = ds?.doc.regions.flatMap((rg) => rg.lines) ?? [];
+    void Promise.all([
+      l && leftSyntax ? leftSyntax.window(l[0], l[1] - l[0] + 1) : Promise.resolve(null),
+      r && rightSyntax ? rightSyntax.window(r[0], r[1] - r[0] + 1) : Promise.resolve(null),
+    ]).then(([lr, rr]) => {
+      const map = new Map(tokens);
+      if (map.size > TOKEN_CAP) map.clear(); // it refills from what is on screen
+      if (lr && l) lr.forEach((runs, k) => map.set(leftLines[l[0] + k] ?? "", runs));
+      if (rr && r) rr.forEach((runs, k) => map.set(rightLines[r[0] + k] ?? "", runs));
+      tokens = map;
+    });
+  }
+  // Follow the view, and the blocks: a re-diff moves every line.
+  $effect(() => {
+    void viewTop;
+    void viewH;
+    void blocks;
+    colourWindow();
+  });
 
   onMount(async () => {
     // Before the first diff, so the very first blocks already honour the option.
@@ -919,10 +969,8 @@ initSplit(leftText.trim() === "");
       leftText = l;
       rebuild(r, { region: 0, line: 0, col: 0 });
       loading = false;
-      void recolor(
-        blocks.flatMap((b) => b.left),
-        blocks.flatMap((b) => b.right),
-      );
+      void openLeft();
+      void openRight();
       if (changes.length) setTimeout(() => goTo(0), 0);
     } catch (e) {
       error = String(e);

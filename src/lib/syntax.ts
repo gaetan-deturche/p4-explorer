@@ -3,6 +3,7 @@
 //! languages listed here are bundled; anything else renders unhighlighted.
 
 import { createHighlighterCore, type HighlighterCore } from "shiki/core";
+import { TokenSession, type Tokenizer } from "./tokensession";
 
 /** One colored run of a highlighted line (concat of a line's runs = the line). */
 export interface TokenRun {
@@ -118,34 +119,35 @@ function core(): Promise<HighlighterCore> {
 
 const MAX_CHARS = 2_000_000; // skip highlighting on huge files (diff still works)
 
-/** Tokenize `text` into per-line colored runs, or null (too big / lang failed).
- *
- *  This is the work itself, and it does not yield once it starts: Shiki walks
- *  the file as a state machine — a line inside a block comment is only known to
- *  be inside one from the lines before it — so it can be split neither by line
- *  nor by visible window. On a big file that is seconds, which is why the worker
- *  below exists; this is called from inside it, or as its fallback.
- *
- *  Line i of the result colors line i+1 of `text` (after CRLF normalization,
- *  matching linediff's splitLines). */
-export async function tokenizeLinesSync(
-  text: string,
-  lang: string,
-  dark: boolean,
-): Promise<TokenRun[][] | null> {
-  if (text.length > MAX_CHARS) return null;
+// --- a tokenizer over one language ------------------------------------------
+
+/** Shiki as `TokenSession` needs it: state in, state out, runs for a stretch of
+ *  lines. Both calls take the SAME options as the one-shot path did, plus the
+ *  `grammarState` that lets tokenizing resume mid-file. */
+export async function makeTokenizer(lang: string, dark: boolean): Promise<Tokenizer | null> {
   try {
     const hl = await core();
     if (!loadedLangs.has(lang)) {
       await hl.loadLanguage((await LANG_LOAD[lang]()) as never);
       loadedLangs.add(lang);
     }
-    const normalized = text.replace(/\r/g, ""); // tokens must align with splitLines
-    const lines = hl.codeToTokensBase(normalized, {
-      lang: lang as never,
-      theme: dark ? "dark-plus" : "light-plus",
-    });
-    return lines.map((line) => line.map((t) => ({ content: t.content, color: t.color })));
+    const theme = dark ? "dark-plus" : "light-plus";
+    return {
+      stateAfter: (text, from) =>
+        hl.getLastGrammarState(text, {
+          lang: lang as never,
+          theme,
+          grammarState: (from ?? undefined) as never,
+        }),
+      tokens: (text, from) =>
+        hl
+          .codeToTokensBase(text, {
+            lang: lang as never,
+            theme,
+            grammarState: (from ?? undefined) as never,
+          })
+          .map((line) => line.map((tk) => ({ content: tk.content, color: tk.color }))),
+    };
   } catch {
     return null; // unhighlighted is fine
   }
@@ -153,28 +155,38 @@ export async function tokenizeLinesSync(
 
 // --- off the main thread ----------------------------------------------------
 
-/** The worker, created on first use and kept: starting one costs a module load
- *  and an engine init, and every window here tokenizes more than once (a diff
- *  does both sides, and again after an edit). Left null once it has failed, so a
- *  webview that cannot run module workers simply pays the old cost. */
+/** One file being coloured, a window at a time.
+ *
+ *  The state lives wherever the tokenizing happens — in the worker when there is
+ *  one, since a `GrammarState` is a live object that cannot be posted between
+ *  threads. Either way the caller sees the same three methods. */
+export interface SyntaxSession {
+  readonly lineCount: number;
+  /** Coloured runs for `count` lines from `from` (0-based). */
+  window(from: number, count: number): Promise<TokenRun[][]>;
+  close(): void;
+}
+
+type Reply = { req: number; lines?: number; runs?: TokenRun[][] };
+
 let worker: Worker | null = null;
 let workerDead = false;
-let nextId = 1;
-const pending = new Map<number, (lines: TokenRun[][] | null) => void>();
+let nextReq = 1;
+const pending = new Map<number, (r: Reply) => void>();
 
 function ensureWorker(): Worker | null {
   if (worker || workerDead) return worker;
   try {
     worker = new Worker(new URL("./syntax.worker.ts", import.meta.url), { type: "module" });
-    worker.onmessage = (e: MessageEvent<{ id: number; lines: TokenRun[][] | null }>) => {
-      const done = pending.get(e.data.id);
+    worker.onmessage = (e: MessageEvent<Reply>) => {
+      const done = pending.get(e.data.req);
       if (!done) return; // a reply nobody is waiting for any more
-      pending.delete(e.data.id);
-      done(e.data.lines);
+      pending.delete(e.data.req);
+      done(e.data);
     };
     worker.onerror = () => {
-      // Whatever is in flight resolves uncoloured rather than hanging forever.
-      for (const done of pending.values()) done(null);
+      // Whatever is in flight resolves empty rather than hanging forever.
+      for (const done of pending.values()) done({ req: 0 });
       pending.clear();
       worker?.terminate();
       worker = null;
@@ -186,20 +198,45 @@ function ensureWorker(): Worker | null {
   return worker;
 }
 
-/** Tokenize `text` into per-line colored runs, off the main thread where the
- *  webview allows it. Same contract as `tokenizeLinesSync`, which it falls back
- *  to; a caller paints its text first and repaints when this resolves. */
-export function tokenizeLines(
+function ask(w: Worker, msg: Record<string, unknown>): Promise<Reply> {
+  const req = nextReq++;
+  return new Promise((resolve) => {
+    pending.set(req, resolve);
+    w.postMessage({ ...msg, req });
+  });
+}
+
+/** Open a session over `text`. Null when the language is unknown, the file is
+ *  too big to bother with, or the grammar failed to load — callers render
+ *  uncoloured, as they always did. */
+export async function openSyntax(
   text: string,
   lang: string,
   dark: boolean,
-): Promise<TokenRun[][] | null> {
-  if (text.length > MAX_CHARS) return Promise.resolve(null);
+): Promise<SyntaxSession | null> {
+  if (text.length > MAX_CHARS) return null;
   const w = ensureWorker();
-  if (!w) return tokenizeLinesSync(text, lang, dark);
-  const id = nextId++;
-  return new Promise((resolve) => {
-    pending.set(id, resolve);
-    w.postMessage({ id, text, lang, dark });
-  });
+  if (w) {
+    const id = nextId++;
+    const opened = await ask(w, { k: "open", id, text, lang, dark });
+    const lines = opened.lines ?? -1;
+    if (lines < 0) return null;
+    return {
+      lineCount: lines,
+      window: async (from, count) => (await ask(w, { k: "win", id, from, count })).runs ?? [],
+      close: () => w.postMessage({ k: "close", id, req: 0 }),
+    };
+  }
+  // No worker: the same session, on this thread. Slower to open a big file, but
+  // still only a window's worth of colouring per scroll.
+  const tk = await makeTokenizer(lang, dark);
+  if (!tk) return null;
+  const session = new TokenSession(text, tk);
+  return {
+    lineCount: session.lineCount,
+    window: (from, count) => Promise.resolve(session.window(from, count)),
+    close: () => {},
+  };
 }
+
+let nextId = 1;

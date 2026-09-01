@@ -2,7 +2,7 @@
   import { onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { getCurrentWindow } from "@tauri-apps/api/window";
-  import { langForFile, tokenizeLines, type TokenRun } from "$lib/syntax";
+  import { langForFile, openSyntax, type SyntaxSession, type TokenRun } from "$lib/syntax";
   import { rowWindow } from "$lib/rowwindow";
   import MergeResult from "$lib/components/MergeResult.svelte";
   import OverviewRuler, { type Mark } from "$lib/components/OverviewRuler.svelte";
@@ -521,17 +521,16 @@
     await getCurrentWindow().close();
   }
 
-  /** Colour every distinct line once; all three panes share the map. */
-  // Same as the diff window: tokens are keyed by line TEXT, so a line typed into
-  // the result pane has no entry and loses its colour. Debounced, because the
-  // highlighter needs a whole side to keep a block comment or a multi-line string
-  // coloured correctly.
+  // Tokens are keyed by line TEXT, so a line typed into the result pane has no
+  // entry and loses its colour. The result's session is reopened after an edit
+  // rather than per keystroke: it is the text that changed, and the session is
+  // how the grammar's state is carried across it.
   let recolorTimer: number | null = null;
   function scheduleRecolor() {
     if (recolorTimer !== null) clearTimeout(recolorTimer);
     recolorTimer = window.setTimeout(() => {
       recolorTimer = null;
-      if (data) void recolor(data);
+      void openResult();
     }, 250);
   }
 
@@ -539,33 +538,115 @@
    *  accumulate every intermediate version of every edited line. */
   const TOKEN_CAP = 20_000;
 
-  async function recolor(d: MergeData) {
-    const lang = langForFile(d.name);
+  // One colouring session per side. A grammar is a state machine, so a line is
+  // coloured from the lines before it: each side is a session over its whole
+  // text, even though only a window of it is ever asked for.
+  let theirsSyntax: SyntaxSession | null = null;
+  let oursSyntax: SyntaxSession | null = null;
+  let resultSyntax: SyntaxSession | null = null;
+  let painted = "";
+
+  /** One side of the merge, as its own file: the lines each region contributes,
+   *  in order — the same order the pane draws them in. */
+  function sideText(which: "theirs" | "ours"): string {
+    const out: string[] = [];
+    for (const r of regions) out.push(...side(r, which));
+    return out.join("\n");
+  }
+  function sideLines(which: "theirs" | "ours"): string[] {
+    const out: string[] = [];
+    for (const r of regions) out.push(...side(r, which));
+    return out;
+  }
+
+  async function openSides() {
+    const lang = langForFile(data?.name ?? "");
     if (!lang) return;
     const dark = window.matchMedia("(prefers-color-scheme: dark)").matches;
-    const batches: string[][] = [[], [], [], []];
-    for (const r of d.regions) {
-      batches[0].push(...(r.kind === "conflict" ? r.theirs : r.lines));
-      batches[1].push(...(r.kind === "conflict" ? r.ours : r.lines));
-      if (r.kind !== "same") batches[2].push(...r.base);
-    }
-    batches[3] = ds ? ds.doc.regions.flatMap((r) => r.lines) : [];
-    const map = new Map(tokens);
-    if (map.size > TOKEN_CAP) map.clear(); // every side is in `batches`, so it refills
-    for (const lines of batches) {
-      if (!lines.some((l) => !map.has(l))) continue;
-      try {
-        const runs = await tokenizeLines(lines.join("\n"), lang, dark);
-        if (!runs) continue;
-        lines.forEach((l, i) => {
-          if (runs[i] && !map.has(l)) map.set(l, runs[i]);
-        });
-      } catch {
-        /* one batch failing must not cost the others their colour */
-      }
-    }
-    tokens = map;
+    theirsSyntax?.close();
+    oursSyntax?.close();
+    [theirsSyntax, oursSyntax] = await Promise.all([
+      openSyntax(sideText("theirs"), lang, dark),
+      openSyntax(sideText("ours"), lang, dark),
+    ]);
+    painted = "";
+    colourWindow();
   }
+  async function openResult() {
+    const lang = langForFile(data?.name ?? "");
+    if (!lang || !ds) return;
+    const dark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+    resultSyntax?.close();
+    resultSyntax = await openSyntax(
+      ds.doc.regions.flatMap((r) => r.lines).join("\n"),
+      lang,
+      dark,
+    );
+    painted = "";
+    colourWindow();
+  }
+
+  /** The visible line range on one side, as absolute 0-based indices into that
+   *  side's text — which is what a session is addressed by. */
+  function visibleRange(which: "theirs" | "ours" | "result"): [number, number] | null {
+    let at = 0;
+    let lo = Infinity;
+    let hi = -Infinity;
+    regions.forEach((r, i) => {
+      const lines =
+        which === "result"
+          ? (ds?.doc.regions[i]?.lines.length ?? 0)
+          : side(r, which).length;
+      if (lines) {
+        const w = windowOf(tops[i] + (r.kind === "conflict" ? TOOLBAR : 0), lines);
+        if (w.last >= w.first) {
+          lo = Math.min(lo, at + w.first);
+          hi = Math.max(hi, at + w.last);
+        }
+      }
+      at += lines;
+    });
+    return hi >= lo ? [lo, hi] : null;
+  }
+
+  /** Colour the rows about to be drawn, on all three sides. */
+  function colourWindow() {
+    const t0 = visibleRange("theirs");
+    const o0 = visibleRange("ours");
+    const r0 = visibleRange("result");
+    const key = `${t0}|${o0}|${r0}`;
+    if (key === painted) return;
+    painted = key;
+    const texts = {
+      theirs: sideLines("theirs"),
+      ours: sideLines("ours"),
+      result: ds?.doc.regions.flatMap((r) => r.lines) ?? [],
+    };
+    const ask = (s: SyntaxSession | null, w: [number, number] | null) =>
+      s && w ? s.window(w[0], w[1] - w[0] + 1) : Promise.resolve(null);
+    void Promise.all([
+      ask(theirsSyntax, t0),
+      ask(oursSyntax, o0),
+      ask(resultSyntax, r0),
+    ]).then(([tr, or, rr]) => {
+      const map = new Map(tokens);
+      if (map.size > TOKEN_CAP) map.clear(); // it refills from what is on screen
+      const merge = (runs: TokenRun[][] | null, w: [number, number] | null, lines: string[]) => {
+        if (!runs || !w) return;
+        runs.forEach((run, k) => map.set(lines[w[0] + k] ?? "", run));
+      };
+      merge(tr, t0, texts.theirs);
+      merge(or, o0, texts.ours);
+      merge(rr, r0, texts.result);
+      tokens = map;
+    });
+  }
+  $effect(() => {
+    void viewTop;
+    void viewH;
+    void regions;
+    colourWindow();
+  });
 
   onMount(async () => {
     try {
@@ -582,7 +663,8 @@
         },
         { region: 0, line: 0, col: 0 },
       );
-      void recolor(data);
+      void openSides();
+      void openResult();
       // Land on the first thing the merge touched, conflict or not: a clean
       // auto-merge still has to SHOW what it brought in.
       setTimeout(() => goTo(0), 0);
