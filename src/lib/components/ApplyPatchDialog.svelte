@@ -45,14 +45,23 @@
     missing: "not found",
     notext: "not text",
     binary: "binary (replaced whole)",
+    delete: "will be deleted",
+    deleted: "deleted",
+    rename: "will be moved",
+    renamed: "moved",
+    skipped: "skipped",
   };
   function tone(s: PatchFileReport["status"]): string {
-    if (s === "clean" || s === "binary") return "ok";
-    if (s === "fuzz" || s === "already") return "warnish";
+    if (s === "clean" || s === "binary" || s === "deleted" || s === "renamed") return "ok";
+    // A delete or a move is not a problem, but it is not a hunk landing either:
+    // it changes what FILES exist, which is worth a second look before applying.
+    if (s === "fuzz" || s === "already" || s === "delete" || s === "rename" || s === "skipped")
+      return "warnish";
     return "bad";
   }
   function hunkSummary(f: PatchFileReport): string {
-    if (f.status === "binary") return ""; // the message carries the size instead
+    // These carry no hunks; their message says what happens to the file.
+    if (["binary", "delete", "deleted", "rename", "renamed", "skipped"].includes(f.status)) return "";
     const n = f.hunks.length;
     if (phase === "done") return `${f.applied}/${n} hunk${n === 1 ? "" : "s"} applied`;
     const fuzz = f.hunks.filter((h) => h.status === "fuzz").length;

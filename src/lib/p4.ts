@@ -121,7 +121,22 @@ export interface PatchHunkReport {
 export interface PatchFileReport {
   depot: string;
   local: string;
-  status: "clean" | "fuzz" | "already" | "partial" | "conflict" | "missing" | "notext" | "binary";
+  status:
+    | "clean"
+    | "fuzz"
+    | "already"
+    | "partial"
+    | "conflict"
+    | "missing"
+    | "notext"
+    | "binary"
+    // A delete or a move: "delete"/"rename" while previewing, the past tense
+    // once carried out, "skipped" when the apply is not opening files.
+    | "delete"
+    | "deleted"
+    | "rename"
+    | "renamed"
+    | "skipped";
   hunks: PatchHunkReport[];
   applied: number;
   conflicts: number;
@@ -136,6 +151,33 @@ export type MergeRegion =
   | { kind: "theirs"; base: string[]; lines: string[] }
   | { kind: "both"; base: string[]; lines: string[] }
   | { kind: "conflict"; base: string[]; ours: string[]; theirs: string[] };
+
+/** One file a stash's patch carries. */
+export interface PatchedFile {
+  depotFile: string;
+  action: string;
+  /** The `have` revision the change was taken against ("" for an add). */
+  rev: string;
+  binary: boolean;
+}
+
+/** A stash: a change set aside as a patch in the app's own database, and so
+ *  applicable in any workspace on this machine (a patch names depot paths; the
+ *  workspace applying it decides where they land). */
+export interface StashRow {
+  id: number;
+  name: string;
+  /** Unix seconds. */
+  created: number;
+  port: string;
+  client: string;
+  user: string;
+  stream: string;
+  files: PatchedFile[];
+  /** What the patch could not carry (deletes). */
+  skipped: string[];
+  bytes: number;
+}
 
 /** A prepared three-way merge, as the resolve window receives it. */
 export interface MergeData {
@@ -646,6 +688,18 @@ export const p4 = {
     g<string>("p4_diff_local_forced", { conn, depotFile }),
   exportPatch: (conn: P4Conn, change: string, files: string[], defaultName: string) =>
     g<string | null>("export_patch", { conn, change, files, defaultName }),
+  /** Take a stash from `files`, or from every opened file of `change`. Nothing
+   *  is reverted — a stash is a copy. Returns the new stash's id. */
+  stashSave: (conn: P4Conn, name: string, change: string, files: string[]) =>
+    g<StashRow>("stash_save", { conn, name, change, files }),
+  /** Every stash on this machine, newest first, from every workspace. */
+  stashList: () => g<StashRow[]>("stash_list", {}),
+  /** Materialise a stash's patch to a temp file, for the ordinary apply flow. */
+  stashPatchFile: (id: number) => g<string>("stash_patch_file", { id }),
+  /** The patch text itself. */
+  stashPatch: (id: number) => g<string>("stash_patch", { id }),
+  stashDelete: (id: number) => g<void>("stash_delete", { id }),
+  stashRename: (id: number, name: string) => g<void>("stash_rename", { id, name }),
   /** Depot files under `path` that p4 says still need resolving. */
   resolveNeeded: (conn: P4Conn, path = "") => g<string[]>("resolve_needed", { conn, path }),
   /** Prepare a three-way merge for a p4 resolve conflict; returns the merge id. */

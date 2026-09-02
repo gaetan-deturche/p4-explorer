@@ -22,6 +22,23 @@ pub(crate) struct Hunk {
     pub(crate) raw: String,
 }
 
+/// What a section says happens to its file.
+///
+/// A unified diff on its own can only describe CONTENT, which is why a delete or
+/// a move used to fall out of an exported patch entirely. Git's own header lines
+/// carry the rest (`deleted file mode`, `rename from`/`rename to`), so that is
+/// what is written and read here — the same convention the binary sections
+/// already follow.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum FileOp {
+    /// The contents differ: hunks, or a whole-file binary literal.
+    Change,
+    /// The file goes away.
+    Delete,
+    /// The file moves; the string is where it moved FROM.
+    Rename(String),
+}
+
 pub(crate) struct PatchFile {
     pub(crate) depot: String,
     /// The `+++` path, i.e. wherever the patch was generated. Only a fallback:
@@ -31,6 +48,7 @@ pub(crate) struct PatchFile {
     /// Set for a `GIT binary patch` section: the whole file travels in the
     /// patch instead of hunks.
     pub(crate) binary: Option<BinaryPatch>,
+    pub(crate) op: FileOp,
 }
 
 pub(crate) enum BinaryPatch {
@@ -238,6 +256,18 @@ fn run_patch(
 }
 
 fn apply_one(conn: &P4Conn, pf: &PatchFile, opts: Option<&ApplyOpts>) -> FileReport {
+    match &pf.op {
+        FileOp::Delete => return apply_delete(conn, pf, opts),
+        // A move is the rename plus whatever content section came with it, so it
+        // moves the file first and then falls through to the ordinary apply.
+        FileOp::Rename(from) => {
+            let moved = apply_rename(conn, pf, from, opts);
+            if moved.status != "renamed" || pf.binary.is_none() && pf.hunks.is_empty() {
+                return moved;
+            }
+        }
+        FileOp::Change => {}
+    }
     if let Some(bin) = &pf.binary {
         return apply_binary(conn, pf, bin, opts);
     }
@@ -493,6 +523,146 @@ fn apply_binary(conn: &P4Conn, pf: &PatchFile, bin: &BinaryPatch, opts: Option<&
     rep
 }
 
+/// A file the patch says is gone.
+///
+/// Only honoured when the apply opens files (`edit` mode): `p4 delete` records
+/// the intent in a changelist, so a revert brings the file back. In `offline`
+/// mode there would be no record and nothing to undo — removing someone's file
+/// on the strength of a patch is not something to do silently — so it is
+/// reported and left alone. Same rule as the verbatim copy of a review's shelf.
+fn apply_delete(conn: &P4Conn, pf: &PatchFile, opts: Option<&ApplyOpts>) -> FileReport {
+    let mut rep = FileReport {
+        depot: pf.depot.clone(),
+        local: String::new(),
+        status: "delete".into(),
+        hunks: Vec::new(),
+        applied: 0,
+        conflicts: 0,
+        message: "will be deleted".into(),
+        rej_path: String::new(),
+    };
+    let mapped = p4::run(conn, &["where", &pf.depot]).ok().and_then(|recs| {
+        recs.first().and_then(|r| {
+            r.get("path")
+                .or_else(|| r.get("clientFile"))
+                .and_then(|v| v.as_str())
+                .map(String::from)
+        })
+    });
+    let local = match mapped {
+        Some(p) => p,
+        None if !pf.local_hint.is_empty() => pf.local_hint.clone(),
+        None => {
+            rep.status = "missing".into();
+            rep.message = "not mapped in this workspace".into();
+            return rep;
+        }
+    };
+    rep.local = local.clone();
+    if !std::path::Path::new(&local).exists() {
+        rep.status = "already".into();
+        rep.message = "already gone".into();
+        return rep;
+    }
+    let Some(opts) = opts else { return rep }; // preview stops here
+    if opts.mode != "edit" {
+        rep.status = "skipped".into();
+        rep.message = "a delete is only applied when the files are opened for edit".into();
+        return rep;
+    }
+    let mut args: Vec<&str> = vec!["delete"];
+    if !opts.change.is_empty() {
+        args.push("-c");
+        args.push(&opts.change);
+    }
+    args.push(&pf.depot);
+    match p4::run_strict(conn, &args) {
+        Ok(_) => {
+            rep.status = "deleted".into();
+            rep.applied = 1;
+            rep.message = "opened for delete".into();
+        }
+        Err(e) => {
+            rep.status = "conflict".into();
+            rep.message = format!("p4 delete failed: {e}");
+        }
+    }
+    rep
+}
+
+/// A file the patch says has moved.
+///
+/// `p4 move` is what keeps the two halves one operation on the server, and it
+/// needs the source open for edit first. Like a delete, it is only carried out
+/// when the apply opens files: an offline move would leave p4 believing the old
+/// path is still there and the new one untracked.
+fn apply_rename(
+    conn: &P4Conn,
+    pf: &PatchFile,
+    from: &str,
+    opts: Option<&ApplyOpts>,
+) -> FileReport {
+    let mut rep = FileReport {
+        depot: pf.depot.clone(),
+        local: String::new(),
+        status: "rename".into(),
+        hunks: Vec::new(),
+        applied: 0,
+        conflicts: 0,
+        message: format!("will move from {from}"),
+        rej_path: String::new(),
+    };
+    let Some(src) = resolve_target(conn, from, "") else {
+        rep.status = "missing".into();
+        rep.message = format!("{from} is not mapped in this workspace");
+        return rep;
+    };
+    rep.local = resolve_target(conn, &pf.depot, &pf.local_hint).unwrap_or_default();
+    if !std::path::Path::new(&src).exists() {
+        // Nothing to move. The content section (if any) still applies, so this
+        // lands as a plain add rather than as a failure.
+        rep.status = "renamed".into();
+        rep.message = format!("{from} is already gone — taking the new file as an add");
+        return rep;
+    }
+    let Some(opts) = opts else { return rep }; // preview stops here
+    if opts.mode != "edit" {
+        rep.status = "skipped".into();
+        rep.message = "a move is only applied when the files are opened for edit".into();
+        return rep;
+    }
+    let mut edit: Vec<&str> = vec!["edit"];
+    if !opts.change.is_empty() {
+        edit.push("-c");
+        edit.push(&opts.change);
+    }
+    edit.push(from);
+    if let Err(e) = p4::run_strict(conn, &edit) {
+        rep.status = "conflict".into();
+        rep.message = format!("p4 edit of {from} failed: {e}");
+        return rep;
+    }
+    let mut mv: Vec<&str> = vec!["move"];
+    if !opts.change.is_empty() {
+        mv.push("-c");
+        mv.push(&opts.change);
+    }
+    mv.push(from);
+    mv.push(&pf.depot);
+    match p4::run_strict(conn, &mv) {
+        Ok(_) => {
+            rep.status = "renamed".into();
+            rep.applied = 1;
+            rep.message = format!("moved from {from}");
+        }
+        Err(e) => {
+            rep.status = "conflict".into();
+            rep.message = format!("p4 move failed: {e}");
+        }
+    }
+    rep
+}
+
 /// "162.5 KB"-style size for the report line.
 fn human_size(n: usize) -> String {
     if n >= 1 << 20 {
@@ -633,15 +803,87 @@ pub(crate) fn split_lines(body: &str) -> Vec<String> {
 pub(crate) fn parse_patch(text: &str) -> Vec<PatchFile> {
     let lines: Vec<&str> = text.split('\n').map(|l| l.strip_suffix('\r').unwrap_or(l)).collect();
     let mut files: Vec<PatchFile> = Vec::new();
+    // The depot folder the paths are relative to, from the preamble our own
+    // exports write. Absent in a patch from anywhere else, and then a relative
+    // path is only ever a hint.
+    let root = lines
+        .iter()
+        .take_while(|l| !l.starts_with("diff --git ") && !l.starts_with("--- "))
+        .find_map(|l| l.trim().strip_prefix("auger-root: "))
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let depotise = |path: &str| -> String {
+        if path.starts_with("//") {
+            path.to_string()
+        } else if !root.is_empty() {
+            format!("{root}/{path}")
+        } else {
+            format!("//{path}")
+        }
+    };
     let mut i = 0;
     // Path from the last `diff --git a/P b/P` line, waiting for its section.
     let mut git_path: Option<String> = None;
+    // What the header lines of the current section have said so far. A delete
+    // may have no content section at all (nothing to describe), so it is held
+    // here and flushed when the section ends.
+    let mut pending_op = FileOp::Change;
+    let mut pending_from: Option<String> = None;
+    macro_rules! flush_op {
+        () => {
+            // A delete or a rename that never reached a `---` or a binary
+            // section still has to become a file: the header WAS the content.
+            if pending_op != FileOp::Change {
+                let path = git_path.clone().unwrap_or_default();
+                files.push(PatchFile {
+                    depot: depotise(&path),
+                    local_hint: path,
+                    hunks: Vec::new(),
+                    binary: None,
+                    op: pending_op.clone(),
+                });
+            }
+        };
+    }
     while i < lines.len() {
         let l = lines[i];
         if let Some(rest) = l.strip_prefix("diff --git a/") {
-            // Both sides name the same file here, so splitting at " b/" is safe
-            // even for paths with spaces.
-            git_path = rest.split(" b/").next().map(str::to_string);
+            flush_op!();
+            pending_op = FileOp::Change;
+            pending_from = None;
+            // For a rename the two sides differ, so both are kept: `a/` names
+            // where the file was, `b/` where it is going.
+            let (a, b) = match rest.split_once(" b/") {
+                Some((a, b)) => (a.to_string(), b.to_string()),
+                None => (rest.to_string(), rest.to_string()),
+            };
+            git_path = Some(b);
+            if a != *git_path.as_ref().unwrap() {
+                pending_from = Some(a);
+            }
+            i += 1;
+            continue;
+        }
+        if l.starts_with("deleted file mode") || l == "deleted file" {
+            pending_op = FileOp::Delete;
+            // The path is the `a/` side: the file being removed.
+            if let Some(from) = pending_from.take() {
+                git_path = Some(from);
+            }
+            i += 1;
+            continue;
+        }
+        if let Some(from) = l.strip_prefix("rename from ") {
+            pending_from = Some(from.trim().to_string());
+            i += 1;
+            continue;
+        }
+        if let Some(to) = l.strip_prefix("rename to ") {
+            git_path = Some(to.trim().to_string());
+            if let Some(from) = pending_from.clone() {
+                pending_op = FileOp::Rename(depotise(&from));
+            }
             i += 1;
             continue;
         }
@@ -689,22 +931,50 @@ pub(crate) fn parse_patch(text: &str) -> Vec<PatchFile> {
             files.push(PatchFile {
                 // Our exports write the depot path minus its leading slashes;
                 // a repo-relative path from a real git patch stays as a hint.
-                depot: if path.starts_with("//") { path.clone() } else { format!("//{path}") },
+                depot: depotise(&path),
                 local_hint: path,
                 hunks: Vec::new(),
                 binary: Some(binary),
+                op: std::mem::replace(&mut pending_op, FileOp::Change),
             });
+            pending_from = None;
             continue;
         }
         if let Some(rest) = l.strip_prefix("--- ") {
             let next = lines.get(i + 1).copied().unwrap_or("");
             if let Some(plus) = next.strip_prefix("+++ ") {
+                let minus = strip_tab(rest).to_string();
+                let plus = strip_tab(plus).to_string();
+                // git names both sides `a/<path>` and `b/<path>`; p4 named them
+                // the depot path and the absolute local one. Both are read, so a
+                // patch written before the format changed still applies.
+                let git_sides = minus.starts_with("a/") && (plus.starts_with("b/") || plus == "/dev/null");
+                // `+++ /dev/null` is git saying the file ends here, whether or
+                // not a `deleted file mode` line came with it.
+                let mut op = std::mem::replace(&mut pending_op, FileOp::Change);
+                if plus == "/dev/null" && op == FileOp::Change {
+                    op = FileOp::Delete;
+                }
+                let (depot, hint) = if op == FileOp::Delete {
+                    // The removed file is named on the `---` side.
+                    let from = minus.strip_prefix("a/").unwrap_or(&minus).to_string();
+                    (depotise(&from), from)
+                } else if git_sides {
+                    let rel = plus.strip_prefix("b/").unwrap_or(&plus).to_string();
+                    (depotise(&rel), rel)
+                } else {
+                    // p4's own shape: the depot path, and an absolute local path
+                    // that is a fallback for a workspace this one does not map.
+                    (minus, plus)
+                };
                 files.push(PatchFile {
-                    depot: strip_tab(rest).to_string(),
-                    local_hint: strip_tab(plus).to_string(),
+                    depot,
+                    local_hint: hint,
                     hunks: Vec::new(),
                     binary: None,
+                    op,
                 });
+                pending_from = None;
                 i += 2;
                 continue;
             }
@@ -763,7 +1033,10 @@ pub(crate) fn parse_patch(text: &str) -> Vec<PatchFile> {
         }
         i += 1;
     }
-    files.retain(|f| !f.hunks.is_empty() || f.binary.is_some());
+    flush_op!();
+    // A section with no hunks and no binary says nothing — unless its header
+    // did: a delete and a rename ARE the content.
+    files.retain(|f| !f.hunks.is_empty() || f.binary.is_some() || f.op != FileOp::Change);
     files
 }
 
@@ -908,6 +1181,172 @@ mod tests {
         assert_eq!(split_lines("a\r\nb\r\n"), vec!["a", "b"]);
         assert_eq!(split_lines("a\nb"), vec!["a", "b"]);
         assert_eq!(split_lines("a\r\nb"), vec!["a", "b"]);
+    }
+
+    /// A patch Auger wrote BEFORE it spoke git: p4's own headers (the depot path
+    /// on one side, an absolute local path on the other), a binary section whose
+    /// path is the full depot path minus its slashes, and no preamble at all.
+    ///
+    /// The two shapes are told apart by the `a/` prefix, not by a version stamp,
+    /// so this is the check that the old ones keep working — and it matters for
+    /// real files: a `.patch` on disk outlives the app that wrote it.
+    #[test]
+    fn a_patch_from_before_the_format_changed_still_reads() {
+        let old_style = concat!(
+            "--- //d/Main/Games/A/x.cpp\t2026-01-01 00:00:00\n",
+            "+++ H:\\Dev\\ws\\Games\\A\\x.cpp\t2026-01-02 00:00:00\n",
+            "@@ -1,2 +1,2 @@\n a\n-b\n+B\n",
+        );
+        let binary = super::super::gitbin::encode_section(
+            "d/Main/Games/A/art.uasset",
+            &[1u8, 2, 3],
+            Some(&"a".repeat(40)),
+        );
+        let files = parse_patch(&format!("{old_style}{binary}"));
+        assert_eq!(files.len(), 2);
+        // The depot path comes off the `---` side, as it always did.
+        assert_eq!(files[0].depot, "//d/Main/Games/A/x.cpp");
+        // And the absolute local path is still kept as the fallback for a
+        // workspace that does not map that depot path.
+        assert_eq!(files[0].local_hint, "H:\\Dev\\ws\\Games\\A\\x.cpp");
+        assert_eq!(files[0].op, FileOp::Change);
+        assert_eq!(files[0].hunks.len(), 1);
+        // No preamble means no root, so a slash-stripped depot path is read back
+        // as itself rather than being hung under someone else's.
+        assert_eq!(files[1].depot, "//d/Main/Games/A/art.uasset");
+        assert!(files[1].binary.is_some());
+    }
+
+    /// The root is read from the preamble ONLY: a line that looks like one but
+    /// sits inside a hunk is content, not configuration.
+    #[test]
+    fn a_root_inside_the_diff_is_not_read_as_the_root() {
+        let files = parse_patch(
+            "--- a/x.txt\n+++ b/x.txt\n@@ -1,1 +1,2 @@\n a\n+auger-root: //evil/Main\n",
+        );
+        assert_eq!(files[0].depot, "//x.txt");
+    }
+
+    // --- deletes and moves ---------------------------------------------------
+    // A unified diff describes content, so these live entirely in git's header
+    // lines. Getting them wrong is silent: the section parses as nothing and the
+    // file is quietly left behind, which is exactly what used to happen.
+
+    const DEL: &str = "diff --git a/depot/gone.txt b/depot/gone.txt\n\
+deleted file mode 100644\n\
+--- a/depot/gone.txt\n\
++++ /dev/null\n\
+@@ -1,2 +0,0 @@\n\
+-one\n\
+-two\n";
+
+    #[test]
+    fn a_delete_section_parses_as_a_delete() {
+        let files = parse_patch(DEL);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].op, FileOp::Delete);
+        // The file named is the one going away — the `---` side, not /dev/null.
+        assert_eq!(files[0].depot, "//depot/gone.txt");
+    }
+
+    /// A binary delete carries no body at all. The header IS the content, so a
+    /// section with nothing after it must still survive the parser's filter.
+    #[test]
+    fn a_delete_with_no_body_still_parses() {
+        let files = parse_patch(
+            "diff --git a/depot/pic.png b/depot/pic.png\ndeleted file mode 100644\n",
+        );
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].op, FileOp::Delete);
+        assert_eq!(files[0].depot, "//depot/pic.png");
+    }
+
+    /// Some tools write the `/dev/null` side without a `deleted file mode` line.
+    #[test]
+    fn dev_null_alone_is_a_delete() {
+        let files = parse_patch(
+            "--- a/depot/gone.txt\n+++ /dev/null\n@@ -1,1 +0,0 @@\n-one\n",
+        );
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].op, FileOp::Delete);
+        assert_eq!(files[0].depot, "//depot/gone.txt");
+    }
+
+    #[test]
+    fn a_rename_section_parses_as_a_move() {
+        let files = parse_patch(
+            "diff --git a/depot/old.txt b/depot/new.txt\nrename from depot/old.txt\nrename to depot/new.txt\n",
+        );
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].op, FileOp::Rename("//depot/old.txt".into()));
+        assert_eq!(files[0].depot, "//depot/new.txt");
+    }
+
+    /// The sections are written one after another, so one must not swallow the
+    /// next: a delete before an ordinary change used to leave the change with
+    /// the delete's own op.
+    #[test]
+    fn a_delete_does_not_leak_into_the_next_section() {
+        let mixed = format!(
+            "{DEL}--- //depot/kept.txt\t0\n+++ //depot/kept.txt\t0\n@@ -1,1 +1,1 @@\n-a\n+b\n"
+        );
+        let files = parse_patch(&mixed);
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].op, FileOp::Delete);
+        assert_eq!(files[1].op, FileOp::Change);
+        assert_eq!(files[1].depot, "//depot/kept.txt");
+        assert_eq!(files[1].hunks.len(), 1);
+    }
+
+    /// Previewing must not remove anything, and must say what it would do.
+    #[test]
+    fn previewing_a_delete_removes_nothing() {
+        let target = scratch("delete_preview.txt", b"one\ntwo\n");
+        let patch = scratch(
+            "delete_preview.patch",
+            format!("diff --git a/{target} b/{target}\ndeleted file mode 100644\n--- a/{target}\n+++ /dev/null\n")
+                .as_bytes(),
+        );
+        let rep = run_patch(&offline_conn(), &patch, None).unwrap();
+        assert_eq!(rep[0].status, "delete");
+        assert!(std::path::Path::new(&target).exists());
+    }
+
+    /// Offline mode writes to disk with no p4 record, so a delete there would be
+    /// a file removed with nothing to undo it. It is reported instead.
+    #[test]
+    fn an_offline_apply_leaves_a_delete_alone() {
+        let target = scratch("delete_offline.txt", b"one\ntwo\n");
+        let patch = scratch(
+            "delete_offline.patch",
+            format!("diff --git a/{target} b/{target}\ndeleted file mode 100644\n--- a/{target}\n+++ /dev/null\n")
+                .as_bytes(),
+        );
+        let rep = run_patch(
+            &offline_conn(),
+            &patch,
+            Some(ApplyOpts { mode: "offline".into(), change: String::new(), partial: false }),
+        )
+        .unwrap();
+        assert_eq!(rep[0].status, "skipped");
+        assert!(rep[0].message.contains("opened for edit"));
+        assert!(std::path::Path::new(&target).exists());
+    }
+
+    /// Nothing to delete is not a failure — the end state the patch asks for is
+    /// already the one on disk.
+    #[test]
+    fn deleting_a_file_that_is_already_gone_is_not_a_failure() {
+        let missing = std::env::temp_dir().join("p4gui_test_never_existed.txt");
+        let _ = std::fs::remove_file(&missing);
+        let m = missing.display().to_string();
+        let patch = scratch(
+            "delete_missing.patch",
+            format!("diff --git a/{m} b/{m}\ndeleted file mode 100644\n--- a/{m}\n+++ /dev/null\n")
+                .as_bytes(),
+        );
+        let rep = run_patch(&offline_conn(), &patch, None).unwrap();
+        assert_eq!(rep[0].status, "already");
     }
 
     /// No server: `p4 where` fails and the `+++` path is used, which is what
