@@ -9,6 +9,8 @@
     okLabel = "OK",
     multiline = false,
     password = false,
+    optionLabel = "",
+    optionChecked = false,
     onSubmit,
     onCancel,
   }: {
@@ -19,17 +21,22 @@
     okLabel?: string;
     multiline?: boolean;
     password?: boolean; // mask input and don't trim (for credentials)
-    onSubmit: (value: string) => void;
+    /** An extra choice made in the same breath as the value — shown as a
+     *  checkbox and handed back with it. Absent when empty. */
+    optionLabel?: string;
+    optionChecked?: boolean;
+    onSubmit: (value: string, option: boolean) => void;
     onCancel: () => void;
   } = $props();
 
   let value = $state(untrack(() => initial));
+  let option = $state(untrack(() => optionChecked));
   let el: HTMLInputElement | HTMLTextAreaElement | undefined = $state();
   $effect(() => el?.focus());
 
   const cleaned = $derived(password ? value : value.trim());
   function submit() {
-    if (cleaned) onSubmit(cleaned);
+    if (cleaned) onSubmit(cleaned, option);
   }
 </script>
 
@@ -64,6 +71,12 @@
       {/if}
     </label>
     {#if multiline}<span class="hint">Ctrl+Enter to save</span>{/if}
+    {#if optionLabel}
+      <label class="opt">
+        <input type="checkbox" bind:checked={option} />
+        <span>{optionLabel}</span>
+      </label>
+    {/if}
     <div class="actions">
       <button onclick={onCancel}>Cancel</button>
       <button class="primary" disabled={!cleaned} onclick={submit}>{okLabel}</button>
@@ -129,6 +142,17 @@
     font-size: 11px;
     color: var(--text-dim);
     margin-top: -4px;
+  }
+  .opt {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--text-dim);
+    line-height: 1.45;
+  }
+  .opt input {
+    margin: 2px 0 0;
   }
   .actions {
     display: flex;

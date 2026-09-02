@@ -76,6 +76,7 @@
         { label: "History", action: () => onToggleView("history"), checked: views.history },
         { label: "Pending", action: () => onToggleView("pending"), checked: views.pending },
         { label: "Reviews", action: () => onToggleView("reviews"), checked: views.reviews },
+        { label: "Stashes", action: () => onToggleView("stashes"), checked: views.stashes },
         { label: "Streams", action: () => onToggleView("streams"), checked: views.streams },
         { label: "Commands", action: () => onToggleView("log"), checked: views.log },
         { label: "Notifications", action: () => onToggleView("notes"), checked: views.notes },

@@ -6,7 +6,7 @@
 import { cacheGetSync, cacheSet } from "$lib/store.svelte";
 
 export interface ViewState {
-  tab: "history" | "pending" | "reviews" | "streams" | "log" | "notes";
+  tab: "history" | "pending" | "reviews" | "stashes" | "streams" | "log" | "notes";
   treePath: string; // selected depot path (tree highlight + history subject)
   histMode: "folder" | "file";
 }
@@ -18,6 +18,7 @@ export interface Views {
   history: boolean;
   pending: boolean;
   reviews: boolean; // Swarm code reviews
+  stashes: boolean; // changes set aside as patches in the app's own database
   streams: boolean;
   log: boolean; // the p4-command log ("Commands")
   notes: boolean; // the notification history ("Notifications")
@@ -27,6 +28,7 @@ const DEFAULT_VIEWS: Views = {
   history: true,
   pending: true,
   reviews: true,
+  stashes: true,
   streams: false,
   log: false,
   notes: false,

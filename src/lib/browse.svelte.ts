@@ -30,7 +30,7 @@ import {
   type ViewState,
 } from "$lib/nav";
 
-type Tab = "history" | "pending" | "reviews" | "streams" | "log" | "notes";
+type Tab = "history" | "pending" | "reviews" | "stashes" | "streams" | "log" | "notes";
 /** The file browser's data source: on-disk files, the workspace stream (server),
  *  or the whole depot (server, all depots from //). */
 export type BrowseSource = "local" | "workspace" | "depot";

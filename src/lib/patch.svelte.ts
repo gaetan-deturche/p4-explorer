@@ -87,6 +87,31 @@ export const patches = {
     }
   },
 
+  /** Preview a stash on this workspace.
+   *
+   *  A stash IS a patch, so there is nothing to translate: it is written out of
+   *  the database and handed to the same preview and the same apply as a `.patch`
+   *  from disk — including the per-hunk resolve for whatever has drifted, which
+   *  is what applying a stash in a workspace that has moved on will need. */
+  async previewStash(id: number, label: string) {
+    if (!h || !h.connected()) return;
+    busy = true;
+    try {
+      const file = await p4.stashPatchFile(id);
+      files = await p4.previewPatch(h.conn(), file);
+      path = file;
+      subject = label;
+      skipped = [];
+      reviewChange = "";
+      phase = "preview";
+      open = true;
+    } catch (e) {
+      h.setError(String(e));
+    } finally {
+      busy = false;
+    }
+  },
+
   /** Preview a Swarm review's shelved content as a patch on this workspace.
    *  The shelf is written out as a real patch file, so from here on this is the
    *  ordinary apply-patch flow — same preview, same end-state choice, same

@@ -22,6 +22,9 @@
   import { sync, type SyncTarget } from "$lib/sync.svelte";
   import { patches } from "$lib/patch.svelte";
   import { merges, afterMerge } from "$lib/merge.svelte";
+  import { stashes } from "$lib/stash.svelte";
+  import type { StashRow } from "$lib/p4";
+  import StashList from "$lib/components/StashList.svelte";
   import { pending } from "$lib/pending.svelte";
   import { reviews, type Role } from "$lib/reviews.svelte";
   import { history } from "$lib/history.svelte";
@@ -197,7 +200,9 @@
 
   // Center tab. History/details pane lives in $lib/history.svelte.ts; the depot
   // tree, streams/repo tabs and index live in $lib/browse.svelte.ts.
-  let centerTab = $state<"history" | "pending" | "reviews" | "streams" | "log" | "notes">("pending");
+  let centerTab = $state<
+    "history" | "pending" | "reviews" | "stashes" | "streams" | "log" | "notes"
+  >("pending");
 
   const centerRows = $derived(centerTab === "pending" ? pending.rows : history.rows);
 
@@ -212,12 +217,13 @@
     if (navReady) saveViews(views);
   });
   const TABS: {
-    key: "history" | "pending" | "reviews" | "streams" | "log" | "notes";
+    key: "history" | "pending" | "reviews" | "stashes" | "streams" | "log" | "notes";
     label: string;
   }[] = [
     { key: "history", label: "History" },
     { key: "pending", label: "Pending" },
     { key: "reviews", label: "Reviews" },
+    { key: "stashes", label: "Stashes" },
     { key: "streams", label: "Streams" },
     { key: "log", label: "Commands" },
     { key: "notes", label: "Notifications" },
@@ -227,6 +233,7 @@
     centerTab = key;
     if (key === "pending") pending.load();
     else if (key === "reviews") void reviews.load();
+    else if (key === "stashes") void stashes.load();
     else if (key === "streams") browse.loadStreams();
   }
   // Keep centerTab on a visible tab; if the active one was closed, pick another.
@@ -235,6 +242,11 @@
       const next = TABS.find((t) => views[t.key]);
       if (next) centerTab = next.key;
     }
+  });
+  // Stashes live in the app's own database, so this needs no connection and no
+  // cache layer: read the table when the tab is the one on screen.
+  $effect(() => {
+    if (centerTab === "stashes") void stashes.load();
   });
   // Reviews come from the server, so the tab needs a load when it becomes the
   // active one (including restored at startup) and after a (re)connect — there is
@@ -363,6 +375,7 @@
     }
     group();
     items.push({ label: "Generate patch…", action: () => generatePatch(cl.change, []) });
+    items.push({ label: "Stash…", action: () => stash(cl.change, []) });
     if (own) {
       group();
       // Destructive pair, last and on their own — and each only when it would
@@ -484,6 +497,21 @@
     fileCtx = { x: e.clientX, y: e.clientY, file, change, files };
   }
   const generatePatch = (change: string, files: string[]) => pending.generatePatch(change, files);
+  /** The name prompt for a stash about to be taken, and what it will cover. */
+  let stashFrom = $state<{ change: string; files: string[]; suggestion: string } | null>(null);
+  let stashRenaming = $state<StashRow | null>(null);
+  /** Open the name prompt. A stash is a copy: nothing here reverts anything. */
+  function stash(change: string, files: string[]) {
+    const base =
+      files.length === 1
+        ? files[0].split("/").pop() || "file"
+        : files.length > 1
+          ? `${files.length} files`
+          : change && change !== "default"
+            ? `change ${change}`
+            : "workspace";
+    stashFrom = { change, files, suggestion: base };
+  }
   // Move via the context menu, optimistically (falls back to a plain reopen if
   // the list isn't mounted for some reason).
   /** Move a set between changelists. The context menu passes the selection, so a
@@ -551,6 +579,10 @@
       copyMenu(file.depotFile, file.clientFile),
       { label: "", sep: true },
       { label: patchLabel, action: () => generatePatch("", sel) },
+      {
+        label: sel.length > 1 ? `Stash (${sel.length} files)…` : "Stash…",
+        action: () => stash("", sel),
+      },
       // Part of a changelist can be shelved on its own — p4 adds the named files
       // to the shelf rather than trimming it, so a shelf can be built up file by
       // file. Not destructive: the files stay open and the workspace untouched.
@@ -942,6 +974,17 @@
       rowsOf: (change) => pendingList?.rowsOf(change) ?? [],
       settleHidden: () => pendingList?.settleRows(),
     });
+    stashes.init({
+      conn: () => conn,
+      connected: () => connection.connected,
+      setNotice,
+      setError,
+      askConfirm,
+      refresh: () => {
+        void browse.refresh();
+        pending.load();
+      },
+    });
     merges.init({
       conn: () => conn,
       connected: () => connection.connected,
@@ -1184,6 +1227,15 @@
           }}
           onContext={onStreamContext}
         />
+      {:else if centerTab === "stashes"}
+        <StashList
+          rows={stashes.rows}
+          loading={stashes.loading}
+          client={conn.client}
+          onApply={(s) => patches.previewStash(s.id, s.name)}
+          onRename={(s) => (stashRenaming = s)}
+          onDelete={(s) => void stashes.remove(s)}
+        />
       {:else if centerTab === "log"}
         <CommandLog entries={cmdlog.entries}
           running={cmdlog.running}
@@ -1358,6 +1410,37 @@
       void pending.moveFile(from, to);
     }}
     onCancel={() => (moveFrom = null)}
+  />
+{/if}
+
+{#if stashFrom}
+  <InputDialog
+    title="Stash"
+    label="Name this stash"
+    initial={stashFrom.suggestion}
+    okLabel="Stash"
+    optionLabel="Revert these files afterwards (the change stays in the stash)"
+    onSubmit={(name, clear) => {
+      const from = stashFrom!;
+      stashFrom = null;
+      if (name.trim()) void stashes.save(name.trim(), from.change, from.files, clear);
+    }}
+    onCancel={() => (stashFrom = null)}
+  />
+{/if}
+
+{#if stashRenaming}
+  <InputDialog
+    title="Rename stash"
+    label="Name"
+    initial={stashRenaming.name}
+    okLabel="Rename"
+    onSubmit={(name) => {
+      const s = stashRenaming!;
+      stashRenaming = null;
+      void stashes.rename(s.id, name);
+    }}
+    onCancel={() => (stashRenaming = null)}
   />
 {/if}
 
@@ -1568,6 +1651,7 @@
       copyMenu(f.depotFile ?? f.clientFile ?? "", f.clientFile),
       { label: "", sep: true },
       { label: `Generate patch${many}…`, action: () => generatePatch("", sel) },
+      { label: `Stash${many}…`, action: () => stash("", sel) },
       { label: "", sep: true },
       { label: `Check out${co}`, submenu: intoChangelist(offSel, "checkout") },
       { label: "", sep: true },

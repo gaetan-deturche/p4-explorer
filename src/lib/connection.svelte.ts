@@ -22,7 +22,7 @@ import { browse } from "$lib/browse.svelte";
 import { history } from "$lib/history.svelte";
 import { pending } from "$lib/pending.svelte";
 
-type Tab = "history" | "pending" | "reviews" | "streams" | "log" | "notes";
+type Tab = "history" | "pending" | "reviews" | "stashes" | "streams" | "log" | "notes";
 type Hooks = {
   conn: () => P4Conn;
   getTab: () => Tab;
