@@ -38,6 +38,14 @@ type ErrItem = {
    *  whether the local copy is precious, tracked, or merely writable. */
   why?: string;
   kind?: string;
+  /** Set when the entry is not a sync FAILURE but a file p4 synced and then
+   *  scheduled a resolve on. It is reported, never retried or forced. */
+  resolve?: boolean;
+  /** Settled since the report opened — resolved, or synced by a retry/force.
+   *  It stays listed, struck through and green: a row that disappears reads the
+   *  same as one that was never there, and half a dozen files fixed one at a
+   *  time is exactly when you want to see what is left. */
+  done?: boolean;
 };
 // `specs` = what the failed run targeted; the retry falls back to these when
 // no per-file paths could be parsed out of the error lines. NEVER widen it to
@@ -64,6 +72,32 @@ let h: Hooks | null = null;
 let cancelled = false;
 let errorItems: ErrItem[] = [];
 
+/** Files p4 is holding a resolve on, as report entries.
+ *
+ *  A sync that lands on a file you have open does not fail: p4 syncs it,
+ *  schedules a resolve and says so as an ordinary RESULT ("is opened and not
+ *  being changed", "must resolve #6,#9 before submitting"), which never reaches
+ *  the issue stream — so the run used to end with "Synced N files." and no sign
+ *  that anything needed a decision. Asking p4 outright is also the only
+ *  locale-proof way to know it: `fstat -Ru` is filtered server-side over opened
+ *  files, so it is one cheap call per sync. */
+async function resolveItems(): Promise<ErrItem[]> {
+  if (!h || !h.connected() || !h.conn().client) return [];
+  const conn = h.conn();
+  const files = await p4.resolveNeeded(conn, "").catch(() => [] as string[]);
+  if (h.conn().client !== conn.client) return []; // workspace switched mid-fetch
+  return files.map((f) => ({
+    file: f,
+    line: `${f} — must be resolved before it can be submitted`,
+    resolve: true,
+  }));
+}
+
+/** Flag the entries a fix has settled, leaving the rest of the report alone. */
+function mark(items: ErrItem[], settled: (i: ErrItem) => boolean): ErrItem[] {
+  return items.map((i) => (settled(i) ? { ...i, done: true } : i));
+}
+
 let progress = $state<Progress | null>(null);
 let errors = $state<ErrReport | null>(null);
 /** Files a sync could not write, with the state behind each refusal. Kept after
@@ -89,6 +123,17 @@ export const sync = {
   clearBlocker(file: string) {
     blockers = blockers.filter((b) => b.depotFile !== file && b.clientFile !== file && b.file !== file);
   },
+  /** Drop the resolve entries p4 is no longer holding — a merge was saved. */
+  async recheckResolves() {
+    if (!h || !errors || !errors.items.some((i) => i.resolve)) return;
+    const files = await p4.resolveNeeded(h.conn(), "").catch(() => null);
+    if (!files || !errors) return; // on doubt keep the entry; a stale row is not a lie
+    const still = new Set(files);
+    errors = {
+      ...errors,
+      items: mark(errors.items, (i) => !!i.resolve && !!i.file && !still.has(i.file)),
+    };
+  },
   /** Re-ask p4 about the recorded blockers and drop the ones that are settled. */
   async recheckBlockers() {
     if (!h || !blockers.length) return;
@@ -104,7 +149,12 @@ export const sync = {
    *  are workspace state rather than a passing hiccup. */
   async explainErrors() {
     if (!h || !errors) return;
-    const files = errors.items.map((i) => i.file).filter((f): f is string => !!f);
+    // Only the refusals have a "why" to ask about: a resolve is p4 working as
+    // intended, and syncBlockers would report the file as merely writable.
+    const files = errors.items
+      .filter((i) => !i.resolve)
+      .map((i) => i.file)
+      .filter((f): f is string => !!f);
     if (!files.length) return;
     const infos = await p4.syncBlockers(h.conn(), files).catch(() => null);
     if (!infos || !errors) return;
@@ -112,7 +162,7 @@ export const sync = {
     errors = {
       ...errors,
       items: errors.items.map((it) => {
-        const info = it.file ? by.get(it.file) : undefined;
+        const info = it.resolve || !it.file ? undefined : by.get(it.file);
         return info ? { ...it, why: info.reason, kind: info.kind } : it;
       }),
     };
@@ -156,8 +206,10 @@ export const sync = {
     try {
       const n = await p4.syncStream(h.conn(), specs);
       progress = null;
-      if (errorItems.length > 0) {
-        errors = { title, items: [...errorItems], specs };
+      // What p4 refused to write, and what it wrote but left needing a decision.
+      const items = [...errorItems, ...(await resolveItems())];
+      if (items.length > 0) {
+        errors = { title, items, specs };
         void sync.explainErrors(); // fills in the "why" a moment later
       }
       else h.setNotice(n > 0 ? `Synced ${n} file${n === 1 ? "" : "s"}.` : "Already up to date.");
@@ -346,7 +398,12 @@ export const sync = {
   // --- error report fixes ---------------------------------------------------
   targets(): string[] {
     if (!errors) return [];
-    const files = Array.from(new Set(errors.items.map((i) => i.file).filter((f): f is string => !!f)));
+    // A file waiting on a resolve is not a sync failure: retrying does nothing
+    // and forcing would overwrite the very work the resolve exists to settle.
+    // It is listed and never acted on in bulk.
+    const retryable = errors.items.filter((i) => !i.resolve && !i.done);
+    if (!retryable.length) return [];
+    const files = Array.from(new Set(retryable.map((i) => i.file).filter((f): f is string => !!f)));
     if (files.length) return files;
     // No parseable per-file paths: retry exactly what this run targeted. An
     // empty spec list means it WAS a whole-workspace sync.
@@ -399,8 +456,7 @@ export const sync = {
         };
         h.setNotice("File still failing — see the updated error.", 6000);
       } else {
-        const rest = errors.items.filter((i) => i.file !== file);
-        errors = rest.length ? { ...errors, items: rest } : null;
+        errors = { ...errors, items: mark(errors.items, (i) => i.file === file) };
       }
       await h.refresh();
       h.loadPending();
@@ -423,6 +479,7 @@ export const sync = {
       return;
     }
     const targets = this.targets();
+    if (!targets.length) return; // nothing here to re-sync (all of it needs resolving)
     busyFile = "*";
     try {
       const rows = await p4.resync(h.conn(), targets, force);
@@ -440,9 +497,21 @@ export const sync = {
           still.push({ file: r.depotFile || null, line: r.message || "sync failed" });
         }
       }
+      // Everything that was retried and is not back in `still` is settled; the
+      // rest of the report (resolves, entries already green) stays as it was.
+      const broken = new Map<string | null, ErrItem>();
+      for (const s of still) broken.set(s.file, s);
+      const retried = new Set(targets);
+      const items = errors.items.map((i) => {
+        const bad = i.file ? broken.get(i.file) : undefined;
+        if (bad) return { ...i, line: bad.line, done: false };
+        return i.resolve || i.done || !i.file || !retried.has(i.file) ? i : { ...i, done: true };
+      });
+      // A failure with no parseable path cannot be matched to a row; list it.
+      for (const s of still) if (!s.file) items.push(s);
+      errors = { ...errors, items };
       if (still.length) {
-        errors = { ...errors, items: still };
-      void sync.explainErrors();
+        void sync.explainErrors();
         const nKept = still.filter((i) => i.line.includes("offline changes")).length;
         h.setNotice(
           nKept === still.length
@@ -450,7 +519,6 @@ export const sync = {
             : `Re-synced; ${still.length} file${still.length === 1 ? "" : "s"} still need attention.`,
         );
       } else {
-        errors = null;
         blockers = []; // whatever blocked the sync has been dealt with
         h.setNotice(force ? "Force re-synced the affected files." : "Re-synced the affected files.");
       }

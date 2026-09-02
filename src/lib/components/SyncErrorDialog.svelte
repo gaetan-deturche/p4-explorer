@@ -13,7 +13,16 @@
     title: string;
     // `why` is p4's refusal translated into the state behind it (see
     // p4_sync_blockers); it arrives a moment after the dialog opens.
-    items: { line: string; file: string | null; why?: string; kind?: string }[];
+    items: {
+      line: string;
+      file: string | null;
+      why?: string;
+      kind?: string;
+      /** p4 synced this one and scheduled a resolve on it — not a failure. */
+      resolve?: boolean;
+      /** Settled since this report opened. */
+      done?: boolean;
+    }[];
     busyFile: string | null;
     onFixFile: (file: string, force: boolean) => void;
     onResolveFile: (file: string) => void; // opens the three-way resolve
@@ -24,8 +33,9 @@
   } = $props();
 
   type Cat = "locked" | "clobber" | "resolve" | "protected" | "other";
-  function categorize(line: string): Cat {
-    const l = line.toLowerCase();
+  function categorize(it: { line: string; resolve?: boolean }): Cat {
+    if (it.resolve) return "resolve"; // stated by the producer, not guessed at
+    const l = it.line.toLowerCase();
     if (l.includes("offline changes")) return "protected"; // kept by the retry guard
     if (
       l.includes("another process") ||
@@ -50,28 +60,56 @@
     return m || it.line;
   }
   const busy = $derived(busyFile !== null);
+  /** The two kinds of entry read differently and are acted on differently: one
+   *  is a file p4 would not write, the other a file it wrote and left a decision
+   *  on. Retry and Force apply only to the first. */
+  const open = $derived(items.filter((i) => !i.done));
+  const failures = $derived(open.filter((i) => !i.resolve).length);
+  const unsettled = $derived(open.length - failures);
+  const fixed = $derived(items.length - open.length);
+  const plural = (n: number) => (n === 1 ? "" : "s");
 </script>
 
 <div class="overlay">
   <div class="backdrop"></div>
   <div class="dialog" role="dialog" aria-modal="true" tabindex="-1">
-    <div class="dtitle">
-      ⚠ {title}: {items.length} file{items.length === 1 ? "" : "s"} could not be synced
-    </div>
-    <div class="hint">
-      <b>Retry</b> re-syncs (safe — for files that were open in another app; close it first).
-      <b>Force</b> overwrites writable files with the depot version (discards local changes).
-      <b>Resolve</b> opens the three-way merge.
-    </div>
+    <!-- Nothing left to act on: a warning colour would be reporting a problem
+         that no longer exists, and the hint below has nothing to explain. -->
+    {#if !failures && !unsettled}
+      <div class="dtitle ok">✓ {title}: all sorted ({fixed} file{plural(fixed)})</div>
+    {:else}
+      <div class="dtitle">
+        ⚠ {title}:
+        {#if failures}{failures} file{plural(failures)} could not be synced{/if}{#if failures && unsettled}
+          ·
+        {/if}{#if unsettled}{unsettled} file{plural(unsettled)} need{unsettled === 1 ? "s" : ""} resolving{/if}{#if fixed}
+          · <span class="fixedcount">{fixed} sorted</span>
+        {/if}
+      </div>
+      <div class="hint">
+        {#if failures}
+          <b>Retry</b> re-syncs (safe — for files that were open in another app; close it first).
+          <b>Force</b> overwrites writable files with the depot version (discards local changes).
+        {/if}
+        {#if unsettled}
+          <!-- Not a failure: these synced. p4 will refuse the submit until each is
+               settled, which is the only other place it would have been said. -->
+          These synced onto work you have open, so p4 scheduled a merge.
+          <b>Resolve</b> opens the three-way merge; nothing can be submitted until it is settled.
+        {/if}
+      </div>
+    {/if}
 
     <div class="scroll">
       <div class="grid">
         <div class="hdr">File</div>
         <div class="hdr">Error</div>
         {#each items as it (it.line)}
-          {@const cat = categorize(it.line)}
-          <div class="fcell mono" title={it.file ?? it.line}>{it.file ?? "(unknown)"}</div>
-          <div class="ecell">
+          {@const cat = categorize(it)}
+          <div class="fcell mono" class:done={it.done} title={it.file ?? it.line}>
+            {it.file ?? "(unknown)"}
+          </div>
+          <div class="ecell" class:done={it.done}>
             <span class="etext mono">{errText(it)}</span>
             {#if it.why}
               <!-- "Can't clobber writable file" does not say whether the local
@@ -79,7 +117,9 @@
               <span class="why">{it.why}</span>
             {/if}
             <span class="act">
-              {#if !it.file}
+              {#if it.done}
+                <span class="fixed">✓ {it.resolve ? "resolved" : "synced"}</span>
+              {:else if !it.file}
                 <span class="dim">—</span>
               {:else if cat === "resolve"}
                 <button
@@ -123,10 +163,14 @@
 
     <div class="actions">
       <button onclick={onClose}>Close</button>
-      <button class="danger-btn" disabled={busy} onclick={onForceAll}>Force overwrite all</button>
-      <button class="primary" disabled={busy} onclick={onRetryAll}>
-        {busyFile === "*" ? "Working…" : "Retry all"}
-      </button>
+      <!-- Only when there is something to re-sync: a resolve is settled one file
+           at a time, and forcing one would discard the work it is there to keep. -->
+      {#if failures}
+        <button class="danger-btn" disabled={busy} onclick={onForceAll}>Force overwrite all</button>
+        <button class="primary" disabled={busy} onclick={onRetryAll}>
+          {busyFile === "*" ? "Working…" : "Retry all"}
+        </button>
+      {/if}
     </div>
   </div>
 </div>
@@ -162,6 +206,9 @@
     font-size: 13px;
     font-weight: 600;
     color: var(--warn);
+  }
+  .dtitle.ok {
+    color: #7cc47c;
   }
   .hint {
     font-size: 12px;
@@ -205,6 +252,29 @@
     justify-content: space-between;
     gap: 10px;
     min-width: 0;
+  }
+  /* Settled: still listed, so the report stays a record of what the sync ran
+     into — struck through and green so what is LEFT is what stands out. */
+  .fcell.done,
+  .ecell.done {
+    background: rgba(124, 196, 124, 0.1);
+  }
+  .fcell.done {
+    color: var(--text-dim, #999);
+  }
+  .ecell.done .etext {
+    color: #7cc47c;
+    text-decoration: line-through;
+    opacity: 0.75;
+  }
+  .fixed {
+    color: #7cc47c;
+    font-size: 11px;
+    white-space: nowrap;
+    padding: 2px 4px;
+  }
+  .fixedcount {
+    color: #7cc47c;
   }
   .why {
     display: block;

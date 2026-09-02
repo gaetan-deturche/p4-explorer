@@ -955,6 +955,7 @@
       listen("merge-done", () => {
         setNotice("Merge saved.", 4000);
         void afterMerge();
+        void sync.recheckResolves(); // the entry that sent us here may be gone
       }),
     );
     reviews.init({
