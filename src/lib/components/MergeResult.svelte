@@ -37,7 +37,10 @@
     starts: number[];
     /** Band kind per region: add | del | vs | keep | "". */
     kinds: string[];
-    tokens: Map<string, TokenRun[]>;
+    /** Colouring by ABSOLUTE line index in the merged file — the same index
+     *  `starts` counts in, less one (it is 1-based). Sparse: a line not yet
+     *  coloured has no entry. */
+    tokens: (TokenRun[] | undefined)[];
     lineHeight: number;
     toolbarHeight: number;
     /** Rendered inside a conflict region, above its lines. */
@@ -478,8 +481,8 @@
   }
 </script>
 
-{#snippet codeOf(line: string, region: number, at: number)}
-  {#each renderLine(line, tokens.get(line), {
+{#snippet codeOf(line: string, region: number, at: number, abs: number)}
+  {#each renderLine(line, tokens[abs], {
     invisibles: showInvisibles,
     hot: hotOf?.(region, at) ?? null,
   }) as seg}<span
@@ -513,6 +516,7 @@
     <div
       class="rgn"
       class:conflict={r.conflict}
+      class:settled={r.conflict && kind !== "vs"}
       data-rgn={r.region}
       style="top:{tops[i]}px; height:{(rows[i] ?? r.lines.length) * lineHeight +
         (r.conflict ? toolbarHeight : 0)}px"
@@ -533,7 +537,7 @@
         {#each r.lines.slice(first, last + 1) as line, k (first + k)}
           <div class="rl k-{kind}" style="height:{lineHeight}px">
             <span class="mk">{MARK[kind] ?? ""}</span><span class="ln">{starts[i] + first + k}</span
-            ><span class="code">{@render codeOf(line, r.region, first + k)}</span>
+            ><span class="code">{@render codeOf(line, r.region, first + k, starts[i] - 1 + first + k)}</span>
           </div>
         {/each}
         {#if win.padAfter > 0}
@@ -632,6 +636,13 @@
   }
   .rgn.conflict {
     background: rgba(224, 85, 90, 0.09);
+  }
+  /* A conflict the host has settled: the band it asks for is no longer "vs". */
+  .rgn.conflict.settled {
+    background: transparent;
+  }
+  .rgn.settled .bar {
+    background: rgba(140, 140, 140, 0.1);
   }
   .bar {
     display: flex;

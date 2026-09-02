@@ -491,7 +491,15 @@
   let saving = $state(false);
   let error = $state("");
   let loading = $state(true);
-  let tokens = $state<Map<string, TokenRun[]>>(new Map());
+  /** A pane's colouring: runs per line, sparse — a line not yet asked for has
+   *  no entry and renders uncoloured. */
+  type Toks = (TokenRun[] | undefined)[];
+  /** Colouring per side, by ABSOLUTE line index into that side's own file.
+   *  Indexed, not keyed by line text: a grammar is a state machine, so the same
+   *  text tokenizes differently in two places — and a text key also lets one
+   *  side's answer land on the other side's identical line. */
+  let tokLeft = $state<Toks>([]);
+  let tokRight = $state<Toks>([]);
   let current = $state(0);
   let typing = false;
 
@@ -621,8 +629,10 @@ initSplit(leftText.trim() === "");
    *  Skipped only while a selection is open, since re-blocking rebuilds the
    *  regions its endpoints point into; the next edit (or its collapse) reflows. */
   function reflow() {
-    if (!ds || !editable || hasSelection(ds)) return;
-    rebuild(docText(ds.doc), absoluteLine());
+    if (!ds || !editable) return;
+    // Re-blocking is what a selection defers; the colouring is not — the
+    // document changed, so the session in hand no longer describes it.
+    if (!hasSelection(ds)) rebuild(docText(ds.doc), absoluteLine());
     scheduleRecolor(); // the edited lines have no tokens yet
   }
 
@@ -820,6 +830,7 @@ initSplit(leftText.trim() === "");
     typing = false;
     ds = applyRegionLines(ds, i, b.left);
     dirty = true;
+    scheduleRecolor(); // taking the other side rewrites the block — as an edit does
   }
 
   async function save() {
@@ -857,17 +868,13 @@ initSplit(leftText.trim() === "");
   // grammar's state is carried across it.
   let recolorTimer: number | null = null;
   function scheduleRecolor() {
+    docGen++; // the session in hand no longer describes the document
     if (recolorTimer !== null) clearTimeout(recolorTimer);
     recolorTimer = window.setTimeout(() => {
       recolorTimer = null;
       void openRight();
     }, 250);
   }
-
-  /** Cap on the token map. It is keyed by text and never forgets, so a long
-   *  editing session accumulates every intermediate version of every line; past
-   *  this it starts again from what is on screen. */
-  const TOKEN_CAP = 20_000;
 
   /** The language, from the paths: the window TITLE carries revisions
    *  ("foo.cpp#12 vs #14") and has no trailing extension. */
@@ -880,22 +887,31 @@ initSplit(leftText.trim() === "");
   let leftSyntax: SyntaxSession | null = null;
   let rightSyntax: SyntaxSession | null = null;
   let painted = "";
+  /** Bumped by every change to the right-hand document, and recorded by the
+   *  session opened over it. An answer from a session older than the document is
+   *  thrown away rather than painted onto lines it does not describe. */
+  let docGen = 0;
+  let rightGen = -1;
 
   async function openLeft() {
     if (!lang) return;
     leftSyntax?.close();
     leftSyntax = await openSyntax(blocks.flatMap((b) => b.left).join("\n"), lang, dark());
+    tokLeft = [];
     painted = "";
     colourWindow();
   }
   async function openRight() {
     if (!lang || !ds) return;
+    const gen = docGen; // the document this session describes
     rightSyntax?.close();
     rightSyntax = await openSyntax(
       ds.doc.regions.flatMap((r) => r.lines).join("\n"),
       lang,
       dark(),
     );
+    rightGen = gen;
+    tokRight = [];
     painted = "";
     colourWindow();
   }
@@ -926,17 +942,21 @@ initSplit(leftText.trim() === "");
     const key = `${l?.[0]},${l?.[1]},${r?.[0]},${r?.[1]}`;
     if (key === painted) return;
     painted = key;
-    const leftLines = blocks.flatMap((b) => b.left);
-    const rightLines = ds?.doc.regions.flatMap((rg) => rg.lines) ?? [];
+    const gen = docGen;
+    const fresh = rightGen === gen;
     void Promise.all([
       l && leftSyntax ? leftSyntax.window(l[0], l[1] - l[0] + 1) : Promise.resolve(null),
-      r && rightSyntax ? rightSyntax.window(r[0], r[1] - r[0] + 1) : Promise.resolve(null),
+      r && rightSyntax && fresh ? rightSyntax.window(r[0], r[1] - r[0] + 1) : Promise.resolve(null),
     ]).then(([lr, rr]) => {
-      const map = new Map(tokens);
-      if (map.size > TOKEN_CAP) map.clear(); // it refills from what is on screen
-      if (lr && l) lr.forEach((runs, k) => map.set(leftLines[l[0] + k] ?? "", runs));
-      if (rr && r) rr.forEach((runs, k) => map.set(rightLines[r[0] + k] ?? "", runs));
-      tokens = map;
+      const put = (into: Toks, runs: TokenRun[][] | null, w: [number, number] | null): Toks => {
+        if (!runs || !w) return into;
+        const next = into.slice();
+        runs.forEach((run, k) => (next[w[0] + k] = run));
+        return next;
+      };
+      tokLeft = put(tokLeft, lr, l);
+      // The document may have moved on while the worker was answering.
+      if (gen === docGen) tokRight = put(tokRight, rr, r);
     });
   }
   // Follow the view, and the blocks: a re-diff moves every line.
@@ -983,7 +1003,7 @@ initSplit(leftText.trim() === "");
 {#snippet pane(
   lines: string[],
   hots: (readonly [number, number] | null)[],
-  from: number,
+  base: number,
   kind: string,
   fill = 0,
   top = 0,
@@ -998,9 +1018,9 @@ initSplit(leftText.trim() === "");
   {/if}
   {#each lines.slice(first, last + 1) as line, k}
     <div class="line k-{kind}"><span class="mk">{kind === "del" ? "-" : ""}</span><span class="ln"
-        >{from + first + k}</span
+        >{base + first + k + 1}</span
       ><span class="src"
-        >{#each renderLine(line, tokens.get(line), { invisibles, hot: hots[first + k] }) as seg}<span
+        >{#each renderLine(line, tokLeft[base + first + k], { invisibles, hot: hots[first + k] }) as seg}<span
             style:color={seg.color}
             class:ghost={seg.ghost}
             class:hot={seg.hot}>{seg.text}</span
@@ -1132,7 +1152,7 @@ initSplit(leftText.trim() === "");
               data-change={b.kind === "same" ? undefined : i}
               style="top:{tops[i]}px; height:{rows[i] * LH}px"
             >
-              {@render pane(b.left, b.lhot, starts[i].l, leftKind(i), rows[i] - b.left.length, tops[i])}
+              {@render pane(b.left, b.lhot, starts[i].l - 1, leftKind(i), rows[i] - b.left.length, tops[i])}
             </div>
           {/each}
           {@render markers("left")}
@@ -1167,7 +1187,7 @@ initSplit(leftText.trim() === "");
             {rows}
             starts={starts.map((s) => s.r)}
             {kinds}
-            {tokens}
+            tokens={tokRight}
             showInvisibles={invisibles}
             hotOf={(region, line) => blocks[region]?.rhot[line] ?? null}
             lineHeight={LH}

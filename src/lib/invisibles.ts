@@ -25,6 +25,29 @@ const TAB_WIDTH = 4;
 export const SPACE_MARK = "\u00b7"; // ·
 export const TAB_MARK = "\u2192"; // →
 
+/** The line, cut at the highlighter's run boundaries.
+ *
+ *  The text always comes from `line`; the runs are read for their LENGTHS and
+ *  their colours only. A run array is a colouring of a line, and a colouring can
+ *  drift from the line it was asked for — a session answering about the text as
+ *  it stood before an edit, a window asked for while the document was changing.
+ *  Drift may cost the right colours. It must never change what the file says. */
+export function colorParts(
+  line: string,
+  runs: { content: string; color?: string }[] | undefined,
+): { content: string; color?: string }[] {
+  if (!runs?.length || !line) return [{ content: line, color: undefined }];
+  const out: { content: string; color?: string }[] = [];
+  let at = 0;
+  for (const r of runs) {
+    if (at >= line.length) break; // the runs describe more than this line holds
+    out.push({ content: line.slice(at, at + r.content.length), color: r.color });
+    at += r.content.length;
+  }
+  if (at < line.length) out.push({ content: line.slice(at), color: undefined });
+  return out;
+}
+
 /** Render one line as segments, composing the three things that can apply to it:
  *  the highlighter's colours, the whitespace marks, and the range the diff
  *  changed.
@@ -41,7 +64,7 @@ export function renderLine(
 ): Seg[] {
   const marks = !!opts.invisibles;
   const hot = opts.hot ?? null;
-  const parts = runs?.length ? runs : [{ content: line, color: undefined }];
+  const parts = colorParts(line, runs);
   // Fast path: with neither marks nor a range there is nothing to split, and the
   // panes render every line of the file on every pass — a character walk per line
   // is not something to pay for a result identical to the input.

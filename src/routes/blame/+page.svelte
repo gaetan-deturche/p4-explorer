@@ -15,6 +15,7 @@
   import OverviewRuler, { type Mark } from "$lib/components/OverviewRuler.svelte";
   import ContextMenu from "$lib/components/ContextMenu.svelte";
   import { langForFile, openSyntax, type SyntaxSession, type TokenRun } from "$lib/syntax";
+  import { colorParts } from "$lib/invisibles";
   import { cacheGet, cacheSet } from "$lib/store.svelte";
   import { openDiff } from "$lib/opendiff";
   import { editor } from "$lib/editor.svelte";
@@ -473,7 +474,7 @@
               style="top:{i * LH}px; background: {shade(l.change, 0.07)}"
             >
               <span class="lno dim">{i + 1}</span><span class="code"
-                >{#if tokens && tokens[i]}{#each tokens[i] as run}<span style:color={run.color}
+                >{#if tokens && tokens[i]}{#each colorParts(l.text, tokens[i]) as run}<span style:color={run.color}
                       >{run.content}</span
                     >{/each}{:else}{l.text}{/if}</span
               >

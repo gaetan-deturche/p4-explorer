@@ -36,6 +36,7 @@
     type History,
     type MergeAction,
   } from "$lib/mergedoc";
+  import { colorParts } from "$lib/invisibles";
   import { setClipboard } from "$lib/p4";
   import type { MergeData, MergeRegion } from "$lib/p4";
 
@@ -58,7 +59,16 @@
   /** Region → where its text came from; also marks a conflict as settled. */
   let origin = $state<Record<number, string>>({});
   let current = $state(0); // which conflict the prev/next buttons are on
-  let tokens = $state<Map<string, TokenRun[]>>(new Map());
+  /** A pane's colouring: runs per line, sparse — a line not yet asked for has
+   *  no entry and renders uncoloured. */
+  type Toks = (TokenRun[] | undefined)[];
+  /** Colouring per pane, by ABSOLUTE line index into that pane's own text.
+   *  Indexed, not keyed by line text: a grammar is a state machine, so the same
+   *  text tokenizes differently in two places — and a text key also lets one
+   *  pane's answer land on another pane's identical line. */
+  let tokTheirs = $state<Toks>([]);
+  let tokOurs = $state<Toks>([]);
+  let tokResult = $state<Toks>([]);
   let typing = false; // coalesce consecutive typing into one undo step
 
   const regions = $derived(data?.regions ?? []);
@@ -89,18 +99,29 @@
   }
 
   // --- add / drop, the same meaning in every pane ---------------------------
-  function sideKind(r: MergeRegion, which: Side): string {
+  function sideKind(r: MergeRegion, which: Side, i: number): string {
     if (r.kind === "same") return "";
-    if (r.kind === "conflict") return "vs";
+    if (r.kind === "conflict") {
+      // Once a side is taken the two sides are no longer rivals: one of them is
+      // in the file and the other is not, which is what add/drop already say
+      // everywhere else. `base` drops both; a hand-edit is neither, so it claims
+      // neither marker.
+      const o = origin[i];
+      if (o === undefined) return "vs";
+      if (o === "manual") return "";
+      if (o === "both") return "add";
+      return o === which ? "add" : "del";
+    }
     if (r.kind === "both") return "add";
     return r.kind === which ? "add" : "del";
   }
   const kinds = $derived(
     regions.map((r, i) => {
-      // A conflict stays red once a side is taken: the region is still a conflict
-      // until the merge is saved, and green would read as "settled and done".
-      // Progress is shown by the counter and the marker strip instead.
-      if (r.kind === "conflict") return "vs";
+      // An undecided conflict is red; one with a side taken is not. It reads as
+      // whatever it now holds, like every other region — the toolbar keeps the
+      // choice visible (and `reset` undoes it), so nothing is lost by letting a
+      // settled block look settled.
+      if (r.kind === "conflict" && origin[i] === undefined) return "vs";
       if (r.kind === "same" && origin[i] === undefined) return "";
       return origin[i] === "base" ? "keep" : "add";
     }),
@@ -240,6 +261,7 @@
         if (u) {
           ds = u.state;
           hist = u.history;
+          scheduleRecolor();
         }
         break;
       }
@@ -252,6 +274,7 @@
         if (r) {
           ds = r.state;
           hist = r.history;
+          scheduleRecolor();
         }
         break;
       }
@@ -379,7 +402,34 @@
     typing = false;
     ds = applyRegionLines(ds, i, lines);
     origin = { ...origin, [i]: what };
+    scheduleRecolor(); // taking a side rewrites the region — as an edit does
   }
+  /** Take one side for the WHOLE file: p4's "accept theirs" / "accept yours".
+   *
+   *  Every region becomes that side's text, not just the conflicts — so the
+   *  result is that file verbatim, and accepting the depot drops the local work
+   *  the auto-merge had already folded in. That is what accepting a side means;
+   *  settling only the conflicts is what the per-conflict buttons do. Regions
+   *  identical on both sides are left alone: there is nothing to choose, and
+   *  marking them would claim a decision that was never made.
+   *
+   *  One undo step, like any other edit. */
+  function takeAll(which: "theirs" | "ours") {
+    if (!ds) return;
+    hist = push(hist, ds, false);
+    typing = false;
+    let next = ds;
+    const org: Record<number, string> = { ...origin };
+    regions.forEach((r, i) => {
+      if (r.kind === "same") return;
+      next = applyRegionLines(next, i, side(r, which));
+      org[i] = which;
+    });
+    ds = next;
+    origin = org;
+    scheduleRecolor();
+  }
+
   /** Back to an undecided conflict. */
   function reset(i: number) {
     if (!ds) return;
@@ -389,6 +439,7 @@
     const next = { ...origin };
     delete next[i];
     origin = next;
+    scheduleRecolor();
   }
 
   // --- what is on screen -----------------------------------------------------
@@ -527,16 +578,13 @@
   // how the grammar's state is carried across it.
   let recolorTimer: number | null = null;
   function scheduleRecolor() {
+    docGen++; // the session in hand no longer describes the document
     if (recolorTimer !== null) clearTimeout(recolorTimer);
     recolorTimer = window.setTimeout(() => {
       recolorTimer = null;
       void openResult();
     }, 250);
   }
-
-  /** Cap on the token map: keyed by text and never forgetting, it would otherwise
-   *  accumulate every intermediate version of every edited line. */
-  const TOKEN_CAP = 20_000;
 
   // One colouring session per side. A grammar is a state machine, so a line is
   // coloured from the lines before it: each side is a session over its whole
@@ -545,6 +593,11 @@
   let oursSyntax: SyntaxSession | null = null;
   let resultSyntax: SyntaxSession | null = null;
   let painted = "";
+  /** Bumped by every change to the result document, and recorded by the session
+   *  opened over it. An answer from a session older than the document is thrown
+   *  away rather than painted onto lines it does not describe. */
+  let docGen = 0;
+  let resultGen = -1;
 
   /** One side of the merge, as its own file: the lines each region contributes,
    *  in order — the same order the pane draws them in. */
@@ -569,6 +622,8 @@
       openSyntax(sideText("theirs"), lang, dark),
       openSyntax(sideText("ours"), lang, dark),
     ]);
+    tokTheirs = [];
+    tokOurs = [];
     painted = "";
     colourWindow();
   }
@@ -576,12 +631,15 @@
     const lang = langForFile(data?.name ?? "");
     if (!lang || !ds) return;
     const dark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+    const gen = docGen; // the document this session describes
     resultSyntax?.close();
     resultSyntax = await openSyntax(
       ds.doc.regions.flatMap((r) => r.lines).join("\n"),
       lang,
       dark,
     );
+    resultGen = gen;
+    tokResult = [];
     painted = "";
     colourWindow();
   }
@@ -617,28 +675,24 @@
     const key = `${t0}|${o0}|${r0}`;
     if (key === painted) return;
     painted = key;
-    const texts = {
-      theirs: sideLines("theirs"),
-      ours: sideLines("ours"),
-      result: ds?.doc.regions.flatMap((r) => r.lines) ?? [],
-    };
     const ask = (s: SyntaxSession | null, w: [number, number] | null) =>
       s && w ? s.window(w[0], w[1] - w[0] + 1) : Promise.resolve(null);
+    const gen = docGen;
     void Promise.all([
       ask(theirsSyntax, t0),
       ask(oursSyntax, o0),
-      ask(resultSyntax, r0),
+      ask(resultSyntax, resultGen === gen ? r0 : null),
     ]).then(([tr, or, rr]) => {
-      const map = new Map(tokens);
-      if (map.size > TOKEN_CAP) map.clear(); // it refills from what is on screen
-      const merge = (runs: TokenRun[][] | null, w: [number, number] | null, lines: string[]) => {
-        if (!runs || !w) return;
-        runs.forEach((run, k) => map.set(lines[w[0] + k] ?? "", run));
+      const put = (into: Toks, runs: TokenRun[][] | null, w: [number, number] | null): Toks => {
+        if (!runs || !w) return into;
+        const next = into.slice();
+        runs.forEach((run, k) => (next[w[0] + k] = run));
+        return next;
       };
-      merge(tr, t0, texts.theirs);
-      merge(or, o0, texts.ours);
-      merge(rr, r0, texts.result);
-      tokens = map;
+      tokTheirs = put(tokTheirs, tr, t0);
+      tokOurs = put(tokOurs, or, o0);
+      // The document may have moved on while the worker was answering.
+      if (gen === docGen) tokResult = put(tokResult, rr, r0);
     });
   }
   $effect(() => {
@@ -675,7 +729,7 @@
 </script>
 
 <!-- Read-only pane content: mark, line number, coloured code. -->
-{#snippet pane(lines: string[], from: number, kind: string, top = 0)}
+{#snippet pane(lines: string[], toks: Toks, base: number, kind: string, top = 0)}
   {@const win = windowOf(top, lines.length)}
   {@const first = win.first}
   {@const last = win.last}
@@ -686,9 +740,9 @@
   {/if}
   {#each lines.slice(first, last + 1) as line, k}
     <div class="line k-{kind}"><span class="mk">{MARK[kind] ?? ""}</span><span class="ln"
-        >{from + first + k}</span
+        >{base + first + k + 1}</span
       ><span class="src"
-        >{#if tokens.get(line)}{#each tokens.get(line) ?? [] as run}<span
+        >{#if line && toks[base + first + k]}{#each colorParts(line, toks[base + first + k]) as run}<span
               style:color={run.color}>{run.content}</span>{/each}{:else}{line || " "}{/if}</span
       ></div>
   {/each}
@@ -741,6 +795,20 @@
       <span class="legend dim">
         <span class="chip add">+ kept</span><span class="chip del">− dropped</span><span
           class="chip vs">! conflict</span
+        >
+      </span>
+      <!-- The whole file from one side. p4 calls these "accept theirs" and
+           "accept yours"; without them, taking the depot version of a file with
+           twenty conflicts is twenty clicks. -->
+      <span class="whole">
+        <span class="dim">whole file:</span>
+        <button
+          title="Take {data.theirsLabel} for the ENTIRE file — every local change is dropped, auto-merged ones included (p4 'accept theirs'). Undoable with ctrl+z."
+          onclick={() => takeAll("theirs")}>◀ depot</button
+        >
+        <button
+          title="Keep {data.yoursLabel} for the ENTIRE file — nothing from {data.theirsLabel} comes in (p4 'accept yours'). Undoable with ctrl+z."
+          onclick={() => takeAll("ours")}>workspace ▶</button
         >
       </span>
       <!-- Navigation walks conflicts when there are any, otherwise the changes
@@ -799,10 +867,11 @@
             <div
               class="rgn"
               class:conflict={r.kind === "conflict"}
+              class:settled={origin[i] !== undefined}
               style="top:{tops[i]}px; height:{rows[i] * LH + (r.kind === 'conflict' ? TOOLBAR : 0)}px"
             >
               {#if r.kind === "conflict"}<div class="strip"></div>{/if}
-              {@render pane(side(r, "theirs"), starts[i].t, sideKind(r, "theirs"), tops[i] + (r.kind === "conflict" ? TOOLBAR : 0))}
+              {@render pane(side(r, "theirs"), tokTheirs, starts[i].t - 1, sideKind(r, "theirs", i), tops[i] + (r.kind === "conflict" ? TOOLBAR : 0))}
             </div>
           {/each}
         </div>
@@ -813,6 +882,7 @@
             <div
               class="rgn"
               class:conflict={r.kind === "conflict"}
+              class:settled={origin[i] !== undefined}
               class:on={flow.left}
               style="top:{tops[i]}px; height:{rows[i] * LH + (r.kind === 'conflict' ? TOOLBAR : 0)}px"
             >
@@ -832,7 +902,7 @@
             {rows}
             starts={starts.map((s) => s.m)}
             {kinds}
-            {tokens}
+            tokens={tokResult}
             lineHeight={LH}
             toolbarHeight={TOOLBAR}
             {toolbar}
@@ -846,6 +916,7 @@
             <div
               class="rgn"
               class:conflict={r.kind === "conflict"}
+              class:settled={origin[i] !== undefined}
               class:on={flow.right}
               style="top:{tops[i]}px; height:{rows[i] * LH + (r.kind === 'conflict' ? TOOLBAR : 0)}px"
             >
@@ -869,10 +940,11 @@
             <div
               class="rgn"
               class:conflict={r.kind === "conflict"}
+              class:settled={origin[i] !== undefined}
               style="top:{tops[i]}px; height:{rows[i] * LH + (r.kind === 'conflict' ? TOOLBAR : 0)}px"
             >
               {#if r.kind === "conflict"}<div class="strip"></div>{/if}
-              {@render pane(side(r, "ours"), starts[i].o, sideKind(r, "ours"), tops[i] + (r.kind === "conflict" ? TOOLBAR : 0))}
+              {@render pane(side(r, "ours"), tokOurs, starts[i].o - 1, sideKind(r, "ours", i), tops[i] + (r.kind === "conflict" ? TOOLBAR : 0))}
             </div>
           {/each}
         </div>
@@ -1108,6 +1180,14 @@
       inset 0 1px 0 rgba(224, 85, 90, 0.55),
       inset 0 -1px 0 rgba(224, 85, 90, 0.55);
   }
+  /* Decided: the rules stay, so the block is still legible as one thing, but
+     they stop shouting. */
+  .rgn.conflict.settled {
+    background: transparent;
+    box-shadow:
+      inset 0 1px 0 rgba(140, 140, 140, 0.35),
+      inset 0 -1px 0 rgba(140, 140, 140, 0.35);
+  }
   .rgn.on {
     background: rgba(124, 196, 124, 0.12);
   }
@@ -1115,6 +1195,20 @@
   .strip {
     height: 24px;
     background: rgba(224, 85, 90, 0.1);
+  }
+  .rgn.settled .strip {
+    background: rgba(140, 140, 140, 0.08);
+  }
+  .whole {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding-left: 8px;
+    border-left: 1px solid var(--border, #333);
+  }
+  .whole button {
+    font-size: 11px;
+    padding: 1px 8px;
   }
   .arrow {
     color: #7cc47c;
