@@ -200,6 +200,7 @@ pub(crate) fn prepare_patch_merge(
         theirs: h.new.clone(),
         splice: Some((from, to)),
         rej,
+        patch_src: Some((patch_path.to_string(), hunk_index)),
     }))
 }
 

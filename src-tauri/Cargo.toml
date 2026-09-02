@@ -46,4 +46,5 @@ arboard = "3"
 flate2 = "1"
 # git blob shas for those sections' index lines (`git apply` verifies them).
 sha1_smol = "1"
+notify = "8.2.0"
 

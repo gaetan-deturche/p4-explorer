@@ -1,6 +1,7 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onDestroy, onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
+  import { listen } from "@tauri-apps/api/event";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { langForFile, openSyntax, type SyntaxSession, type TokenRun } from "$lib/syntax";
   import { rowWindow } from "$lib/rowwindow";
@@ -37,7 +38,7 @@
     type MergeAction,
   } from "$lib/mergedoc";
   import { colorParts } from "$lib/invisibles";
-  import { setClipboard } from "$lib/p4";
+  import { p4, setClipboard } from "$lib/p4";
   import type { MergeData, MergeRegion } from "$lib/p4";
 
   // Opened by the Rust `open_merge_window` command; the job itself is fetched by
@@ -59,6 +60,12 @@
   /** Region → where its text came from; also marks a conflict as settled. */
   let origin = $state<Record<number, string>>({});
   let current = $state(0); // which conflict the prev/next buttons are on
+  /** The workspace file this merge is built on has been written by something
+   *  else. It is one of the three inputs, so the whole comparison is stale —
+   *  and this window ends by writing its result over that file. */
+  let changedOnDisk = $state(false);
+  let reloading = $state(false);
+  let stopWatching: (() => void) | null = null;
   /** A pane's colouring: runs per line, sparse — a line not yet asked for has
    *  no entry and renders uncoloured. */
   type Toks = (TokenRun[] | undefined)[];
@@ -572,10 +579,10 @@
     await getCurrentWindow().close();
   }
 
-  // Tokens are keyed by line TEXT, so a line typed into the result pane has no
-  // entry and loses its colour. The result's session is reopened after an edit
-  // rather than per keystroke: it is the text that changed, and the session is
-  // how the grammar's state is carried across it.
+  // An edit moves the lines the colouring was asked about, so the result's
+  // session no longer describes the document. Reopened after the edit rather
+  // than per keystroke — and until it is, `docGen` keeps the stale answers off
+  // the screen: no colour for a moment beats the wrong one.
   let recolorTimer: number | null = null;
   function scheduleRecolor() {
     docGen++; // the session in hand no longer describes the document
@@ -725,7 +732,55 @@
     } catch (e) {
       error = String(e);
     }
+    if (!data?.target) return;
+    const label = getCurrentWindow().label;
+    void p4.watchFile(label, data.target).catch(() => {});
+    // Unlike the diff window there is nothing to compare against: the merge is
+    // built from three inputs and holds no copy of the file as it stood. Any
+    // write to it is worth saying, including one that changed nothing — the
+    // cost of a false alarm here is a button the user need not press.
+    stopWatching = await listen("file-on-disk-changed", () => (changedOnDisk = true));
   });
+
+  onDestroy(() => {
+    stopWatching?.();
+    void p4.unwatchFile(getCurrentWindow().label).catch(() => {});
+  });
+
+  /** Build the merge again from the file as it now stands.
+   *
+   *  Everything settled in this window goes: the file is one of the three
+   *  inputs, so a change to it invalidates the comparison rather than one pane
+   *  of it. That is why it is a button and not something that happens. */
+  async function reloadMerge() {
+    reloading = true;
+    try {
+      await p4.mergeReload(id);
+      data = await invoke<MergeData>("merge_data", { id });
+      ds = singleCursor(
+        {
+          regions: data.regions.map((r, i) => ({
+            region: i,
+            kind: r.kind === "conflict" ? "vs" : r.kind === "same" ? "" : "add",
+            conflict: r.kind === "conflict",
+            lines: r.kind === "conflict" ? [] : r.lines.slice(),
+          })),
+        },
+        { region: 0, line: 0, col: 0 },
+      );
+      hist = emptyHistory();
+      origin = {};
+      current = 0;
+      changedOnDisk = false;
+      void openSides();
+      void openResult();
+      setTimeout(() => goTo(0), 0);
+    } catch (e) {
+      error = String(e);
+    } finally {
+      reloading = false;
+    }
+  }
 </script>
 
 <!-- Read-only pane content: mark, line number, coloured code. -->
@@ -833,6 +888,23 @@
       </button>
     {/if}
   </div>
+
+  <!-- The file this merge is built on was written by something else. Saving now
+       would put a merge of the OLD file over the new one, so this says so
+       before the Save button is the thing that finds out. -->
+  {#if changedOnDisk}
+    <div class="stale">
+      <span>
+        <b>{data?.name}</b> has changed on disk since this merge was prepared — saving would
+        overwrite that change with a merge of the older file.
+      </span>
+      <span class="grow"></span>
+      <button disabled={reloading} onclick={reloadMerge}>
+        {reloading ? "Rebuilding…" : "Rebuild from the file (loses your choices)"}
+      </button>
+      <button disabled={reloading} onclick={() => (changedOnDisk = false)}>Ignore</button>
+    </div>
+  {/if}
 
   {#if error}
     <div class="err mono">{error}</div>
@@ -1209,6 +1281,23 @@
   .whole button {
     font-size: 11px;
     padding: 1px 8px;
+  }
+  .stale {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    font-size: 12px;
+    line-height: 1.4;
+    color: #f0c674;
+    background: color-mix(in srgb, #f0c674 12%, transparent);
+    border-bottom: 1px solid color-mix(in srgb, #f0c674 40%, transparent);
+  }
+  .stale button {
+    font-size: 11px;
+    padding: 1px 8px;
+    flex: none;
   }
   .arrow {
     color: #7cc47c;

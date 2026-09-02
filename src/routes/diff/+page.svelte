@@ -8,8 +8,9 @@
   //! arithmetic pass both windows use, and the right side is editable exactly like
   //! a merge result — which is what makes "fix it while you are looking at it"
   //! possible on the workspace file.
-  import { onMount } from "svelte";
+  import { onDestroy, onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
+  import { listen } from "@tauri-apps/api/event";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { diffLines, lineEndings, lineKey, type DiffRow } from "$lib/linediff";
   import { endingLabel, renderLine } from "$lib/invisibles";
@@ -491,6 +492,12 @@
   let saving = $state(false);
   let error = $state("");
   let loading = $state(true);
+  /** The right side as it last stood ON DISK — what was read when the window
+   *  opened, and what it wrote when it saved. Comparing against this is the only
+   *  test that cannot mistake the window's own save, or a touch that changed
+   *  nothing, for someone else's edit. */
+  let diskText = "";
+  let changedOnDisk = $state(false);
   /** A pane's colouring: runs per line, sparse — a line not yet asked for has
    *  no entry and renders uncoloured. */
   type Toks = (TokenRun[] | undefined)[];
@@ -840,6 +847,8 @@ initSplit(leftText.trim() === "");
       const text = docText(ds.doc);
       const at = absoluteLine();
       await writeLocalFile(rightPath, text);
+      diskText = text; // ours, so the watcher's event about it is not news
+      changedOnDisk = false;
       dirty = false;
       // The file on disk is the new right side, so the diff is recomputed against
       // it: blocks that were edited into agreement stop being changes. The save is
@@ -862,10 +871,10 @@ initSplit(leftText.trim() === "");
   function base(p: string): string {
     return p.split(/[\\/]/).pop() ?? p;
   }
-  // Tokens are keyed by line TEXT, so a line you just typed has no entry and
-  // renders with no colour at all. The session is reopened after an edit rather
-  // than per keystroke: it is the text that changed, and a session is how the
-  // grammar's state is carried across it.
+  // An edit moves the lines the colouring was asked about, so the session no
+  // longer describes the document. Reopened after the edit rather than per
+  // keystroke — and until it is, `docGen` keeps the stale answers off the
+  // screen: no colour for a moment beats the wrong one.
   let recolorTimer: number | null = null;
   function scheduleRecolor() {
     docGen++; // the session in hand no longer describes the document
@@ -987,6 +996,7 @@ initSplit(leftText.trim() === "");
         invoke<string>("read_text_file", { path: rightPath }),
       ]);
       leftText = l;
+      diskText = r;
       rebuild(r, { region: 0, line: 0, col: 0 });
       loading = false;
       void openLeft();
@@ -996,7 +1006,44 @@ initSplit(leftText.trim() === "");
       error = String(e);
       loading = false;
     }
+    // Only the workspace file can change underneath us; a printed revision is a
+    // temp file nothing else writes.
+    if (!editable) return;
+    const label = getCurrentWindow().label;
+    void p4.watchFile(label, rightPath).catch(() => {});
+    stopWatching = await listen("file-on-disk-changed", () => {
+      void invoke<string>("read_text_file", { path: rightPath })
+        .then((now) => {
+          if (now !== diskText) changedOnDisk = true;
+        })
+        .catch(() => {});
+    });
   });
+
+  // Not the value onMount returns: this one is async, so Svelte gets a promise
+  // and never calls what it resolves to.
+  let stopWatching: (() => void) | null = null;
+  onDestroy(() => {
+    stopWatching?.();
+    void p4.unwatchFile(getCurrentWindow().label).catch(() => {});
+  });
+
+  /** Take the file as it now stands. Whatever was typed here is lost, which is
+   *  why nothing does this on its own. */
+  async function reloadFromDisk() {
+    try {
+      const text = await invoke<string>("read_text_file", { path: rightPath });
+      diskText = text;
+      changedOnDisk = false;
+      const at = absoluteLine();
+      rebuild(text, at);
+      hist = emptyHistory();
+      dirty = false;
+      void openRight();
+    } catch (e) {
+      error = String(e);
+    }
+  }
 </script>
 
 <!-- Read-only side: mark, line number, coloured code — as in the resolve window. -->
@@ -1110,6 +1157,26 @@ initSplit(leftText.trim() === "");
 
   {#if note}
     <div class="warn">{note}</div>
+  {/if}
+
+  <!-- Something else wrote the file this window is showing. Offered, never
+       done on its own: reloading throws away whatever was typed here, and even
+       with nothing typed, a diff rearranging itself while it is being read is
+       not a kindness. -->
+  {#if changedOnDisk}
+    <div class="warn stale">
+      <span>
+        This file has changed on disk since the window opened.
+        {#if dirty}Reloading discards your unsaved edits.{/if}
+      </span>
+      <span class="grow"></span>
+      <button onclick={reloadFromDisk}>
+        {dirty ? "Reload, discarding my edits" : "Reload"}
+      </button>
+      <button onclick={() => (changedOnDisk = false)} title="Keep showing what the window has">
+        Ignore
+      </button>
+    </div>
   {/if}
 
   {#if error}
@@ -1414,6 +1481,16 @@ initSplit(leftText.trim() === "");
     color: #f0c674;
     background: color-mix(in srgb, #f0c674 12%, transparent);
     border-bottom: 1px solid color-mix(in srgb, #f0c674 40%, transparent);
+  }
+  .stale {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .stale button {
+    font-size: 11px;
+    padding: 1px 8px;
+    flex: none;
   }
   .err {
     padding: 10px;

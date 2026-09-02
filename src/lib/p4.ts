@@ -700,6 +700,12 @@ export const p4 = {
   stashPatch: (id: number) => g<string>("stash_patch", { id }),
   stashDelete: (id: number) => g<void>("stash_delete", { id }),
   stashRename: (id: number, name: string) => g<void>("stash_rename", { id, name }),
+  /** Tell the backend to watch `path` for this window and emit
+   *  `file-on-disk-changed` when something touches it. One watch per window. */
+  watchFile: (label: string, path: string) => g<void>("watch_file", { label, path }),
+  unwatchFile: (label: string) => g<void>("unwatch_file", { label }),
+  /** Prepare a merge again from the file as it stands now, under the same id. */
+  mergeReload: (id: string) => g<void>("merge_reload", { id }),
   /** Depot files under `path` that p4 says still need resolving. */
   resolveNeeded: (conn: P4Conn, path = "") => g<string[]>("resolve_needed", { conn, path }),
   /** Prepare a three-way merge for a p4 resolve conflict; returns the merge id. */

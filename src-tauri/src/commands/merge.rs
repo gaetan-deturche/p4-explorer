@@ -31,6 +31,10 @@ pub(crate) struct MergeJob {
     pub(crate) splice: Option<(usize, usize)>,
     /// A `.rej` to prune the resolved hunk from, with that hunk's raw text.
     pub(crate) rej: Option<(String, String)>,
+    /// What this job was prepared FROM, when it came from a patch: the patch
+    /// file and the hunk. Kept so the job can be prepared again — a merge whose
+    /// file changed on disk has to be rebuilt from the file, not patched up.
+    pub(crate) patch_src: Option<(String, usize)>,
 }
 
 fn registry() -> &'static Mutex<HashMap<String, MergeJob>> {
@@ -57,6 +61,38 @@ pub struct MergeData {
     pub yours_label: String,
     pub regions: Vec<Region>,
     pub conflicts: usize,
+}
+
+/// Prepare `id` again from the file as it stands now, keeping the same id so
+/// the window that holds it can simply re-read its data.
+///
+/// This is what "reload" means for a merge: the workspace file is one of the
+/// three inputs, so a change to it invalidates the whole comparison, not just
+/// one pane. Whatever was settled in the window is lost — which is why nothing
+/// here happens without the user asking for it.
+#[tauri::command]
+pub async fn merge_reload(id: String) -> Result<(), String> {
+    let (kind, conn, depot, src) = {
+        let reg = registry().lock().unwrap();
+        let job = reg.get(&id).ok_or("this merge is no longer available")?;
+        (job.kind.clone(), job.conn.clone(), job.depot.clone(), job.patch_src.clone())
+    };
+    let fresh = tauri::async_runtime::spawn_blocking(move || match (kind.as_str(), src) {
+        ("patch", Some((path, hunk))) => {
+            super::patch::prepare_patch_merge(&conn, &path, &depot, hunk)
+        }
+        ("patch", None) => Err("this merge cannot be rebuilt: its patch is not recorded".into()),
+        _ => prepare_resolve_merge(&conn, &depot),
+    })
+    .await
+    .map_err(|e| format!("merge-reload task failed: {e}"))??;
+
+    // Move the fresh job onto the id the window already holds, so nothing has to
+    // be re-navigated; the temporary id is dropped with it.
+    let mut reg = registry().lock().unwrap();
+    let job = reg.remove(&fresh).ok_or("the rebuilt merge went missing")?;
+    reg.insert(id, job);
+    Ok(())
 }
 
 /// The prepared merge for `id` — what the resolve window renders.
@@ -141,6 +177,7 @@ pub(crate) fn prepare_resolve_merge(conn: &P4Conn, depot_file: &str) -> Result<S
         theirs,
         splice: None,
         rej: None,
+        patch_src: None,
     }))
 }
 
