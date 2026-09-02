@@ -21,7 +21,7 @@
 //! submitted otherwise. `archiveChange` is only Swarm's copy of the live shelf, so
 //! it is not what a version should be read from.
 
-use super::diffwin::{print_side, DiffPair};
+use super::diffwin::{print_side, side_tag, DiffPair};
 use crate::p4::{self, P4Conn};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -697,8 +697,10 @@ pub async fn diff_pair_versions(
         let sb = resolve(&conn, &b, false)?;
         let spec_a = sa.specs.get(&depot_file).cloned().unwrap_or_default();
         let spec_b = sb.specs.get(&depot_file).cloned().unwrap_or_default();
-        let left = print_side(&conn, &spec_a, &format!("{name}-a{}", a.change))?;
-        let right = print_side(&conn, &spec_b, &format!("{name}-b{}", b.change))?;
+        // Tagged through the shared helper so the extension stays last: the
+        // window reads the language off the file name.
+        let left = print_side(&conn, &spec_a, &side_tag(&name, &format!("a{}", a.change)))?;
+        let right = print_side(&conn, &spec_b, &side_tag(&name, &format!("b{}", b.change)))?;
         Ok(DiffPair {
             left,
             right,

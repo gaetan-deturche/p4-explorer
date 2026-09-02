@@ -63,6 +63,16 @@ pub(crate) fn print_side(conn: &P4Conn, spec: &str, file_tag: &str) -> Result<St
     Ok(tmp_s)
 }
 
+/// The temp-file name for one side of a diff: the file's own name with the
+/// revision label tagged in, sanitized for the filesystem.
+///
+/// It goes through one helper because the EXTENSION has to survive: the diff
+/// window reads the language off the file name, so a side named
+/// `Foo.cpp-a202011` is a file of no known type and renders uncoloured.
+pub(crate) fn side_tag(name: &str, label: &str) -> String {
+    sane(&tag_rev(name, label))
+}
+
 fn sane(s: &str) -> String {
     s.replace(|c: char| !c.is_alphanumeric() && c != '.' && c != '-' && c != '_' && c != '#', "_")
 }
@@ -84,6 +94,26 @@ fn tag_rev(name: &str, label: &str) -> String {
     }
 }
 
+#[cfg(test)]
+mod tag_tests {
+    use super::*;
+
+    /// The window reads the language off the file name, so whatever a side is
+    /// tagged with, the extension has to stay last.
+    #[test]
+    fn the_extension_survives_the_revision_tag() {
+        assert_eq!(side_tag("Foo.cpp", "33"), "Foo#33.cpp");
+        assert_eq!(side_tag("Foo.cpp", "a202011"), "Foo#a202011.cpp");
+        assert_eq!(side_tag("Foo.cpp", "shelf-202011"), "Foo#shelf-202011.cpp");
+        // No label (the empty left side of an added file) leaves the name alone.
+        assert_eq!(side_tag("Foo.cpp", ""), "Foo.cpp");
+        // No extension: nothing to protect, the tag just goes on the end.
+        assert_eq!(side_tag("Makefile", "7"), "Makefile#7");
+        // Characters a file name cannot hold are replaced, `#` and `.` are not.
+        assert_eq!(side_tag("a b:c.cpp", "1"), "a_b_c#1.cpp");
+    }
+}
+
 /// A revision vs its predecessor (history/changelist details). Rev 1 (added)
 /// diffs against an empty left side.
 #[tauri::command]
@@ -91,8 +121,8 @@ pub async fn diff_pair_rev(conn: P4Conn, depot_file: String, rev: i64) -> Result
     tauri::async_runtime::spawn_blocking(move || {
         let name = base_name(&depot_file).to_string();
         let prev = if rev > 1 { format!("{depot_file}#{}", rev - 1) } else { String::new() };
-        let left = print_side(&conn, &prev, &sane(&tag_rev(&name, &if rev > 1 { (rev - 1).to_string() } else { String::new() })))?;
-        let right = print_side(&conn, &format!("{depot_file}#{rev}"), &sane(&tag_rev(&name, &rev.to_string())))?;
+        let left = print_side(&conn, &prev, &side_tag(&name, &if rev > 1 { (rev - 1).to_string() } else { String::new() }))?;
+        let right = print_side(&conn, &format!("{depot_file}#{rev}"), &side_tag(&name, &rev.to_string()))?;
         Ok(DiffPair {
             left,
             right,
@@ -154,7 +184,7 @@ pub async fn diff_pair_shelved(
             &base,
             &sane(&tag_rev(&name, &if based { rev.to_string() } else { String::new() })),
         )?;
-        let right = print_side(&conn, &format!("{depot_file}@={change}"), &sane(&tag_rev(&name, &format!("shelf-{change}"))))?;
+        let right = print_side(&conn, &format!("{depot_file}@={change}"), &side_tag(&name, &format!("shelf-{change}")))?;
         Ok(DiffPair {
             left,
             right,
@@ -218,7 +248,7 @@ pub async fn diff_pair_local(conn: P4Conn, depot_file: String) -> Result<DiffPai
         } else {
             format!("{depot_file}#{base_rev}")
         };
-        let left = print_side(&conn, &spec, &sane(&tag_rev(&name, &base_rev)))?;
+        let left = print_side(&conn, &spec, &side_tag(&name, &base_rev))?;
         Ok(DiffPair {
             left,
             right: local,
