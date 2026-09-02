@@ -131,8 +131,23 @@ function provisional(): ReviewRow[] {
     if (q && !String(r.id).includes(q) && !r.description.toLowerCase().includes(q)) continue;
     out.push(r);
   }
-  return out.sort((a, b) => b.id - a.id);
+  // Same order as the real answer, so the provisional paint does not visibly
+  // rearrange itself when the round-trip lands.
+  return out.sort(byRecency);
 }
+/** Newest first, on the time the list SHOWS.
+ *
+ *  Swarm pages its reviews by id, so what comes back is id-ordered — which next
+ *  to a column of "18 min ago / 16 min ago / 2h ago" reads as no order at all.
+ *  Sorting has to happen on every path out of `rows`, or ticking a filter
+ *  silently re-orders the list: the merged view sorted, the narrowed one
+ *  returned Swarm's own order, and the two looked like different lists.
+ *
+ *  `created` is the fallback for a row nothing has touched since. */
+function byRecency(a: ReviewRow, b: ReviewRow): number {
+  return (b.updated || b.created) - (a.updated || a.created);
+}
+
 function fingerprint(): string {
   return [
     [...states].sort().join(","),
@@ -153,16 +168,20 @@ export const reviews = {
    *  shelves. The state filter deliberately does not apply to them — a shelf has
    *  no review state, and the checkbox is the control that governs them. */
   get rows() {
-    if (onlyInReview || shelfRows.length === 0) return rows;
     const q = search.trim().toLowerCase();
-    const keep = shelfRows.filter((r) => {
-      if (user && role !== "reviewer" && r.author !== user) return false;
-      if (user && role === "reviewer") return false; // nobody reviews a bare shelf
-      if (q && !String(r.change).includes(q) && !r.description.toLowerCase().includes(q)) return false;
-      return true;
-    });
-    if (!keep.length) return rows;
-    return [...rows, ...keep].sort((a, b) => (b.updated || b.created) - (a.updated || a.created));
+    const keep =
+      onlyInReview || shelfRows.length === 0
+        ? []
+        : shelfRows.filter((r) => {
+            if (user && role !== "reviewer" && r.author !== user) return false;
+            if (user && role === "reviewer") return false; // nobody reviews a bare shelf
+            if (q && !String(r.change).includes(q) && !r.description.toLowerCase().includes(q))
+              return false;
+            return true;
+          });
+    // One exit, one order: what is on screen does not depend on which filters
+    // happen to be on.
+    return [...rows, ...keep].sort(byRecency);
   },
   get loading() {
     return loading;
