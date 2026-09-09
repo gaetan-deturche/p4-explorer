@@ -26,6 +26,8 @@
     toolbar,
     showInvisibles = false,
     hotOf,
+    findsOf,
+    currentOf,
     onAction,
   }: {
     /** The document and every cursor in it. Selections live here too, so the
@@ -52,6 +54,11 @@
      *  its blocks carry the ranges). Highlighting it keeps a one-character edit
      *  from reading as a whole changed line. */
     hotOf?: (region: number, line: number) => readonly [number, number] | null;
+    /** Search matches on a line, by its ABSOLUTE index in this pane's file —
+     *  the same index `tokens` is keyed by. The host owns the search; this pane
+     *  only draws what it is handed. */
+    findsOf?: (abs: number) => readonly (readonly [number, number])[] | undefined;
+    currentOf?: (abs: number) => readonly [number, number] | null;
     onAction: (a: MergeAction) => void;
   } = $props();
 
@@ -485,10 +492,14 @@
   {#each renderLine(line, tokens[abs], {
     invisibles: showInvisibles,
     hot: hotOf?.(region, at) ?? null,
+    finds: findsOf?.(abs),
+    current: currentOf?.(abs) ?? null,
   }) as seg}<span
       style:color={seg.color}
       class:ghost={seg.ghost}
-      class:hot={seg.hot}>{seg.text}</span
+      class:hot={seg.hot}
+      class:found={seg.found}
+      class:current={seg.current}>{seg.text}</span
     >{/each}
 {/snippet}
 
@@ -709,6 +720,15 @@
   }
   .k-del .mk {
     color: #d9873a;
+  }
+  /* A match keeps its syntax colour and takes a wash behind it; the one the
+     find bar is ON takes a stronger one. */
+  .found {
+    background: rgba(232, 192, 90, 0.25);
+    border-radius: 2px;
+  }
+  .current {
+    background: rgba(232, 192, 90, 0.6);
   }
   .k-vs {
     background: rgba(224, 85, 90, 0.2);

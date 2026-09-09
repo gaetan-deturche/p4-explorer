@@ -14,6 +14,8 @@
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { diffLines, lineEndings, lineKey, type DiffRow } from "$lib/linediff";
   import { endingLabel, renderLine } from "$lib/invisibles";
+  import FindBar from "$lib/components/FindBar.svelte";
+  import { findHits, rangesByLine, sortByRow, stepHit, type Hit } from "$lib/find";
   import { rowWindow } from "$lib/rowwindow";
   import { cacheGet, cacheSet } from "$lib/store.svelte";
   import { langForFile, openSyntax, type SyntaxSession, type TokenRun } from "$lib/syntax";
@@ -680,8 +682,126 @@ initSplit(leftText.trim() === "");
         };
       }),
   );
+  // --- find ------------------------------------------------------------------
+  // The webview's own Ctrl+F searches the DOM, which holds sixty rows out of
+  // however many the file has. This searches both panes' LINES and orders the
+  // matches by the row they are drawn on, so "next" means next on screen even
+  // though the two sides are separate files.
+  let finding = $state(false);
+  let query = $state("");
+  let caseSensitive = $state(false);
+  let hitAt = $state(-1);
+
+  /** Where a line of one pane is drawn, or null when it is in no block — a
+   *  re-diff can move a line out from under a match. */
+  function yOfHit(h: Hit): number | null {
+    const baseOf = (i: number) => (h.pane === 0 ? starts[i].l : starts[i].r) - 1;
+    const lenOf = (i: number) =>
+      h.pane === 0 ? blocks[i].left.length : (ds?.doc.regions[i]?.lines.length ?? 0);
+    // The last block that starts at or before the line, then back to the one
+    // that actually holds it: empty blocks share their neighbour's start.
+    let lo = 0;
+    let hi = blocks.length - 1;
+    let first = blocks.length; // first block starting AFTER the line
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (baseOf(mid) > h.line) {
+        first = mid;
+        hi = mid - 1;
+      } else lo = mid + 1;
+    }
+    for (let i = first - 1; i >= 0; i--) {
+      const b = baseOf(i);
+      const len = lenOf(i);
+      if (h.line - b < len) return tops[i] + (h.line - b) * LH;
+      if (len > 0) break; // an earlier block ends even sooner
+    }
+    return null;
+  }
+
+  const hits = $derived.by<Hit[]>(() => {
+    if (!finding || !query) return [];
+    const left = blocks.flatMap((b) => b.left);
+    const right = ds?.doc.regions.flatMap((r) => r.lines) ?? [];
+    return sortByRow(findHits([left, right], query, caseSensitive), yOfHit);
+  });
+  const leftHits = $derived(rangesByLine(hits, 0));
+  const rightHits = $derived(rangesByLine(hits, 1));
+  const currentHit = $derived(hitAt >= 0 && hitAt < hits.length ? hits[hitAt] : null);
+  /** The selected match, if it is on this line of this pane. */
+  function currentOn(pane: number, line: number): readonly [number, number] | null {
+    const c = currentHit;
+    return c && c.pane === pane && c.line === line ? [c.start, c.end] : null;
+  }
+  function openFind() {
+    finding = true;
+    hitAt = -1;
+  }
+  function closeFind() {
+    finding = false;
+    query = "";
+    hitAt = -1;
+  }
+  function stepFind(delta: number) {
+    hitAt = stepHit(hits.length, hitAt, delta);
+    goToHit(hitAt);
+  }
+  function goToHit(i: number) {
+    hitAt = i;
+    const h = hits[i];
+    if (!h || !scrollEl) return;
+    const y = yOfHit(h);
+    if (y !== null) scrollEl.scrollTop = Math.max(0, y - scrollEl.clientHeight / 3);
+  }
+  // A new query starts from the top and lands on the first match without a
+  // second keystroke — but ONLY when the query itself changed. Reacting to the
+  // hits would re-run on every edit (they are derived from the document) and
+  // drag the selection back to the first match mid-typing; and reading `hitAt`
+  // here while writing it is a loop, so the first match is named outright.
+  let lastQuery = "";
+  let lastCase = false;
+  $effect(() => {
+    const q = query;
+    const cs = caseSensitive;
+    if (q === lastQuery && cs === lastCase) return;
+    lastQuery = q;
+    lastCase = cs;
+    if (hits.length) goToHit(0);
+    else hitAt = -1;
+  });
+  /** One tick per match, alongside the change ticks. Indices continue past the
+   *  blocks so a click can tell a match from a change. */
+  const findMarks = $derived<Mark[]>(
+    hits.map((h, i) => ({
+      pct: total ? (yOfHit(h) ?? 0) / total : 0,
+      kind: "mod" as const, // unused: `color` wins
+      color: "#e8c05a",
+      title: `Match ${i + 1} of ${hits.length}`,
+      index: blocks.length + i,
+    })),
+  );
+  function onPickMark(i: number) {
+    if (i < blocks.length) jumpTo(i);
+    else goToHit(i - blocks.length);
+  }
+
   /** Alt+Up / Alt+Down step through the changes from anywhere in the window. */
   function onWindowKey(e: KeyboardEvent) {
+    if ((e.ctrlKey || e.metaKey) && (e.key === "f" || e.key === "F")) {
+      e.preventDefault(); // the webview's own find would only see the drawn rows
+      openFind();
+      return;
+    }
+    if (finding && e.key === "F3") {
+      e.preventDefault();
+      stepFind(e.shiftKey ? -1 : 1);
+      return;
+    }
+    if (finding && e.key === "Escape") {
+      e.preventDefault();
+      closeFind();
+      return;
+    }
     // Whoever handled it first wins: the editor claims alt+shift+arrows for its
     // extra carets, and preventDefault does not stop the event bubbling to here.
     if (e.defaultPrevented) return;
@@ -1067,10 +1187,17 @@ initSplit(leftText.trim() === "");
     <div class="line k-{kind}"><span class="mk">{kind === "del" ? "-" : ""}</span><span class="ln"
         >{base + first + k + 1}</span
       ><span class="src"
-        >{#each renderLine(line, tokLeft[base + first + k], { invisibles, hot: hots[first + k] }) as seg}<span
+        >{#each renderLine(line, tokLeft[base + first + k], {
+            invisibles,
+            hot: hots[first + k],
+            finds: leftHits.get(base + first + k),
+            current: currentOn(0, base + first + k),
+          }) as seg}<span
             style:color={seg.color}
             class:ghost={seg.ghost}
-            class:hot={seg.hot}>{seg.text}</span
+            class:hot={seg.hot}
+            class:found={seg.found}
+            class:current={seg.current}>{seg.text}</span
           >{:else}<span> </span>{/each}</span
       ></div>
   {/each}
@@ -1154,6 +1281,17 @@ initSplit(leftText.trim() === "");
       </button>
     {/if}
   </div>
+
+  {#if finding}
+    <FindBar
+      bind:query
+      bind:caseSensitive
+      index={hitAt}
+      total={hits.length}
+      onStep={stepFind}
+      onClose={closeFind}
+    />
+  {/if}
 
   {#if note}
     <div class="warn">{note}</div>
@@ -1257,6 +1395,8 @@ initSplit(leftText.trim() === "");
             tokens={tokRight}
             showInvisibles={invisibles}
             hotOf={(region, line) => blocks[region]?.rhot[line] ?? null}
+            findsOf={(abs) => rightHits.get(abs)}
+            currentOf={(abs) => currentOn(1, abs)}
             lineHeight={LH}
             toolbarHeight={TOOLBAR}
             toolbar={noToolbar}
@@ -1295,7 +1435,12 @@ initSplit(leftText.trim() === "");
         </div>
       {/if}
       {#if marks.length}
-        <OverviewRuler {marks} offsetRight={barWidth} onPick={jumpTo} onSeek={seek} />
+        <OverviewRuler
+          marks={findMarks.length ? [...marks, ...findMarks] : marks}
+          offsetRight={barWidth}
+          onPick={onPickMark}
+          onSeek={seek}
+        />
       {/if}
     </div>
     {#if target && showComments}
@@ -1447,6 +1592,16 @@ initSplit(leftText.trim() === "");
   }
   /* The part of the line that actually changed. Strong enough to find at a
      glance, weak enough to read the code through. */
+  /* A match keeps its syntax colour and takes a wash behind it; the one the
+     find bar is ON takes a stronger one, so stepping is visible without
+     reading the counter. */
+  .src :global(.found) {
+    background: rgba(232, 192, 90, 0.25);
+    border-radius: 2px;
+  }
+  .src :global(.current) {
+    background: rgba(232, 192, 90, 0.6);
+  }
   .src :global(.hot) {
     background: rgba(217, 135, 58, 0.3);
     border-radius: 2px;

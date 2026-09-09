@@ -15,6 +15,11 @@ export interface Seg {
   color?: string;
   ghost?: boolean;
   hot?: boolean;
+  /** Inside a search match. */
+  found?: boolean;
+  /** Inside the match the find bar is currently ON — the one Enter just moved
+   *  to, drawn differently from the others so "where am I" needs no counting. */
+  current?: boolean;
 }
 
 // Tab width, matching mergedoc's TAB_WIDTH and the panes' CSS tab-size. Declared
@@ -59,40 +64,69 @@ export function colorParts(
 export function renderLine(
   line: string,
   runs: { content: string; color?: string }[] | undefined,
-  opts: { invisibles?: boolean; hot?: readonly [number, number] | null } = {},
+  opts: {
+    invisibles?: boolean;
+    hot?: readonly [number, number] | null;
+    /** Search matches on this line, as character ranges. */
+    finds?: readonly (readonly [number, number])[];
+    /** The one of them the find bar is on, if it is on this line. */
+    current?: readonly [number, number] | null;
+  } = {},
   tab = TAB_WIDTH,
 ): Seg[] {
   const marks = !!opts.invisibles;
   const hot = opts.hot ?? null;
+  const finds = opts.finds ?? [];
+  const current = opts.current ?? null;
   const parts = colorParts(line, runs);
-  // Fast path: with neither marks nor a range there is nothing to split, and the
-  // panes render every line of the file on every pass — a character walk per line
-  // is not something to pay for a result identical to the input.
-  if (!marks && !hot) return parts.map((r) => ({ text: r.content, color: r.color }));
+  // Fast path: with nothing to split, the result is the input — and the panes
+  // render every line on every pass, so a character walk is not something to pay
+  // for that.
+  if (!marks && !hot && !finds.length && !current) {
+    return parts.map((r) => ({ text: r.content, color: r.color }));
+  }
   const out: Seg[] = [];
   let col = 0; // visual column, so a tab lands on a real stop
-  let src = 0; // source character index, so `hot` means what it says
-  const push = (text: string, color: string | undefined, ghost: boolean, isHot: boolean) => {
+  let src = 0; // source character index, so the ranges mean what they say
+  const within = (rs: readonly (readonly [number, number])[], i: number) =>
+    rs.some((r) => i >= r[0] && i < r[1]);
+  const push = (
+    text: string,
+    color: string | undefined,
+    ghost: boolean,
+    isHot: boolean,
+    found: boolean,
+    isCurrent: boolean,
+  ) => {
     const last = out[out.length - 1];
-    if (last && last.ghost === ghost && last.color === color && last.hot === isHot) {
+    if (
+      last &&
+      last.ghost === ghost &&
+      last.color === color &&
+      last.hot === isHot &&
+      last.found === found &&
+      last.current === isCurrent
+    ) {
       last.text += text;
     } else {
-      out.push({ text, color, ghost, hot: isHot });
+      out.push({ text, color, ghost, hot: isHot, found, current: isCurrent });
     }
   };
   for (const run of parts) {
     for (const ch of run.content) {
       const isHot = !!hot && src >= hot[0] && src < hot[1];
+      const isCurrent = !!current && src >= current[0] && src < current[1];
+      const found = isCurrent || within(finds, src);
       if (marks && ch === " ") {
-        push(SPACE_MARK, run.color, true, isHot);
+        push(SPACE_MARK, run.color, true, isHot, found, isCurrent);
         col++;
-      } else if (marks && ch === "	") {
+      } else if (marks && ch === "\t") {
         const width = tab - (col % tab);
-        push(TAB_MARK + " ".repeat(width - 1), run.color, true, isHot);
+        push(TAB_MARK + " ".repeat(width - 1), run.color, true, isHot, found, isCurrent);
         col += width;
       } else {
-        push(ch, run.color, false, isHot);
-        col += ch === "	" ? tab - (col % tab) : 1;
+        push(ch, run.color, false, isHot, found, isCurrent);
+        col += ch === "\t" ? tab - (col % tab) : 1;
       }
       src++;
     }

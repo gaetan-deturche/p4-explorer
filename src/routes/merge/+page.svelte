@@ -37,7 +37,9 @@
     type History,
     type MergeAction,
   } from "$lib/mergedoc";
-  import { colorParts } from "$lib/invisibles";
+  import { colorParts, renderLine } from "$lib/invisibles";
+  import FindBar from "$lib/components/FindBar.svelte";
+  import { findHits, rangesByLine, sortByRow, stepHit, type Hit } from "$lib/find";
   import { p4, setClipboard } from "$lib/p4";
   import type { MergeData, MergeRegion } from "$lib/p4";
 
@@ -501,6 +503,21 @@
   );
   /** Alt+Up / Alt+Down step through the changes from anywhere in the window. */
   function onWindowKey(e: KeyboardEvent) {
+    if ((e.ctrlKey || e.metaKey) && (e.key === "f" || e.key === "F")) {
+      e.preventDefault(); // the webview's own find would only see the drawn rows
+      openFind();
+      return;
+    }
+    if (finding && e.key === "F3") {
+      e.preventDefault();
+      stepFind(e.shiftKey ? -1 : 1);
+      return;
+    }
+    if (finding && e.key === "Escape") {
+      e.preventDefault();
+      closeFind();
+      return;
+    }
     // Whoever handled it first wins: the editor claims alt+shift+arrows for its
     // extra carets, and preventDefault does not stop the event bubbling to here.
     if (e.defaultPrevented) return;
@@ -509,6 +526,112 @@
     e.preventDefault();
     goTo(current + (e.key === "ArrowDown" ? 1 : -1));
   }
+  // --- find ------------------------------------------------------------------
+  // Panes 0/1/2 are depot, workspace and the result. The webview's own Ctrl+F
+  // sees only the drawn rows, so this searches the lines of all three and
+  // orders the matches by the row they land on.
+  let finding = $state(false);
+  let query = $state("");
+  let caseSensitive = $state(false);
+  let hitAt = $state(-1);
+
+  function paneLines(pi: number): string[] {
+    if (pi === 0) return sideLines("theirs");
+    if (pi === 1) return sideLines("ours");
+    return ds?.doc.regions.flatMap((r) => r.lines) ?? [];
+  }
+  /** Where a line of one pane is drawn, or null when no region holds it. */
+  function yOfHit(h: Hit): number | null {
+    const baseOf = (i: number) =>
+      (h.pane === 0 ? starts[i].t : h.pane === 1 ? starts[i].o : starts[i].m) - 1;
+    const lenOf = (i: number) =>
+      h.pane === 2
+        ? (ds?.doc.regions[i]?.lines.length ?? 0)
+        : side(regions[i], h.pane === 0 ? "theirs" : "ours").length;
+    let lo = 0;
+    let hi = regions.length - 1;
+    let first = regions.length; // first region starting AFTER the line
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (baseOf(mid) > h.line) {
+        first = mid;
+        hi = mid - 1;
+      } else lo = mid + 1;
+    }
+    for (let i = first - 1; i >= 0; i--) {
+      const len = lenOf(i);
+      if (h.line - baseOf(i) < len) {
+        const strip = regions[i].kind === "conflict" ? TOOLBAR : 0;
+        return tops[i] + strip + (h.line - baseOf(i)) * LH;
+      }
+      if (len > 0) break; // an earlier region ends even sooner
+    }
+    return null;
+  }
+
+  const hits = $derived.by<Hit[]>(() => {
+    if (!finding || !query) return [];
+    return sortByRow(
+      findHits([paneLines(0), paneLines(1), paneLines(2)], query, caseSensitive),
+      yOfHit,
+    );
+  });
+  const hitRanges = $derived([rangesByLine(hits, 0), rangesByLine(hits, 1), rangesByLine(hits, 2)]);
+  const currentHit = $derived(hitAt >= 0 && hitAt < hits.length ? hits[hitAt] : null);
+  function currentOn(pane: number, line: number): readonly [number, number] | null {
+    const c = currentHit;
+    return c && c.pane === pane && c.line === line ? [c.start, c.end] : null;
+  }
+  function openFind() {
+    finding = true;
+    hitAt = -1;
+  }
+  function closeFind() {
+    finding = false;
+    query = "";
+    hitAt = -1;
+  }
+  function stepFind(delta: number) {
+    goToHit(stepHit(hits.length, hitAt, delta));
+  }
+  function goToHit(i: number) {
+    hitAt = i;
+    const h = hits[i];
+    if (!h || !scrollEl) return;
+    const y = yOfHit(h);
+    if (y !== null) scrollEl.scrollTop = Math.max(0, y - scrollEl.clientHeight / 3);
+  }
+  // A new query starts from the top and lands on the first match without a
+  // second keystroke — but ONLY when the query itself changed. Reacting to the
+  // hits would re-run on every edit (they are derived from the document) and
+  // drag the selection back to the first match mid-typing; and reading `hitAt`
+  // here while writing it is a loop, so the first match is named outright.
+  let lastQuery = "";
+  let lastCase = false;
+  $effect(() => {
+    const q = query;
+    const cs = caseSensitive;
+    if (q === lastQuery && cs === lastCase) return;
+    lastQuery = q;
+    lastCase = cs;
+    if (hits.length) goToHit(0);
+    else hitAt = -1;
+  });
+  /** One tick per match, past the region ticks so a click can tell them apart. */
+  const findMarks = $derived<Mark[]>(
+    hits.map((h, i) => ({
+      pct: total ? (yOfHit(h) ?? 0) / total : 0,
+      kind: "mod" as const, // unused: `color` wins
+      color: "#e8c05a",
+      title: `Match ${i + 1} of ${hits.length}`,
+      index: regions.length + i,
+    })),
+  );
+  function onPickMark(i: number) {
+    if (i < regions.length) jumpTo(i);
+    else goToHit(i - regions.length);
+  }
+
   /** Scroll a region into view; conflicts also move the prev/next counter. */
   function jumpTo(i: number) {
     const at = conflicts.indexOf(i);
@@ -784,7 +907,7 @@
 </script>
 
 <!-- Read-only pane content: mark, line number, coloured code. -->
-{#snippet pane(lines: string[], toks: Toks, base: number, kind: string, top = 0)}
+{#snippet pane(lines: string[], toks: Toks, base: number, kind: string, top = 0, pi = 0)}
   {@const win = windowOf(top, lines.length)}
   {@const first = win.first}
   {@const last = win.last}
@@ -797,8 +920,11 @@
     <div class="line k-{kind}"><span class="mk">{MARK[kind] ?? ""}</span><span class="ln"
         >{base + first + k + 1}</span
       ><span class="src"
-        >{#if line && toks[base + first + k]}{#each colorParts(line, toks[base + first + k]) as run}<span
-              style:color={run.color}>{run.content}</span>{/each}{:else}{line || " "}{/if}</span
+        >{#if line && (toks[base + first + k] || hitRanges[pi].size)}{#each renderLine(line, toks[base + first + k], { finds: hitRanges[pi].get(base + first + k), current: currentOn(pi, base + first + k) }) as seg}<span
+              style:color={seg.color}
+              class:found={seg.found}
+              class:current={seg.current}>{seg.text}</span
+            >{/each}{:else}{line || " "}{/if}</span
       ></div>
   {/each}
   {#if win.padAfter > 0}
@@ -892,6 +1018,17 @@
   <!-- The file this merge is built on was written by something else. Saving now
        would put a merge of the OLD file over the new one, so this says so
        before the Save button is the thing that finds out. -->
+  {#if finding}
+    <FindBar
+      bind:query
+      bind:caseSensitive
+      index={hitAt}
+      total={hits.length}
+      onStep={stepFind}
+      onClose={closeFind}
+    />
+  {/if}
+
   {#if changedOnDisk}
     <div class="stale">
       <span>
@@ -943,7 +1080,7 @@
               style="top:{tops[i]}px; height:{rows[i] * LH + (r.kind === 'conflict' ? TOOLBAR : 0)}px"
             >
               {#if r.kind === "conflict"}<div class="strip"></div>{/if}
-              {@render pane(side(r, "theirs"), tokTheirs, starts[i].t - 1, sideKind(r, "theirs", i), tops[i] + (r.kind === "conflict" ? TOOLBAR : 0))}
+              {@render pane(side(r, "theirs"), tokTheirs, starts[i].t - 1, sideKind(r, "theirs", i), tops[i] + (r.kind === "conflict" ? TOOLBAR : 0), 0)}
             </div>
           {/each}
         </div>
@@ -975,6 +1112,8 @@
             starts={starts.map((s) => s.m)}
             {kinds}
             tokens={tokResult}
+            findsOf={(abs) => hitRanges[2].get(abs)}
+            currentOf={(abs) => currentOn(2, abs)}
             lineHeight={LH}
             toolbarHeight={TOOLBAR}
             {toolbar}
@@ -1016,7 +1155,7 @@
               style="top:{tops[i]}px; height:{rows[i] * LH + (r.kind === 'conflict' ? TOOLBAR : 0)}px"
             >
               {#if r.kind === "conflict"}<div class="strip"></div>{/if}
-              {@render pane(side(r, "ours"), tokOurs, starts[i].o - 1, sideKind(r, "ours", i), tops[i] + (r.kind === "conflict" ? TOOLBAR : 0))}
+              {@render pane(side(r, "ours"), tokOurs, starts[i].o - 1, sideKind(r, "ours", i), tops[i] + (r.kind === "conflict" ? TOOLBAR : 0), 1)}
             </div>
           {/each}
         </div>
@@ -1059,7 +1198,12 @@
         </div>
       {/if}
       {#if marks.length}
-        <OverviewRuler {marks} offsetRight={barWidth} onPick={jumpTo} onSeek={seek} />
+        <OverviewRuler
+          marks={findMarks.length ? [...marks, ...findMarks] : marks}
+          offsetRight={barWidth}
+          onPick={onPickMark}
+          onSeek={seek}
+        />
       {/if}
     </div>
   {/if}
@@ -1354,6 +1498,15 @@
   }
   .k-del .mk {
     color: #d9873a;
+  }
+  /* A match keeps its syntax colour and takes a wash behind it; the one the
+     find bar is ON takes a stronger one. */
+  .src :global(.found) {
+    background: rgba(232, 192, 90, 0.25);
+    border-radius: 2px;
+  }
+  .src :global(.current) {
+    background: rgba(232, 192, 90, 0.6);
   }
   .k-vs {
     background: rgba(224, 85, 90, 0.2);

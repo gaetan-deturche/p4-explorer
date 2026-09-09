@@ -15,7 +15,9 @@
   import OverviewRuler, { type Mark } from "$lib/components/OverviewRuler.svelte";
   import ContextMenu from "$lib/components/ContextMenu.svelte";
   import { langForFile, openSyntax, type SyntaxSession, type TokenRun } from "$lib/syntax";
-  import { colorParts } from "$lib/invisibles";
+  import { colorParts, renderLine } from "$lib/invisibles";
+  import FindBar from "$lib/components/FindBar.svelte";
+  import { findHits, rangesByLine, stepHit } from "$lib/find";
   import { cacheGet, cacheSet } from "$lib/store.svelte";
   import { openDiff } from "$lib/opendiff";
   import { editor } from "$lib/editor.svelte";
@@ -211,6 +213,59 @@
   // the parts scrolled out of sight. It deliberately does NOT use the diff
   // palette the ruler defaults to — nothing here differs from anything, and
   // green/orange ticks read as though something did.
+  // --- find ------------------------------------------------------------------
+  // The webview's own Ctrl+F sees only the rendered rows, so this searches the
+  // LINES: all of them, whether or not they are drawn.
+  let finding = $state(false);
+  let query = $state("");
+  let caseSensitive = $state(false);
+  let hitAt = $state(-1); // which match is selected
+  const hits = $derived(
+    finding && query ? findHits([blame?.lines.map((l) => l.text) ?? []], query, caseSensitive) : [],
+  );
+  const hitLines = $derived(rangesByLine(hits, 0));
+  const currentHit = $derived(hitAt >= 0 && hitAt < hits.length ? hits[hitAt] : null);
+  /** A match on this line, when it is the selected one. */
+  function currentOn(line: number): readonly [number, number] | null {
+    const c = currentHit;
+    return c && c.line === line ? [c.start, c.end] : null;
+  }
+  function openFind() {
+    finding = true;
+    hitAt = -1;
+  }
+  function closeFind() {
+    finding = false;
+    query = "";
+    hitAt = -1;
+  }
+  function stepFind(delta: number) {
+    goToHit(stepHit(hits.length, hitAt, delta));
+  }
+  function goToHit(i: number) {
+    hitAt = i;
+    const h = hits[i];
+    // A third of the way down rather than at the very top: a match reads better
+    // with the lines that lead to it visible.
+    if (h && scrollEl) scrollEl.scrollTop = Math.max(0, h.line * LH - scrollEl.clientHeight / 3);
+  }
+  // A new query starts from the top and lands on the first match without a
+  // second keystroke — but ONLY when the query itself changed. Reacting to the
+  // hits would re-run on every edit (they are derived from the document) and
+  // drag the selection back to the first match mid-typing; and reading `hitAt`
+  // here while writing it is a loop, so the first match is named outright.
+  let lastQuery = "";
+  let lastCase = false;
+  $effect(() => {
+    const q = query;
+    const cs = caseSensitive;
+    if (q === lastQuery && cs === lastCase) return;
+    lastQuery = q;
+    lastCase = cs;
+    if (hits.length) goToHit(0);
+    else hitAt = -1;
+  });
+
   const marks = $derived.by<Mark[]>(() => {
     // A band under about two pixels cannot be read, and a file like
     // HLSLMaterialTranslator.cpp has 2880 blocks — at full density the strip is
@@ -312,6 +367,22 @@
     if (!scrollEl) return;
     scrollEl.scrollTop = Math.max(0, f * scrollEl.scrollHeight - scrollEl.clientHeight / 3);
   }
+  /** One tick per match, over the blame bands: in a file this size the strip is
+   *  the only place the spread of a search is visible at all. Indices are
+   *  offset past the blame runs so a click can tell the two apart. */
+  const findMarks = $derived<Mark[]>(
+    hits.map((h, i) => ({
+      pct: h.line / Math.max(1, total),
+      kind: "mod" as const, // unused: `color` wins
+      color: "#e8c05a",
+      title: `Match ${i + 1} of ${hits.length} — line ${h.line + 1}`,
+      index: runs.length + i,
+    })),
+  );
+  function onPickMark(i: number) {
+    if (i < runs.length) return jumpToRun(i);
+    goToHit(i - runs.length);
+  }
   function jumpToRun(i: number) {
     const r = runs[i];
     if (r) scrollToFraction(r.from / total);
@@ -372,6 +443,17 @@
   /** Escape always closes; the bindable shortcut is honoured too, so a rebound
    *  "Close the window" works in the child windows as well as the main one. */
   function onWinKey(e: KeyboardEvent) {
+    if ((e.ctrlKey || e.metaKey) && (e.key === "f" || e.key === "F")) {
+      e.preventDefault(); // the webview's own find would only see the drawn rows
+      openFind();
+      return;
+    }
+    if (finding && (e.key === "F3" || (e.key === "g" && (e.ctrlKey || e.metaKey)))) {
+      e.preventDefault();
+      stepFind(e.shiftKey ? -1 : 1);
+      return;
+    }
+    if (e.key === "Escape" && finding) return closeFind();
     if (e.key === "Escape") return close();
     if (shortcuts.match(e, ["app"]) === "closeWindow") {
       e.preventDefault();
@@ -412,6 +494,17 @@
     </label>
     <button onclick={close}>Close</button>
   </div>
+
+  {#if finding}
+    <FindBar
+      bind:query
+      bind:caseSensitive
+      index={hitAt}
+      total={hits.length}
+      onStep={stepFind}
+      onClose={closeFind}
+    />
+  {/if}
 
   {#if error}
     <div class="err mono">{error}</div>
@@ -474,8 +567,10 @@
               style="top:{i * LH}px; background: {shade(l.change, 0.07)}"
             >
               <span class="lno dim">{i + 1}</span><span class="code"
-                >{#if tokens && tokens[i]}{#each colorParts(l.text, tokens[i]) as run}<span style:color={run.color}
-                      >{run.content}</span
+                >{#if hitLines.size || (tokens && tokens[i])}{#each renderLine(l.text, tokens?.[i], { finds: hitLines.get(i), current: currentOn(i) }) as seg}<span
+                      style:color={seg.color}
+                      class:found={seg.found}
+                      class:current={seg.current}>{seg.text}</span
                     >{/each}{:else}{l.text}{/if}</span
               >
             </div>
@@ -483,7 +578,12 @@
         </div>
       </div>
       {#if marks.length}
-        <OverviewRuler {marks} offsetRight={barWidth} onPick={jumpToRun} onSeek={scrollToFraction} />
+        <OverviewRuler
+          marks={findMarks.length ? [...marks, ...findMarks] : marks}
+          offsetRight={barWidth}
+          onPick={onPickMark}
+          onSeek={scrollToFraction}
+        />
       {/if}
     </div>
   {/if}
@@ -613,6 +713,16 @@
   .code {
     padding-right: 12px;
     white-space: pre;
+  }
+  /* A match keeps its syntax colour and takes a wash behind it; the one the bar
+     is ON takes a stronger one, so stepping is visible without reading the
+     counter. */
+  .code :global(.found) {
+    background: rgba(232, 192, 90, 0.25);
+    border-radius: 2px;
+  }
+  .code :global(.current) {
+    background: rgba(232, 192, 90, 0.6);
   }
   /* A rule at each block's first line — two adjacent blocks can still land on
      close hues, and the rule settles it. */
