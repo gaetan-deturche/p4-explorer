@@ -570,6 +570,17 @@
       ...(pending.needsResolve(file.depotFile)
         ? [{ label: "Resolve…", action: () => merges.resolveFile(file.depotFile) }, { label: "", sep: true }]
         : []),
+      // Open in p4 with nothing on disk: the shelf is where the content still
+      // is, so the repair goes first, where the badge sent the user looking.
+      ...(file.missing && pending.hasShelf(change)
+        ? [
+            {
+              label: "Restore from shelf",
+              action: () => void pending.restoreFromShelf(change, sel),
+            },
+            { label: "", sep: true },
+          ]
+        : []),
       { label: "View diff", accel: "diff", action: () => pending.openLocalDiff(file.depotFile) },
       { ...historyMenu(file.depotFile), accel: "fileHistory" },
       holdersMenu(file.depotFile),

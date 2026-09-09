@@ -20,15 +20,130 @@ pub async fn p4_pending(conn: P4Conn, max: u32) -> Res {
 }
 
 /// Files open (in the workspace) for a pending changelist (`opened -c`).
+///
+/// Records of a NAMED changelist gain `localFile` and `missing`: a file can be
+/// open for add or edit with nothing on disk — deleted by hand, or by a tool that did not know
+/// p4 held it — and p4 keeps the pending operation regardless, so the whole
+/// changelist fails at submit with no earlier sign of it.
 #[tauri::command]
 pub async fn p4_opened(conn: P4Conn, change: String) -> Res {
     // Empty change = every opened file of the client (one cheap command; the
     // change-detection poll fingerprints it).
     if change.is_empty() {
-        run(conn, v(&["opened"])).await
-    } else {
-        run(conn, v(&["opened", "-c", &change])).await
+        // Client-wide: this is the keepalive-rate change-detection poll, which
+        // fingerprints the records and counts them. It must stay ONE command —
+        // surveying the disk for every opened file in the workspace, several
+        // times a minute, to answer a question nothing on screen is asking.
+        return run(conn, v(&["opened"])).await;
     }
+    let mut recs = run(conn.clone(), v(&["opened", "-c", &change])).await?;
+    if recs.is_empty() {
+        return Ok(recs);
+    }
+    let paths: Vec<String> = recs
+        .iter()
+        .filter_map(|r| r.get("depotFile").and_then(|v| v.as_str()).map(String::from))
+        .collect();
+    let local = tauri::async_runtime::spawn_blocking(move || local_paths(&conn, &paths))
+        .await
+        .unwrap_or_default();
+    for r in &mut recs {
+        let Some(depot) = r.get("depotFile").and_then(|v| v.as_str()).map(String::from) else {
+            continue;
+        };
+        let Some(path) = local.get(&depot) else { continue };
+        let gone = !std::path::Path::new(path).exists();
+        r.insert("localFile".into(), serde_json::Value::String(path.clone()));
+        r.insert("missing".into(), serde_json::Value::Bool(gone));
+    }
+    Ok(recs)
+}
+
+/// Depot path -> the file it maps to on THIS machine.
+///
+/// `p4 opened` reports `clientFile` in CLIENT syntax (`//client/path`), which is
+/// not a path anything can stat, so the local paths come from `fstat` — whose
+/// `clientFile` is the real one. Asked in batches: a changelist can hold more
+/// files than a command line can carry.
+fn local_paths(conn: &P4Conn, depot: &[String]) -> std::collections::HashMap<String, String> {
+    let mut out = std::collections::HashMap::new();
+    for chunk in depot.chunks(200) {
+        let mut args: Vec<&str> = vec!["fstat", "-T", "depotFile,clientFile"];
+        for d in chunk {
+            args.push(d.as_str());
+        }
+        let Ok(recs) = p4::run(conn, &args) else { continue };
+        for r in recs {
+            let (Some(d), Some(c)) = (
+                r.get("depotFile").and_then(|v| v.as_str()),
+                r.get("clientFile").and_then(|v| v.as_str()),
+            ) else {
+                continue;
+            };
+            out.insert(d.to_string(), c.to_string());
+        }
+    }
+    out
+}
+
+/// What happened to one file a restore tried to bring back.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreResult {
+    pub depot: String,
+    pub ok: bool,
+    pub message: String,
+}
+
+/// Write a changelist's SHELVED content back over the working file.
+///
+/// For a file that is open but missing from disk: the shelf still holds what it
+/// said, and `print -o` puts those bytes back without touching the pending
+/// operation — so the add stays an add and the changelist becomes submittable
+/// again. Nothing is opened, reverted or resolved here.
+#[tauri::command]
+pub async fn p4_restore_shelved(
+    conn: P4Conn,
+    change: String,
+    files: Vec<String>,
+) -> Result<Vec<RestoreResult>, String> {
+    if change.trim().is_empty() {
+        return Err("This changelist has no shelf to restore from.".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let local = local_paths(&conn, &files);
+        let mut out = Vec::new();
+        for depot in &files {
+            let Some(path) = local.get(depot) else {
+                out.push(RestoreResult {
+                    depot: depot.clone(),
+                    ok: false,
+                    message: "not mapped in this workspace".into(),
+                });
+                continue;
+            };
+            if let Some(dir) = std::path::Path::new(path).parent() {
+                let _ = std::fs::create_dir_all(dir); // the folder may have gone too
+            }
+            let spec = format!("{depot}@={change}");
+            match p4::run_raw(&conn, &["print", "-q", "-o", path, &spec]) {
+                Ok(_) if std::path::Path::new(path).exists() => out.push(RestoreResult {
+                    depot: depot.clone(),
+                    ok: true,
+                    message: String::new(),
+                }),
+                Ok(_) => out.push(RestoreResult {
+                    depot: depot.clone(),
+                    ok: false,
+                    message: "the shelf does not hold this file".into(),
+                }),
+                Err(e) => out.push(RestoreResult { depot: depot.clone(), ok: false, message: e }),
+            }
+        }
+        Ok(out)
+    })
+    .await
+    .map_err(|e| format!("restore task failed: {e}"))?
 }
 
 /// Depot paths of files opened for edit whose content is IDENTICAL to the depot

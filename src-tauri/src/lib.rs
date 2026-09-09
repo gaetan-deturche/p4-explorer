@@ -165,6 +165,7 @@ pub fn run() {
             commands::p4_diff_shelved,
             commands::open_diff_shelved,
             commands::p4_opened,
+            commands::p4_restore_shelved,
             commands::p4_diff_local,
             commands::p4_diff_local_forced,
             commands::open_diff_local,

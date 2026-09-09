@@ -1177,6 +1177,32 @@ export const pending = {
   rename(change: string, desc: string) {
     pending.mutate(() => p4.setDescription(h!.conn(), change, desc), "Changelist renamed.");
   },
+  /** Put a changelist's SHELVED content back over working files that have gone
+   *  missing, leaving the pending add/edit alone.
+   *
+   *  The alternative for a file open for add with nothing on disk is to revert
+   *  it, which throws the change away; this keeps it, because the shelf still
+   *  has what the file said. */
+  async restoreFromShelf(change: string, files: string[]) {
+    if (!h || !files.length) return;
+    try {
+      const rows = await p4.restoreShelved(h.conn(), change, files);
+      const back = rows.filter((r) => r.ok).length;
+      const failed = rows.filter((r) => !r.ok);
+      if (failed.length) {
+        h.setError(
+          `Restored ${back} of ${rows.length}:\n` +
+            failed.map((r) => `${r.depot.split("/").pop()} — ${r.message}`).join("\n"),
+        );
+      } else {
+        h.setNotice(`Restored ${back} file${back === 1 ? "" : "s"} from the shelf.`, 6000);
+      }
+      pending.load();
+    } catch (e) {
+      h.setError(String(e));
+    }
+  },
+
   /** Export a .patch from a changelist (files=[]) or an explicit file set. */
   async generatePatch(change: string, files: string[]) {
     if (!h) return;

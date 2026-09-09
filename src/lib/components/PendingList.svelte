@@ -759,6 +759,14 @@
     {#if kind === "local" && needsResolve(f.depotFile)}
       <span class="unres">needs resolve</span>
     {/if}
+    <!-- Open in p4, but the working file is gone. p4 keeps the pending
+         operation regardless, so the whole changelist fails at submit; this is
+         the only place it shows before then. -->
+    {#if kind === "local" && f.missing}
+      <span class="gone" title="Opened for {f.action ?? 'change'}, but there is no file at {f.localFile}. The submit will fail until it is restored or reverted.">
+        missing on disk
+      </span>
+    {/if}
     <span class="ftype dim" title={describeFileType(String(f.type ?? ""))}>{f.type ?? ""}</span>
   </div>
   {#if fd?.open}
@@ -992,6 +1000,17 @@
     flex: none;
     font-size: 10px;
     color: var(--warn);
+    border: 1px solid currentColor;
+    border-radius: 999px;
+    padding: 0 6px;
+    margin-left: 6px;
+  }
+  /* Same shape as the resolve badge — both mean "this will not submit as it
+     stands" — in the warning colour, since nothing is in conflict. */
+  .gone {
+    flex: none;
+    font-size: 10px;
+    color: var(--warn, #e0a33a);
     border: 1px solid currentColor;
     border-radius: 999px;
     padding: 0 6px;

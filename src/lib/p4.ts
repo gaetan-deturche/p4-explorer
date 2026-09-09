@@ -651,6 +651,14 @@ export const p4 = {
   login: (conn: P4Conn, password: string) => g<void>("p4_login", { conn, password }),
   trust: (conn: P4Conn) => g<void>("p4_trust", { conn }),
   opened: (conn: P4Conn, change: string) => call("p4_opened", { conn, change }),
+  /** Put a changelist's SHELVED content back over working files that are gone,
+   *  leaving the pending add/edit as it is. */
+  restoreShelved: (conn: P4Conn, change: string, files: string[]) =>
+    g<{ depot: string; ok: boolean; message: string }[]>("p4_restore_shelved", {
+      conn,
+      change,
+      files,
+    }),
   /** Depot paths opened for edit but identical to the depot (`diff -sr`). */
   unchangedOpen: (conn: P4Conn) => g<string[]>("p4_unchanged_open", { conn }),
   /** Why a sync could not overwrite these paths — one entry per file. */

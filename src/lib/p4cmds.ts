@@ -74,6 +74,7 @@ export const P4_COMMANDS: P4Cmd[] = [
   { key: "p4_reconcile", label: "reconcile", read: false },
   { key: "p4_reconcile_files", label: "reconcile (check out)", read: false },
   { key: "p4_clean", label: "clean (revert offline)", read: false },
+  { key: "p4_restore_shelved", label: "print (restore from shelf)", read: false },
   { key: "apply_patch", label: "patch (apply)", read: false },
   { key: "stash_delete", label: "stash (delete)", read: false },
   { key: "review_copy_files", label: "review (copy shelved files)", read: false },
