@@ -1178,13 +1178,14 @@ initSplit(leftText.trim() === "");
   {@const win = windowOf(top, lines.length)}
   {@const first = win.first}
   {@const last = win.last}
-  <!-- The rows outside the window, as one box each: the rows that ARE drawn keep
-       their flow position, so the block height and the void below still hold. -->
-  {#if win.padBefore > 0}
-    <div class="pad" style="height:{win.padBefore * LH}px" aria-hidden="true"></div>
-  {/if}
+  <!-- Each drawn row is PLACED at its line's own offset: nothing accumulates,
+       so a row cannot drift from the void below it, from the other pane, or from
+       the overlays drawn over it (comment markers, and the result pane's caret
+       and selection). A spacer sized in nominal rows could, and did. -->
   {#each lines.slice(first, last + 1) as line, k}
-    <div class="line k-{kind}"><span class="mk">{kind === "del" ? "-" : ""}</span><span class="ln"
+    <div class="line k-{kind}" style="top:{(first + k) * LH}px"><span class="mk"
+        >{kind === "del" ? "-" : ""}</span
+      ><span class="ln"
         >{base + first + k + 1}</span
       ><span class="src"
         >{#each renderLine(line, tokLeft[base + first + k], {
@@ -1201,16 +1202,17 @@ initSplit(leftText.trim() === "");
           >{:else}<span> </span>{/each}</span
       ></div>
   {/each}
-  {#if win.padAfter > 0}
-    <div class="pad" style="height:{win.padAfter * LH}px" aria-hidden="true"></div>
-  {/if}
   <!-- Rows this side does not HAVE: the block is taller because the other side
        has more lines. Hatched, because a blank row is indistinguishable from a
        real empty line — only the line numbers gave it away. Drawn as ONE element
        spanning the whole run, so the diagonals run continuously instead of
        restarting (and visibly stepping) at every row. -->
   {#if fill > 0}
-    <div class="void" style="height:{fill * LH}px" aria-hidden="true"></div>
+    <div
+      class="void"
+      style="top:{lines.length * LH}px; height:{fill * LH}px"
+      aria-hidden="true"
+    ></div>
   {/if}
 {/snippet}
 
@@ -1938,6 +1940,8 @@ initSplit(leftText.trim() === "");
     flex: none;
   }
   .line {
+    position: absolute;
+    left: 0;
     display: flex;
     width: max(100%, var(--content-w, 100%));
     align-items: flex-start;
@@ -1961,6 +1965,9 @@ initSplit(leftText.trim() === "");
   /* A row that does not exist on this side. Faint diagonal hatching reads as
      "nothing here" without competing with the add/drop colours. */
   .void {
+    position: absolute;
+    left: 0;
+    width: max(100%, var(--content-w, 100%));
     /* Ramped stops, not hard ones: a hard edge at -45deg lands between device
        pixels at fractional display scaling and the stripes come out jittery.
        Ramping lets them anti-alias, and the alpha is the only opacity knob. */

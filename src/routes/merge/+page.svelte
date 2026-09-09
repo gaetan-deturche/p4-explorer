@@ -907,17 +907,26 @@
 </script>
 
 <!-- Read-only pane content: mark, line number, coloured code. -->
-{#snippet pane(lines: string[], toks: Toks, base: number, kind: string, top = 0, pi = 0)}
+{#snippet pane(
+  lines: string[],
+  toks: Toks,
+  base: number,
+  kind: string,
+  top = 0,
+  pi = 0,
+  strip = 0,
+)}
   {@const win = windowOf(top, lines.length)}
   {@const first = win.first}
   {@const last = win.last}
-  <!-- The rows outside the window, as one box each, so the rows that ARE drawn
-       keep their flow position inside the region. -->
-  {#if win.padBefore > 0}
-    <div class="pad" style="height:{win.padBefore * LH}px" aria-hidden="true"></div>
-  {/if}
+  <!-- Each drawn row is PLACED at its line's own offset inside the region:
+       nothing accumulates, so the three panes and the result pane's caret and
+       selection all agree by construction. `strip` is the conflict toolbar the
+       rows sit below. -->
   {#each lines.slice(first, last + 1) as line, k}
-    <div class="line k-{kind}"><span class="mk">{MARK[kind] ?? ""}</span><span class="ln"
+    <div class="line k-{kind}" style="top:{strip + (first + k) * LH}px"><span class="mk"
+        >{MARK[kind] ?? ""}</span
+      ><span class="ln"
         >{base + first + k + 1}</span
       ><span class="src"
         >{#if line && (toks[base + first + k] || hitRanges[pi].size)}{#each renderLine(line, toks[base + first + k], { finds: hitRanges[pi].get(base + first + k), current: currentOn(pi, base + first + k) }) as seg}<span
@@ -927,9 +936,6 @@
             >{/each}{:else}{line || " "}{/if}</span
       ></div>
   {/each}
-  {#if win.padAfter > 0}
-    <div class="pad" style="height:{win.padAfter * LH}px" aria-hidden="true"></div>
-  {/if}
 {/snippet}
 
 <!-- The buttons over a conflict, rendered inside the result pane's own strip. -->
@@ -1080,7 +1086,7 @@
               style="top:{tops[i]}px; height:{rows[i] * LH + (r.kind === 'conflict' ? TOOLBAR : 0)}px"
             >
               {#if r.kind === "conflict"}<div class="strip"></div>{/if}
-              {@render pane(side(r, "theirs"), tokTheirs, starts[i].t - 1, sideKind(r, "theirs", i), tops[i] + (r.kind === "conflict" ? TOOLBAR : 0), 0)}
+              {@render pane(side(r, "theirs"), tokTheirs, starts[i].t - 1, sideKind(r, "theirs", i), tops[i] + (r.kind === "conflict" ? TOOLBAR : 0), 0, r.kind === "conflict" ? TOOLBAR : 0)}
             </div>
           {/each}
         </div>
@@ -1155,7 +1161,7 @@
               style="top:{tops[i]}px; height:{rows[i] * LH + (r.kind === 'conflict' ? TOOLBAR : 0)}px"
             >
               {#if r.kind === "conflict"}<div class="strip"></div>{/if}
-              {@render pane(side(r, "ours"), tokOurs, starts[i].o - 1, sideKind(r, "ours", i), tops[i] + (r.kind === "conflict" ? TOOLBAR : 0), 1)}
+              {@render pane(side(r, "ours"), tokOurs, starts[i].o - 1, sideKind(r, "ours", i), tops[i] + (r.kind === "conflict" ? TOOLBAR : 0), 1, r.kind === "conflict" ? TOOLBAR : 0)}
             </div>
           {/each}
         </div>
@@ -1456,6 +1462,8 @@
     flex: none;
   }
   .line {
+    position: absolute;
+    left: 0;
     display: flex;
     width: max(100%, var(--content-w, 100%));
     align-items: flex-start;

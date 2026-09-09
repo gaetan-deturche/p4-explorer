@@ -133,15 +133,15 @@
   /** x of each caret, measured — same index as `caretsAt`. */
   let caretLefts = $state<number[]>([]);
   const caretLeft = $derived(caretLefts[docState.focus] ?? 0);
-  /** The row height the BROWSER ended up with, which is not `lineHeight`: at a
-   *  fractional CSS height (12px * 1.45 = 17.4) the layout snaps every row to a
-   *  device-pixel multiple — 17.3906 at 125% scaling. Positioning the caret at
-   *  `line * 17.4` therefore drifted ~0.0094px per line: invisible at the top of
-   *  a file, 2.8px by line 300, and eventually a whole row off (which would also
-   *  make a click land on the wrong line). Measured from a real row, so it is
-   *  right at any scale or zoom. */
-  let rowH = $state(0);
-  const lh = $derived(rowH || lineHeight);
+  /** One row's height, and the only one anything uses.
+   *
+   *  It used to be MEASURED, because rows were stacked in flow and the browser
+   *  snaps a fractional CSS height (12px * 1.45 = 17.4) to a device-pixel
+   *  multiple — 17.3906 at 125% scaling — so `line * 17.4` drifted from where
+   *  the rows had actually landed. Rows are placed by this arithmetic now, so
+   *  there is nothing left to drift against: what the browser does with each
+   *  row's own painted height no longer decides where the next one starts. */
+  const lh = $derived(lineHeight);
 
   /** Width of `text` as this pane renders it. The probe carries the same font,
    *  white-space and tab-size as a code line, so measuring beats computing:
@@ -151,10 +151,19 @@
     probe.textContent = text;
     return probe.getBoundingClientRect().width;
   }
-  /** Where the code column starts, read from a real line rather than assumed. */
+  /** Where the code column starts, in the pane's own coordinates — the frame the
+   *  carets and selection bands are positioned in.
+   *
+   *  Measured as a DIFFERENCE of two rects rather than with `offsetLeft`, whose
+   *  reference is whichever ancestor happens to be positioned: the rows became
+   *  positioned when they started being placed instead of stacked, which
+   *  silently reparented the measurement onto the row and dropped its 3px left
+   *  border from the answer. Both rects move together under the horizontal pan,
+   *  so their difference needs no scroll term. */
   function gutter(): number {
     const code = pane?.querySelector(".code") as HTMLElement | null;
-    return code ? code.offsetLeft : 0;
+    if (!code || !pane) return 0;
+    return code.getBoundingClientRect().left - pane.getBoundingClientRect().left;
   }
 
   /** Rectangles covering the selections, one per selected line — every cursor's,
@@ -198,9 +207,6 @@
     if (!probe) return;
     const gut = gutter();
     caretLefts = cs.map((c) => (c ? gut + widthOf(c.prefix) : 0));
-    const row = pane?.querySelector(".rl") as HTMLElement | null;
-    const h = row?.getBoundingClientRect().height ?? 0;
-    if (h > 0 && Math.abs(h - rowH) > 0.001) rowH = h;
   });
 
   // The editor's own bindings (add a caret above/below) are rebindable like the
@@ -524,6 +530,7 @@
 
   {#each docState.doc.regions as r, i (r.region)}
     {@const kind = kinds[i] ?? ""}
+    {@const strip = r.conflict ? toolbarHeight : 0}
     <div
       class="rgn"
       class:conflict={r.conflict}
@@ -539,27 +546,22 @@
         {@const win = windowOf(i, r.lines.length)}
         {@const first = win.first}
         {@const last = win.last}
-        <!-- The rows above and below the window, as one box each: the rows keep
-             their flow position, so the region's height, its hatched void and
-             every style below still hold. -->
-        {#if win.padBefore > 0}
-          <div class="pad" style="height:{win.padBefore * lineHeight}px" aria-hidden="true"></div>
-        {/if}
+        <!-- Each drawn row is PLACED at its line's own offset rather than
+             stacked after a spacer. Nothing accumulates, so a row cannot drift
+             from the caret and the selection bands, which are placed by the
+             same arithmetic. (It used to: the spacer was sized in nominal rows
+             while the overlays used the height the browser had actually given a
+             row, and the two differ by a hundredth of a pixel — invisible at the
+             top of a file and half a row down at line 600.) -->
         {#each r.lines.slice(first, last + 1) as line, k (first + k)}
-          <div class="rl k-{kind}" style="height:{lineHeight}px">
+          <div
+            class="rl k-{kind}"
+            style="top:{strip + (first + k) * lineHeight}px; height:{lineHeight}px"
+          >
             <span class="mk">{MARK[kind] ?? ""}</span><span class="ln">{starts[i] + first + k}</span
             ><span class="code">{@render codeOf(line, r.region, first + k, starts[i] - 1 + first + k)}</span>
           </div>
         {/each}
-        {#if win.padAfter > 0}
-          <div
-            class="pad"
-            style="height:{win.padAfter * lineHeight}px"
-            aria-hidden="true"
-          ></div>
-        {/if}
-      {:else}
-        <div class="pad" style="height:{r.lines.length * lineHeight}px" aria-hidden="true"></div>
       {/if}
       <!-- Rows this side does not have (the other side is longer). Hatched, so a
            void never looks like a real empty line — one element for the whole
@@ -567,7 +569,10 @@
       {#if (rows[i] ?? r.lines.length) > r.lines.length}
         <div
           class="void"
-          style="height:{((rows[i] ?? r.lines.length) - r.lines.length) * lineHeight}px"
+          style="top:{strip + r.lines.length * lineHeight}px; height:{((rows[i] ??
+            r.lines.length) -
+            r.lines.length) *
+            lineHeight}px"
           aria-hidden="true"
         ></div>
       {/if}
@@ -611,9 +616,6 @@
 <style>
   /* Stands in for rows outside the window: height only, so everything below it
      sits where it would have. */
-  .pad {
-    flex: none;
-  }
   .pane {
     position: relative;
     /* See the scrollers: rows are swapped as this pane scrolls, and scroll
@@ -664,6 +666,8 @@
     background: rgba(224, 85, 90, 0.16);
   }
   .rl {
+    position: absolute;
+    left: 0;
     display: flex;
     width: max(100%, var(--content-w, 100%));
     align-items: flex-start;
@@ -673,6 +677,9 @@
   }
   /* A row that does not exist on this side — see the diff window's .void. */
   .void {
+    position: absolute;
+    left: 0;
+    width: max(100%, var(--content-w, 100%));
     /* Ramped stops, not hard ones: a hard edge at -45deg lands between device
        pixels at fractional display scaling and the stripes come out jittery.
        Ramping lets them anti-alias, and the alpha is the only opacity knob. */

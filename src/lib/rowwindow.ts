@@ -3,21 +3,23 @@
 //! Every pane in the app draws a file as uniform-height rows, and on a big file
 //! rendering all of them is what makes scrolling stutter — 17942 lines of
 //! HLSLMaterialTranslator.cpp come to ~283k DOM nodes in a diff. So each block
-//! renders the rows in view and pads above and below with a spacer.
+//! renders the rows in view and no others.
 //!
-//! The padding is why this is worth its own function: the three numbers have to
-//! add up to the block's full height in every case, including a block scrolled
-//! entirely past, or the rows below it sit at the wrong place.
+//! The rows it names are PLACED, not stacked: each one is positioned at
+//! `line * lineH` inside its block, so this answers "which rows" and nothing
+//! else. It used to also report the filler to leave above and below, back when
+//! the drawn rows were stacked after a spacer — and that is exactly what went
+//! wrong: the spacer was sized in nominal rows (12px * 1.45 = 17.4) while the
+//! caret and the selection bands used the height the browser had actually given
+//! a row (17.3906 at 125% scaling), so a selection sat right at the top of a
+//! file and a third of a row high by line 600. Placing every row from the same
+//! arithmetic the overlays use leaves nothing to drift.
 
 export interface RowWindow {
   /** First row to render. */
   first: number;
   /** Last row to render; `first - 1` when the block is off screen entirely. */
   last: number;
-  /** Rows to leave empty above and below, in rows. Together with the rendered
-   *  ones these always sum to the block's line count. */
-  padBefore: number;
-  padAfter: number;
 }
 
 /**
@@ -36,13 +38,15 @@ export function rowWindow(
   lineH: number,
   overscan = 24,
 ): RowWindow {
-  if (lines <= 0) return { first: 0, last: -1, padBefore: 0, padAfter: 0 };
+  if (lines <= 0) return { first: 0, last: -1 };
   const rawFirst = Math.floor((viewTop - top) / lineH) - overscan;
   const rawLast = Math.ceil((viewTop + viewH - top) / lineH) + overscan;
-  // `first` may run past the end (the block is above the view) and `last` may
-  // fall short of the start (below it); clamping both to the block keeps the
-  // spacers honest either way.
+  // `last < first` is how a block with nothing on screen says so, and `first`
+  // is deliberately allowed to reach `lines` (one past the end) to produce it:
+  // for a block scrolled entirely ABOVE the view, `last` then clamps to
+  // `first - 1`. Clamping `first` to `lines - 1` instead looks tidier and makes
+  // every such block draw its last row — 300 stray rows on a long file.
   const first = Math.max(0, Math.min(lines, rawFirst));
   const last = Math.max(first - 1, Math.min(lines - 1, rawLast));
-  return { first, last, padBefore: first, padAfter: lines - 1 - last };
+  return { first, last };
 }
