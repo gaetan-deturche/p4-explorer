@@ -11,6 +11,7 @@
   import { shortcuts } from "$lib/shortcuts.svelte";
   import { renderLine } from "$lib/invisibles";
   import { rowWindow } from "$lib/rowwindow";
+  import { rangesInLine } from "$lib/find";
   import type { TokenRun } from "$lib/syntax";
 
   // NOT named `state`: that shadows the $state rune, and `$state` would then read
@@ -28,6 +29,7 @@
     hotOf,
     findsOf,
     currentOf,
+    occurrences = "",
     onAction,
   }: {
     /** The document and every cursor in it. Selections live here too, so the
@@ -59,6 +61,9 @@
      *  only draws what it is handed. */
     findsOf?: (abs: number) => readonly (readonly [number, number])[] | undefined;
     currentOf?: (abs: number) => readonly [number, number] | null;
+    /** Text the host has selected: its other appearances are marked, per drawn
+     *  row, so the cost does not depend on the size of the file. */
+    occurrences?: string;
     onAction: (a: MergeAction) => void;
   } = $props();
 
@@ -500,12 +505,14 @@
     hot: hotOf?.(region, at) ?? null,
     finds: findsOf?.(abs),
     current: currentOf?.(abs) ?? null,
+    occurs: occurrences ? rangesInLine(line, occurrences, true) : undefined,
   }) as seg}<span
       style:color={seg.color}
       class:ghost={seg.ghost}
       class:hot={seg.hot}
       class:found={seg.found}
-      class:current={seg.current}>{seg.text}</span
+      class:current={seg.current}
+      class:occur={seg.occur}>{seg.text}</span
     >{/each}
 {/snippet}
 
@@ -727,6 +734,11 @@
   }
   .k-del .mk {
     color: #d9873a;
+  }
+  /* Another occurrence of what is selected: present, but not a search result. */
+  .occur {
+    background: rgba(170, 178, 190, 0.16);
+    border-radius: 2px;
   }
   /* A match keeps its syntax colour and takes a wash behind it; the one the
      find bar is ON takes a stronger one. */

@@ -20,6 +20,9 @@ export interface Seg {
   /** Inside the match the find bar is currently ON — the one Enter just moved
    *  to, drawn differently from the others so "where am I" needs no counting. */
   current?: boolean;
+  /** Inside another occurrence of what is SELECTED. Not a search result, so it
+   *  is marked apart from one. */
+  occur?: boolean;
 }
 
 // Tab width, matching mergedoc's TAB_WIDTH and the panes' CSS tab-size. Declared
@@ -71,6 +74,8 @@ export function renderLine(
     finds?: readonly (readonly [number, number])[];
     /** The one of them the find bar is on, if it is on this line. */
     current?: readonly [number, number] | null;
+    /** Where the selected text also appears on this line. */
+    occurs?: readonly (readonly [number, number])[];
   } = {},
   tab = TAB_WIDTH,
 ): Seg[] {
@@ -78,11 +83,12 @@ export function renderLine(
   const hot = opts.hot ?? null;
   const finds = opts.finds ?? [];
   const current = opts.current ?? null;
+  const occurs = opts.occurs ?? [];
   const parts = colorParts(line, runs);
   // Fast path: with nothing to split, the result is the input — and the panes
   // render every line on every pass, so a character walk is not something to pay
   // for that.
-  if (!marks && !hot && !finds.length && !current) {
+  if (!marks && !hot && !finds.length && !current && !occurs.length) {
     return parts.map((r) => ({ text: r.content, color: r.color }));
   }
   const out: Seg[] = [];
@@ -90,42 +96,44 @@ export function renderLine(
   let src = 0; // source character index, so the ranges mean what they say
   const within = (rs: readonly (readonly [number, number])[], i: number) =>
     rs.some((r) => i >= r[0] && i < r[1]);
-  const push = (
-    text: string,
-    color: string | undefined,
-    ghost: boolean,
-    isHot: boolean,
-    found: boolean,
-    isCurrent: boolean,
-  ) => {
+  /** What is true of one character. A segment runs while all of it holds. */
+  type Marks = { hot: boolean; found: boolean; current: boolean; occur: boolean };
+  const push = (text: string, color: string | undefined, ghost: boolean, m: Marks) => {
     const last = out[out.length - 1];
     if (
       last &&
       last.ghost === ghost &&
       last.color === color &&
-      last.hot === isHot &&
-      last.found === found &&
-      last.current === isCurrent
+      last.hot === m.hot &&
+      last.found === m.found &&
+      last.current === m.current &&
+      last.occur === m.occur
     ) {
       last.text += text;
     } else {
-      out.push({ text, color, ghost, hot: isHot, found, current: isCurrent });
+      out.push({ text, color, ghost, hot: m.hot, found: m.found, current: m.current, occur: m.occur });
     }
   };
   for (const run of parts) {
     for (const ch of run.content) {
-      const isHot = !!hot && src >= hot[0] && src < hot[1];
       const isCurrent = !!current && src >= current[0] && src < current[1];
-      const found = isCurrent || within(finds, src);
+      const m: Marks = {
+        hot: !!hot && src >= hot[0] && src < hot[1],
+        found: isCurrent || within(finds, src),
+        current: isCurrent,
+        // A search result wins: while one is on screen it is what the eye is
+        // looking for, and the selection is usually the same text anyway.
+        occur: within(occurs, src) && !within(finds, src) && !isCurrent,
+      };
       if (marks && ch === " ") {
-        push(SPACE_MARK, run.color, true, isHot, found, isCurrent);
+        push(SPACE_MARK, run.color, true, m);
         col++;
       } else if (marks && ch === "\t") {
         const width = tab - (col % tab);
-        push(TAB_MARK + " ".repeat(width - 1), run.color, true, isHot, found, isCurrent);
+        push(TAB_MARK + " ".repeat(width - 1), run.color, true, m);
         col += width;
       } else {
-        push(ch, run.color, false, isHot, found, isCurrent);
+        push(ch, run.color, false, m);
         col += ch === "\t" ? tab - (col % tab) : 1;
       }
       src++;

@@ -106,6 +106,19 @@ export function rangesByLine(hits: readonly Hit[], pane: number): Map<number, [n
   return out;
 }
 
+/** The selection, when it is worth marking the other occurrences of.
+ *
+ *  One line only, and at least two characters: a multi-line selection is a
+ *  region rather than a term, and marking every `i` in a file is noise. The
+ *  text is returned as selected — untrimmed — because that is what the other
+ *  occurrences have to match.
+ */
+export function selectionTerm(raw: string): string {
+  const text = raw.replace(/\r/g, "");
+  if (!text || text.includes("\n")) return "";
+  return text.trim().length >= 2 ? text : "";
+}
+
 /** Next/previous match, wrapping. `current` may be -1 (nothing selected yet),
  *  in which case a step forward lands on the first and back on the last. */
 export function stepHit(count: number, current: number, delta: number): number {

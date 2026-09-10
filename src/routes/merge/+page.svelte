@@ -39,7 +39,15 @@
   } from "$lib/mergedoc";
   import { colorParts, renderLine } from "$lib/invisibles";
   import FindBar from "$lib/components/FindBar.svelte";
-  import { findHits, rangesByLine, sortByRow, stepHit, type Hit } from "$lib/find";
+  import {
+    findHits,
+    rangesByLine,
+    rangesInLine,
+    selectionTerm,
+    sortByRow,
+    stepHit,
+    type Hit,
+  } from "$lib/find";
   import { p4, setClipboard } from "$lib/p4";
   import type { MergeData, MergeRegion } from "$lib/p4";
 
@@ -583,8 +591,11 @@
     return c && c.pane === pane && c.line === line ? [c.start, c.end] : null;
   }
   function openFind() {
+    // Whatever is selected is almost always what the search is for.
+    const seed = occurQuery;
     finding = true;
     hitAt = -1;
+    if (seed) query = seed;
   }
   function closeFind() {
     finding = false;
@@ -630,6 +641,29 @@
   function onPickMark(i: number) {
     if (i < regions.length) jumpTo(i);
     else goToHit(i - regions.length);
+  }
+
+  // --- the selection's other occurrences --------------------------------------
+  // Selecting a word marks the same word elsewhere on screen, and Ctrl+F starts
+  // from it. Two sources: the result pane keeps its selection in the MODEL (it
+  // draws its own bands), while the read-only panes are ordinary DOM text and
+  // the browser owns theirs.
+  let nativeSel = $state("");
+  $effect(() => {
+    const on = () => (nativeSel = window.getSelection()?.toString() ?? "");
+    document.addEventListener("selectionchange", on);
+    return () => document.removeEventListener("selectionchange", on);
+  });
+  const occurQuery = $derived.by(() => {
+    if (finding) return ""; // a search on screen is what the eye is following
+    if (ds && hasSelection(ds)) return selectionTerm(copyText(ds!));
+    return selectionTerm(nativeSel);
+  });
+  /** Where the selected text also appears on one line. Computed per DRAWN row —
+   *  sixty of them — so a selection costs nothing on a file of any size, and
+   *  needs no debouncing while the mouse is down. */
+  function occursOn(line: string): readonly [number, number][] | undefined {
+    return occurQuery ? rangesInLine(line, occurQuery, true) : undefined;
   }
 
   /** Scroll a region into view; conflicts also move the prev/next counter. */
@@ -929,7 +963,7 @@
       ><span class="ln"
         >{base + first + k + 1}</span
       ><span class="src"
-        >{#if line && (toks[base + first + k] || hitRanges[pi].size)}{#each renderLine(line, toks[base + first + k], { finds: hitRanges[pi].get(base + first + k), current: currentOn(pi, base + first + k) }) as seg}<span
+        >{#if line && (toks[base + first + k] || hitRanges[pi].size)}{#each renderLine(line, toks[base + first + k], { finds: hitRanges[pi].get(base + first + k), current: currentOn(pi, base + first + k), occurs: occursOn(line) }) as seg}<span
               style:color={seg.color}
               class:found={seg.found}
               class:current={seg.current}>{seg.text}</span
@@ -1119,6 +1153,7 @@
             {kinds}
             tokens={tokResult}
             findsOf={(abs) => hitRanges[2].get(abs)}
+            occurrences={occurQuery}
             currentOf={(abs) => currentOn(2, abs)}
             lineHeight={LH}
             toolbarHeight={TOOLBAR}
@@ -1509,6 +1544,11 @@
   }
   /* A match keeps its syntax colour and takes a wash behind it; the one the
      find bar is ON takes a stronger one. */
+  /* Another occurrence of what is selected: present, but not a search result. */
+  .src :global(.occur) {
+    background: rgba(170, 178, 190, 0.16);
+    border-radius: 2px;
+  }
   .src :global(.found) {
     background: rgba(232, 192, 90, 0.25);
     border-radius: 2px;

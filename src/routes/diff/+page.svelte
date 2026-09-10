@@ -15,7 +15,15 @@
   import { diffLines, lineEndings, lineKey, type DiffRow } from "$lib/linediff";
   import { endingLabel, renderLine } from "$lib/invisibles";
   import FindBar from "$lib/components/FindBar.svelte";
-  import { findHits, rangesByLine, sortByRow, stepHit, type Hit } from "$lib/find";
+  import {
+    findHits,
+    rangesByLine,
+    rangesInLine,
+    selectionTerm,
+    sortByRow,
+    stepHit,
+    type Hit,
+  } from "$lib/find";
   import { rowWindow } from "$lib/rowwindow";
   import { cacheGet, cacheSet } from "$lib/store.svelte";
   import { langForFile, openSyntax, type SyntaxSession, type TokenRun } from "$lib/syntax";
@@ -734,8 +742,11 @@ initSplit(leftText.trim() === "");
     return c && c.pane === pane && c.line === line ? [c.start, c.end] : null;
   }
   function openFind() {
+    // Whatever is selected is almost always what the search is for.
+    const seed = occurQuery;
     finding = true;
     hitAt = -1;
+    if (seed) query = seed;
   }
   function closeFind() {
     finding = false;
@@ -783,6 +794,29 @@ initSplit(leftText.trim() === "");
   function onPickMark(i: number) {
     if (i < blocks.length) jumpTo(i);
     else goToHit(i - blocks.length);
+  }
+
+  // --- the selection's other occurrences --------------------------------------
+  // Selecting a word marks the same word elsewhere on screen, and Ctrl+F starts
+  // from it. Two sources: the result pane keeps its selection in the MODEL (it
+  // draws its own bands), while the read-only panes are ordinary DOM text and
+  // the browser owns theirs.
+  let nativeSel = $state("");
+  $effect(() => {
+    const on = () => (nativeSel = window.getSelection()?.toString() ?? "");
+    document.addEventListener("selectionchange", on);
+    return () => document.removeEventListener("selectionchange", on);
+  });
+  const occurQuery = $derived.by(() => {
+    if (finding) return ""; // a search on screen is what the eye is following
+    if (ds && hasSelection(ds)) return selectionTerm(copyText(ds!));
+    return selectionTerm(nativeSel);
+  });
+  /** Where the selected text also appears on one line. Computed per DRAWN row —
+   *  sixty of them — so a selection costs nothing on a file of any size, and
+   *  needs no debouncing while the mouse is down. */
+  function occursOn(line: string): readonly [number, number][] | undefined {
+    return occurQuery ? rangesInLine(line, occurQuery, true) : undefined;
   }
 
   /** Alt+Up / Alt+Down step through the changes from anywhere in the window. */
@@ -1193,6 +1227,7 @@ initSplit(leftText.trim() === "");
             hot: hots[first + k],
             finds: leftHits.get(base + first + k),
             current: currentOn(0, base + first + k),
+            occurs: occursOn(line),
           }) as seg}<span
             style:color={seg.color}
             class:ghost={seg.ghost}
@@ -1398,6 +1433,7 @@ initSplit(leftText.trim() === "");
             showInvisibles={invisibles}
             hotOf={(region, line) => blocks[region]?.rhot[line] ?? null}
             findsOf={(abs) => rightHits.get(abs)}
+            occurrences={occurQuery}
             currentOf={(abs) => currentOn(1, abs)}
             lineHeight={LH}
             toolbarHeight={TOOLBAR}
@@ -1597,6 +1633,11 @@ initSplit(leftText.trim() === "");
   /* A match keeps its syntax colour and takes a wash behind it; the one the
      find bar is ON takes a stronger one, so stepping is visible without
      reading the counter. */
+  /* Another occurrence of what is selected: present, but not a search result. */
+  .src :global(.occur) {
+    background: rgba(170, 178, 190, 0.16);
+    border-radius: 2px;
+  }
   .src :global(.found) {
     background: rgba(232, 192, 90, 0.25);
     border-radius: 2px;
