@@ -57,6 +57,35 @@
 
   let open = $state<string | null>(null);
   let openSub = $state<number | null>(null);
+
+  // A submenu runs downwards from its own row, so reaching any entry but the
+  // first means crossing the rows below it. Leaving therefore only SCHEDULES the
+  // close, and arriving anywhere inside the submenu cancels it; a deliberate
+  // move onto another item still closes it, just a moment later.
+  const GRACE_MS = 400;
+  let closeTimer: number | null = null;
+  function cancelClose() {
+    if (closeTimer !== null) {
+      clearTimeout(closeTimer);
+      closeTimer = null;
+    }
+  }
+  function openSubmenu(i: number) {
+    cancelClose();
+    openSub = i;
+  }
+  function scheduleClose() {
+    cancelClose();
+    closeTimer = window.setTimeout(() => {
+      openSub = null;
+      closeTimer = null;
+    }, GRACE_MS);
+  }
+  function closeSubNow() {
+    cancelClose();
+    openSub = null;
+  }
+  $effect(() => cancelClose); // nothing pending once the bar is gone
   const busy = $derived(!connected || refreshing || syncing);
 
   const menus = $derived<{ name: string; items: Item[] }[]>([
@@ -117,18 +146,18 @@
 
   function toggle(name: string) {
     open = open === name ? null : name;
-    openSub = null;
+    closeSubNow();
   }
   function enter(name: string) {
     if (open !== null && open !== name) {
       open = name; // once a menu is open, hover switches menus
-      openSub = null;
+      closeSubNow();
     }
   }
   function run(it: Item) {
     if (it.disabled || !it.action) return;
     open = null;
-    openSub = null;
+    closeSubNow();
     it.action();
   }
 </script>
@@ -152,13 +181,13 @@
             {#if it.sep}
               <div class="msep"></div>
             {:else if it.sub}
-              <div class="subwrap">
-                <button
-                  class="item"
-                  class:on={openSub === i}
-                  disabled={it.disabled}
-                  onpointerenter={() => (openSub = i)}
-                >
+              <!-- svelte-ignore a11y_no_static_element_interactions -->
+              <div
+                class="subwrap"
+                onpointerenter={() => !it.disabled && openSubmenu(i)}
+                onpointerleave={scheduleClose}
+              >
+                <button class="item" class:on={openSub === i} disabled={it.disabled}>
                   <span class="ilabel">{it.label}</span><span class="arrow">▸</span>
                 </button>
                 {#if openSub === i}
@@ -180,7 +209,7 @@
               <button
                 class="item"
                 disabled={it.disabled}
-                onpointerenter={() => (openSub = null)}
+                onpointerenter={scheduleClose}
                 onclick={() => run(it)}
               >
                 {#if it.checked !== undefined}<span class="chk">{it.checked ? "✓" : ""}</span>{/if}<span

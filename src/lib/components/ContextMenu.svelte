@@ -26,6 +26,34 @@
   } = $props();
 
   let openSub = $state<number | null>(null);
+
+  // --- room for error on the way to a submenu ---------------------------------
+  // A submenu opens level with its row and runs DOWNWARDS, so reaching anything
+  // but its first entry means moving diagonally — and that path leaves the row
+  // long before it arrives. Closing on the way out therefore has to wait: a
+  // pointer that lands back inside within the grace period never noticed it was
+  // gone. Entering another submenu row still switches at once, so the delay is
+  // only ever spent on a journey that was heading there anyway.
+  const GRACE_MS = 400;
+  let closeTimer: number | null = null;
+  function cancelClose() {
+    if (closeTimer !== null) {
+      clearTimeout(closeTimer);
+      closeTimer = null;
+    }
+  }
+  function openSubmenu(i: number) {
+    cancelClose();
+    openSub = i;
+  }
+  function scheduleClose() {
+    cancelClose();
+    closeTimer = window.setTimeout(() => {
+      openSub = null;
+      closeTimer = null;
+    }, GRACE_MS);
+  }
+  $effect(() => cancelClose); // nothing pending once the menu is gone
   // Open submenus to the left when the menu is near the right edge.
   const flipLeft = $derived(typeof window !== "undefined" && x > window.innerWidth * 0.6);
 
@@ -73,6 +101,7 @@
   });
 
   function run(it: MenuItem) {
+    cancelClose();
     if (it.disabled || !it.action) return;
     // Invoke BEFORE closing: some actions read a value lazily from the context
     // state (e.g. `() => update(change)` where change comes from the {#if}
@@ -105,7 +134,7 @@
       <div class="sep" role="separator"></div>
     {:else if it.submenu}
       <!-- svelte-ignore a11y_no_static_element_interactions -->
-      <div class="mi" onpointerenter={() => (openSub = i)} onpointerleave={() => (openSub = null)}>
+      <div class="mi" onpointerenter={() => openSubmenu(i)} onpointerleave={scheduleClose}>
         <button class="item sub" disabled={it.disabled}>
           <span>{it.label}</span><span class="chev">▸</span>
         </button>
@@ -118,7 +147,12 @@
         {/if}
       </div>
     {:else}
-      <button class="item" disabled={it.disabled} onclick={() => run(it)}>
+      <button
+        class="item"
+        disabled={it.disabled}
+        onpointerenter={scheduleClose}
+        onclick={() => run(it)}
+      >
         <span class="ilabel">{it.label}</span>
         {#if it.accel && shortcuts.accel(it.accel)}
           <span class="accel mono">{shortcuts.accel(it.accel)}</span>
