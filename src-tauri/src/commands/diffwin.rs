@@ -587,8 +587,13 @@ pub(crate) fn enc(s: &str) -> String {
 
 /// Write `text` to a workspace file, keeping its BOM, line endings and trailing
 /// newline, and clearing the read-only flag p4 leaves on unopened files.
+///
+/// Returns what the file now READS AS — not `text`. Because the file's own line
+/// endings and BOM are kept, the bytes on disk are not the text the window
+/// holds, and a window that recorded `text` as "what is on disk" then saw its
+/// own save as somebody else's edit on every CRLF file.
 #[tauri::command]
-pub async fn write_local_file(path: String, text: String) -> Result<(), String> {
+pub async fn write_local_file(path: String, text: String) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let raw = std::fs::read(&path).map_err(|e| format!("cannot read {path}: {e}"))?;
         let (bom, body) = super::patch::split_bom(&raw);
@@ -602,7 +607,10 @@ pub async fn write_local_file(path: String, text: String) -> Result<(), String> 
         }
         out.extend_from_slice(joined.as_bytes());
         super::patch::make_writable(&path).map_err(|e| format!("cannot make {path} writable: {e}"))?;
-        std::fs::write(&path, &out).map_err(|e| format!("cannot write {path}: {e}"))
+        std::fs::write(&path, &out).map_err(|e| format!("cannot write {path}: {e}"))?;
+        // Decoded exactly as read_text_file would, so the caller can compare the
+        // two without knowing anything about BOMs or line endings.
+        Ok(String::from_utf8_lossy(&out).into_owned())
     })
     .await
     .map_err(|e| format!("write task failed: {e}"))?

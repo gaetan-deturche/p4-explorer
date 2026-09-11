@@ -356,8 +356,8 @@ export interface DiffPair {
 }
 /** Write an edited workspace file back (the diff window's editable side). Goes
  *  through the safe-mode gate: it writes to the workspace. */
-export function writeLocalFile(path: string, text: string): Promise<void> {
-  return safe.guard("write_local_file", () => invoke<void>("write_local_file", { path, text }));
+export function writeLocalFile(path: string, text: string): Promise<string> {
+  return safe.guard("write_local_file", () => invoke<string>("write_local_file", { path, text }));
 }
 
 /** One line of a file, with the change that introduced it. */

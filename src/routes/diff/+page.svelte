@@ -1000,15 +1000,24 @@ initSplit(leftText.trim() === "");
     try {
       const text = docText(ds.doc);
       const at = absoluteLine();
-      await writeLocalFile(rightPath, text);
-      diskText = text; // ours, so the watcher's event about it is not news
+      // What the write REPORTS, not `text`: it keeps the file's own line endings
+      // and BOM, so the bytes that landed are not the ones the model holds —
+      // and the watcher compares the file against this. Recording `text` made
+      // every save on a CRLF file announce itself as an outside edit.
+      diskText = await writeLocalFile(rightPath, text);
       changedOnDisk = false;
       dirty = false;
       // The file on disk is the new right side, so the diff is recomputed against
-      // it: blocks that were edited into agreement stop being changes. The save is
-      // a natural checkpoint, so history starts again from here.
+      // it: blocks that were edited into agreement stop being changes.
+      //
+      // The undo stack SURVIVES. A save is not a new document — it is the same
+      // one, written down — and undo already restores states that predate the
+      // current blocks: it reflows afterwards for exactly that reason. Ctrl+Z
+      // then steps back past the save and marks the window dirty again, which is
+      // what it does in any editor. (Reloading from disk is the other case and
+      // does still clear it: there the content came from somewhere else, and
+      // undoing into it would put this window's text back over theirs.)
       rebuild(text, at);
-      hist = emptyHistory();
       if (changes.length) goTo(Math.min(current, changes.length - 1));
     } catch (e) {
       error = String(e);
