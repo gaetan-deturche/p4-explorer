@@ -25,6 +25,10 @@ import { pending } from "$lib/pending.svelte";
 type Tab = "history" | "pending" | "reviews" | "stashes" | "streams" | "log" | "notes";
 type Hooks = {
   conn: () => P4Conn;
+  /** True in a per-workspace window. Those must not move where the MAIN window
+   *  reopens: opening CuriosityClean beside Curiosity2 says nothing about which
+   *  one the session should start on next time. */
+  secondary: () => boolean;
   getTab: () => Tab;
   setConnError: (m: string) => void; // persistent connection banner ("" clears)
   setNotice: (m: string, ms?: number) => void;
@@ -243,7 +247,16 @@ export const connection = {
     }
   },
 
-  async connect(opts?: { skipAuth?: boolean; skipReselect?: boolean }) {
+  async connect(opts?: {
+    skipAuth?: boolean;
+    skipReselect?: boolean;
+    /** Open THIS workspace rather than the remembered one (a workspace window
+     *  was opened for it). */
+    target?: string;
+    /** Connect and list the workspaces, but select none — an empty window is
+     *  opened precisely so a workspace can be chosen in it. */
+    pickNone?: boolean;
+  }) {
     if (!h) return;
     const conn = h.conn();
     // `skipReselect`: a background validation of an already-open (optimistically
@@ -354,7 +367,7 @@ export const connection = {
       clientHost = (i.clientHost ?? "").trim();
       // Prefer the workspace the user last used on this server; fall back to the
       // client reported by `p4 info`.
-      const saved = loadClientFor(conn.port);
+      const saved = opts?.target || loadClientFor(conn.port);
       const cn = i.clientName;
       const pick = (list: P4Record[]) =>
         saved && list.some((c) => c.client === saved)
@@ -378,7 +391,10 @@ export const connection = {
         })
         .catch((e) => h!.setConnError(`Couldn't list this server's workspaces: ${String(e)}`));
 
-      if (opts?.skipReselect) {
+      if (opts?.pickNone) {
+        await refreshClients; // the picker is the point of this window
+        h.setNotice("Connected — pick a workspace for this window.", 8000);
+      } else if (opts?.skipReselect) {
         await refreshClients; // workspace already open — just refresh list + Host marks
         // Those pre-login loads all failed, and nothing re-asked: the History tab
         // stayed empty and the file tree greyed out until the user pressed
@@ -433,9 +449,42 @@ export const connection = {
       h.setConnError("This workspace has no stream. Depot browsing currently requires a stream client.");
       return;
     }
-    saveLastServer(conn.port);
-    saveClientFor(conn.port, next);
+    if (!h.secondary()) {
+      saveLastServer(conn.port);
+      saveClientFor(conn.port, next);
+    }
     await browse.openWorkspace(rec.Stream, rec.Root ?? "", saved, fallbackTab);
+  },
+
+  /** Open one specific workspace on `port` — how a workspace window boots.
+   *  Unlike switchServerTo it never consults the remembered workspace: this
+   *  window was opened to show THIS one. `client` empty = connect and let the
+   *  user pick. */
+  async openAt(port: string, client: string) {
+    if (!h) return;
+    const conn = h.conn();
+    conn.port = normalizePort(port);
+    conn.user = loadUserFor(conn.port);
+    conn.ticket = "";
+    conn.charset = loadCharsetFor(conn.port);
+    conn.client = "";
+    browse.reset();
+    if (!client) {
+      await connection.connect({ pickNone: true });
+      return;
+    }
+    // Same optimistic path as a known server: the cached list can open the
+    // workspace before `p4 clients` answers, and the real connect validates
+    // behind it.
+    const cached = loadClientsFor(conn.port);
+    if (cached.some((c) => c.client === client && c.Stream)) {
+      connected = true; // reverted by connect() below if auth fails
+      setClientList(cached);
+      await connection.selectClient(client);
+      void connection.connect({ skipReselect: true });
+      return;
+    }
+    await connection.connect({ target: client });
   },
 
   async switchServerTo(port: string) {

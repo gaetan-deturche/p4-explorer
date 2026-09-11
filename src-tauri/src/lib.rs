@@ -131,6 +131,7 @@ pub fn run() {
             commands::open_merge_window,
             commands::resolve_needed,
             commands::watch_file,
+            commands::open_workspace_window,
             commands::unwatch_file,
             commands::merge_reload,
             commands::pick_folder,

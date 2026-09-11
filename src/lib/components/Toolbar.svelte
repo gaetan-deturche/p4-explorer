@@ -12,6 +12,7 @@
     reconciling,
     onClientChange,
     onNewWorkspace,
+    onNewWindow,
     onPickWorkspaces,
     onManageWorkspaces,
     onServerChange,
@@ -31,6 +32,9 @@
     reconciling: boolean;
     onClientChange: (client: string) => void;
     onNewWorkspace: () => void;
+    /** A second app window, for another workspace: it opens empty and this
+     *  picker is how the user points it somewhere. */
+    onNewWindow: () => void;
     /** About to open the workspace picker: a chance to re-read the list. */
     onPickWorkspaces: () => void;
     /** The picker's "Manage workspaces…" entry. */
@@ -59,14 +63,16 @@
 
   const NEW_WS = "__new_ws__";
   const MANAGE_WS = "__manage_ws__";
+  const NEW_WIN = "__new_window__";
   function onWsPick(e: Event) {
     const sel = e.currentTarget as HTMLSelectElement;
     const v = sel.value;
     // The two action entries are not workspaces: put the selection back before
     // opening anything, or the picker is left showing "New…" as if it were one.
-    if (v === NEW_WS || v === MANAGE_WS) {
+    if (v === NEW_WS || v === MANAGE_WS || v === NEW_WIN) {
       sel.value = conn.client;
       if (v === NEW_WS) onNewWorkspace();
+      else if (v === NEW_WIN) onNewWindow();
       else onManageWorkspaces();
       return;
     }
@@ -120,6 +126,7 @@
               : ""}
           </option>
         {/each}
+        <option value={NEW_WIN}>⧉ New window…</option>
         <option value={NEW_WS}>＋ New workspace…</option>
       <option value={MANAGE_WS}>⚙ Manage workspaces…</option>
       </select>

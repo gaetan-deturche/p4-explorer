@@ -29,6 +29,7 @@ mod swarm;
 mod sync;
 mod undo;
 mod watch;
+mod workwin;
 pub mod unreal_remote; // pub: exercised by the uediscover dev bin
 
 // Re-export every command so the registration in `lib.rs` can keep referring to
@@ -52,6 +53,7 @@ pub use swarm::*;
 pub use sync::*;
 pub use undo::*;
 pub use watch::*;
+pub use workwin::*;
 
 /// Result of a tagged-record `p4` command.
 pub(crate) type Res = Result<Vec<Record>, String>;

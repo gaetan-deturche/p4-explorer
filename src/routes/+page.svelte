@@ -2,6 +2,7 @@
   import { hydrateScope } from "$lib/store.svelte";
   import { untrack, onMount, onDestroy } from "svelte";
   import { getVersion } from "@tauri-apps/api/app";
+  import { getCurrentWindow } from "@tauri-apps/api/window";
   import {
     isReleaseBuild,
     emptyConn,
@@ -10,6 +11,7 @@
     openFileHistoryWindow,
     openBlameWindow,
     openReviewWindow,
+    openWorkspaceWindow,
     p4,
     type P4Conn,
     type P4Record,
@@ -66,6 +68,17 @@
   // `conn` stays here (two-way bound by Toolbar/OptionsDialog); all connection
   // logic + derived state (connected/busy/clients/servers) lives in the store.
   let conn = $state<P4Conn>(emptyConn());
+
+  // --- which window is this ----------------------------------------------------
+  // A workspace window is the same app on the same route; all that distinguishes
+  // it is its label and what its URL asks it to open. `new=1` is an empty one,
+  // opened precisely so a DIFFERENT workspace can be picked in it — it must not
+  // restore the remembered one.
+  const bootArgs = new URLSearchParams(window.location.search);
+  const bootClient = bootArgs.get("client") ?? "";
+  const bootPort = bootArgs.get("port") ?? "";
+  const bootBlank = bootArgs.get("new") === "1";
+  const isMainWindow = getCurrentWindow().label === "main";
   let syncing = $state(false);
   let reconciling = $state(false);
   let optionsOpen = $state(false);
@@ -922,8 +935,10 @@
     streamCtx = { x: e.clientX, y: e.clientY, stream };
   }
 
+  // Closes THIS window. With one window that quits the app, which is what Exit
+  // has always meant here; with a window per workspace it shuts the one you are
+  // looking at and leaves the others working.
   async function exitApp() {
-    const { getCurrentWindow } = await import("@tauri-apps/api/window");
     await getCurrentWindow().close();
   }
 
@@ -932,6 +947,14 @@
     notice = `Auger${ver}${connection.serverVersion ? " · server " + connection.serverVersion : ""}`;
     window.setTimeout(() => (notice = ""), 6000);
   }
+
+  // The taskbar has to say WHICH workspace: the moment a second window exists,
+  // two entries both reading "Auger" are indistinguishable.
+  $effect(() => {
+    getCurrentWindow()
+      .setTitle(conn.client ? `Auger — ${conn.client}` : "Auger")
+      .catch(() => {});
+  });
 
   onMount(() => {
     cmdlog.start(); // record p4 commands for the Commands view
@@ -950,6 +973,7 @@
     });
     connection.init({
       conn: () => conn,
+      secondary: () => !isMainWindow,
       getTab: () => centerTab,
       setConnError: (m) => {
         error = m;
@@ -1061,7 +1085,10 @@
       // immediately — every pane paints from the store — and the real connect
       // validates in the background.
       const last = loadLastServer();
-      if (last) {
+      if (bootClient || bootBlank) {
+        // A workspace window: open what it was opened FOR, not the last session.
+        void connection.openAt(bootPort || last, bootClient);
+      } else if (last) {
         void connection.switchServerTo(last);
       } else {
         void connection.connect(); // first run: adopt ambient P4PORT
@@ -1073,7 +1100,9 @@
     isReleaseBuild()
       .then((v) => {
         isRelease = v;
-        if (v) {
+        // One window checks: two would race to download the same installer, and
+        // the update dialog would open in whichever window the user is not in.
+        if (v && isMainWindow) {
           updates.check(true); // silent check only on release builds
           updates.startAutoCheck();
         }
@@ -1097,6 +1126,9 @@
     onSync={() => sync.globalSync()}
     onApplyPatch={() => patches.pickAndPreview()}
     onNewWorkspace={() => (newWorkspaceOpen = true)}
+    workspaces={connection.clients.map((c) => ({ client: c.client, root: c.Root ?? "" }))}
+    currentWorkspace={conn.client}
+    onOpenWorkspaceWindow={(c) => void openWorkspaceWindow(conn.port, c)}
     onToggleView={toggleView}
     onAbout={showAbout}
     onCheckUpdates={() => updates.check(false)}
@@ -1112,6 +1144,7 @@
     {reconciling}
     onClientChange={(c) => connection.selectClient(c)}
     onNewWorkspace={() => (newWorkspaceOpen = true)}
+    onNewWindow={() => void openWorkspaceWindow(conn.port, "")}
     onPickWorkspaces={() => void connection.refreshClients()}
     onManageWorkspaces={() => (manageWsOpen = true)}
     onServerChange={(p) => connection.switchServerTo(p)}

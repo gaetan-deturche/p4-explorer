@@ -445,6 +445,12 @@ export function openFileHistoryWindow(conn: P4Conn, depotFile: string): Promise<
   return invoke<void>("open_file_history_window", { conn, depotFile });
 }
 
+/** Open (or re-focus) a second app window on `client`; "" opens an empty one
+ *  for the user to pick a workspace in. */
+export function openWorkspaceWindow(port: string, client: string): Promise<void> {
+  return invoke<void>("open_workspace_window", { port, client });
+}
+
 /** Open (or re-focus) the window for one review. */
 export function openReviewWindow(conn: P4Conn, id: number): Promise<void> {
   return invoke<void>("open_review_window", { conn, id });

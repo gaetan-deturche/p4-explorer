@@ -42,6 +42,14 @@ fn registry() -> &'static Mutex<HashMap<String, MergeJob>> {
     R.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// Which window asked for a resolve. `merge-done` goes THERE and nowhere else:
+/// with a window per workspace, a broadcast makes every other workspace
+/// announce a merge it knows nothing about and refresh for it.
+fn parents() -> &'static Mutex<HashMap<String, String>> {
+    static P: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+    P.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 pub(crate) fn register(job: MergeJob) -> String {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     let id = format!("m{}", NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
@@ -186,13 +194,24 @@ pub(crate) fn prepare_resolve_merge(conn: &P4Conn, depot_file: &str) -> Result<S
 /// splices the result in and prunes the hunk from the `.rej`.
 #[tauri::command]
 pub async fn merge_save(app: AppHandle, id: String, text: String) -> Result<String, String> {
+    let job = id.clone();
     let out = tauri::async_runtime::spawn_blocking(move || merge_save_inner(&id, &text))
         .await
         .map_err(|e| format!("merge-save task failed: {e}"))?;
     if out.is_ok() {
-        // Let the main window refresh: it has no idea this window saved.
+        // Let the window that asked for this resolve refresh: it has no idea
+        // this one saved. Only that window — the others are other workspaces.
         use tauri::Emitter;
-        let _ = app.emit("merge-done", ());
+        match parents().lock().unwrap().remove(&job) {
+            Some(parent) => {
+                let _ = app.emit_to(parent, "merge-done", ());
+            }
+            // A resolve opened before this window existed, or from a path that
+            // records no parent: telling everyone is better than telling no one.
+            None => {
+                let _ = app.emit("merge-done", ());
+            }
+        }
     }
     out
 }
@@ -200,6 +219,7 @@ pub async fn merge_save(app: AppHandle, id: String, text: String) -> Result<Stri
 /// Drop this merge without writing anything (the window was closed).
 #[tauri::command]
 pub async fn merge_cancel(id: String) -> Result<(), String> {
+    parents().lock().unwrap().remove(&id);
     registry().lock().unwrap().remove(&id);
     Ok(())
 }
@@ -264,7 +284,13 @@ pub async fn merge_external(id: String) -> Result<String, String> {
 
 /// Open the in-app resolve window on the `/merge` route for job `id`.
 #[tauri::command]
-pub async fn open_merge_window(app: AppHandle, id: String, name: String) -> Result<(), String> {
+pub async fn open_merge_window(
+    app: AppHandle,
+    window: tauri::Window,
+    id: String,
+    name: String,
+) -> Result<(), String> {
+    parents().lock().unwrap().insert(id.clone(), window.label().to_string());
     let label = format!("merge-{id}");
     let url = format!("merge?id={id}");
     let win = WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(url.into()))

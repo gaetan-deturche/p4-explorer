@@ -14,6 +14,9 @@
     onSync,
     onApplyPatch,
     onNewWorkspace,
+    workspaces,
+    currentWorkspace,
+    onOpenWorkspaceWindow,
     onToggleView,
     onAbout,
     onCheckUpdates,
@@ -29,6 +32,10 @@
     onSync: () => void;
     onApplyPatch: () => void;
     onNewWorkspace: () => void;
+    /** The workspaces on this server, for the "open in a new window" submenu. */
+    workspaces: { client: string; root: string }[];
+    currentWorkspace: string;
+    onOpenWorkspaceWindow: (client: string) => void;
     onToggleView: (key: keyof Views) => void;
     onAbout: () => void;
     onCheckUpdates: () => void;
@@ -43,9 +50,13 @@
     /** Shortcut id: the key is read from the registry, so a rebinding shows here
      *  without this file knowing anything about which key it is. */
     accel?: string;
+    /** A submenu, opened by hovering this item. */
+    sub?: Item[];
+    title?: string;
   };
 
   let open = $state<string | null>(null);
+  let openSub = $state<number | null>(null);
   const busy = $derived(!connected || refreshing || syncing);
 
   const menus = $derived<{ name: string; items: Item[] }[]>([
@@ -61,6 +72,19 @@
     {
       name: "Workspace",
       items: [
+        {
+          label: "Open in a new window",
+          disabled: !connected || !workspaces.length,
+          // The workspace a window is already showing is not a destination:
+          // asking for it again would just raise this window.
+          sub: workspaces.map((w) => ({
+            label: w.client === currentWorkspace ? `${w.client}  (this window)` : w.client,
+            title: w.root,
+            disabled: w.client === currentWorkspace,
+            action: () => onOpenWorkspaceWindow(w.client),
+          })),
+        },
+        { label: "", sep: true },
         { label: "New workspace…", action: onNewWorkspace, disabled: !connected },
         { label: "", sep: true },
         { label: "Refresh", action: onRefresh, disabled: busy, accel: "refresh" },
@@ -93,13 +117,18 @@
 
   function toggle(name: string) {
     open = open === name ? null : name;
+    openSub = null;
   }
   function enter(name: string) {
-    if (open !== null) open = name; // once a menu is open, hover switches menus
+    if (open !== null && open !== name) {
+      open = name; // once a menu is open, hover switches menus
+      openSub = null;
+    }
   }
   function run(it: Item) {
     if (it.disabled || !it.action) return;
     open = null;
+    openSub = null;
     it.action();
   }
 </script>
@@ -122,8 +151,38 @@
           {#each m.items as it, i (i)}
             {#if it.sep}
               <div class="msep"></div>
+            {:else if it.sub}
+              <div class="subwrap">
+                <button
+                  class="item"
+                  class:on={openSub === i}
+                  disabled={it.disabled}
+                  onpointerenter={() => (openSub = i)}
+                >
+                  <span class="ilabel">{it.label}</span><span class="arrow">▸</span>
+                </button>
+                {#if openSub === i}
+                  <div class="dropdown sub">
+                    {#each it.sub as s, j (j)}
+                      <button
+                        class="item"
+                        disabled={s.disabled}
+                        title={s.title ?? ""}
+                        onclick={() => run(s)}
+                      >
+                        <span class="ilabel mono">{s.label}</span>
+                      </button>
+                    {/each}
+                  </div>
+                {/if}
+              </div>
             {:else}
-              <button class="item" disabled={it.disabled} onclick={() => run(it)}>
+              <button
+                class="item"
+                disabled={it.disabled}
+                onpointerenter={() => (openSub = null)}
+                onclick={() => run(it)}
+              >
                 {#if it.checked !== undefined}<span class="chk">{it.checked ? "✓" : ""}</span>{/if}<span
                   class="ilabel">{it.label}</span
                 >
@@ -174,6 +233,24 @@
   }
   .menu {
     position: relative;
+  }
+  /* A submenu hangs off the right edge of its row and overlaps the parent's
+     border by a pixel, so crossing into it never passes over a gap that would
+     close it. */
+  .subwrap {
+    position: relative;
+  }
+  .dropdown.sub {
+    top: -5px;
+    left: calc(100% - 1px);
+    border-radius: 6px;
+  }
+  .item.on {
+    background: var(--bg-hover);
+  }
+  .arrow {
+    opacity: 0.55;
+    font-size: 10px;
   }
   .top {
     border: none;
