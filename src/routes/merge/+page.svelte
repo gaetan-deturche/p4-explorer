@@ -21,6 +21,9 @@
     applyMove,
     applyMoveLines,
     applyRegionLines,
+    applyRegionSlice,
+    cursorRange,
+    focusCursor,
     applySelectAll,
     applySelectLine,
     applySelectWord,
@@ -421,6 +424,77 @@
     origin = { ...origin, [i]: what };
     scheduleRecolor(); // taking a side rewrites the region — as an edit does
   }
+  /** A side’s line for row `k` of a conflict, and where it belongs in the
+   *  result. The three panes draw row k of a region on one line, so that is the
+   *  pairing the eye is already using: row k replaces the result’s row k, or is
+   *  inserted when the result does not reach that far — which is every row of a
+   *  conflict nobody has decided yet, since those start empty.
+   *
+   *  Inserting at min(k, length) is what lets the lines be clicked in any order
+   *  and still land in the order they are read in.
+   *
+   *  `null` when that side has no row k: there is nothing to take. */
+  function lineTake(
+    i: number,
+    which: "theirs" | "ours",
+    k: number,
+  ): { from: number; to: number; lines: string[] } | null {
+    const r = regions[i];
+    const out = ds?.doc.regions[i]?.lines;
+    if (!r || !out || r.kind !== "conflict") return null;
+    const line = side(r, which)[k];
+    if (line === undefined) return null;
+    if (k < out.length) return { from: k, to: k + 1, lines: [line] };
+    const at = Math.min(k, out.length);
+    return { from: at, to: at, lines: [line] };
+  }
+
+  /** Take one line of a conflict from one side, leaving the rest of it open.
+   *  Like any other edit inside a region this marks it hand-settled: it IS a
+   *  decision, just a smaller one than taking the whole side. */
+  function takeLine(i: number, which: "theirs" | "ours", k: number) {
+    if (!ds) return;
+    const take = lineTake(i, which, k);
+    if (!take) return;
+    hist = push(hist, ds, false);
+    typing = false;
+    ds = applyRegionSlice(ds, i, take.from, take.to, take.lines);
+    touched(i);
+    scheduleRecolor(); // the region was rewritten, as an edit rewrites it
+  }
+
+  /** Take a side for every line the selection touches in the result — or the
+   *  caret’s line when nothing is selected. The mouse takes one line at a time;
+   *  this takes a run of them.
+   *
+   *  The region is rewritten in ONE go: line by line would move the lines still
+   *  to come. Only conflicts, and only rows the side actually has. */
+  function takeCaretLines(which: "theirs" | "ours") {
+    if (!ds) return;
+    const { from, to } = cursorRange(ds.doc, focusCursor(ds));
+    const order = (region: number) => ds!.doc.regions.findIndex((x) => x.region === region);
+    const fromOrder = order(from.region);
+    const toOrder = order(to.region);
+    let next = ds;
+    let touchedAny = -1;
+    for (let n = toOrder; n >= fromOrder; n--) {
+      const r = next.doc.regions[n];
+      if (!r || regions[r.region]?.kind !== "conflict") continue;
+      const a = n === fromOrder ? from.line : 0;
+      const b = n === toOrder ? to.line + 1 : r.lines.length;
+      const lines = r.lines.slice(a, b).map((line, j) => side(regions[r.region], which)[a + j] ?? line);
+      if (lines.join("\n") === r.lines.slice(a, b).join("\n")) continue;
+      next = applyRegionSlice(next, r.region, a, b, lines);
+      touchedAny = r.region;
+    }
+    if (touchedAny < 0) return;
+    hist = push(hist, ds, false);
+    typing = false;
+    ds = next;
+    touched(touchedAny);
+    scheduleRecolor();
+  }
+
   /** Take one side for the WHOLE file: p4's "accept theirs" / "accept yours".
    *
    *  Every region becomes that side's text, not just the conflicts — so the
@@ -530,6 +604,13 @@
     // extra carets, and preventDefault does not stop the event bubbling to here.
     if (e.defaultPrevented) return;
     if (!e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+    // Alt+Left / Alt+Right point the way the text moves: from that side into the
+    // result, for the lines the caret or the selection is on.
+    if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+      e.preventDefault();
+      takeCaretLines(e.key === "ArrowLeft" ? "theirs" : "ours");
+      return;
+    }
     if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
     e.preventDefault();
     goTo(current + (e.key === "ArrowDown" ? 1 : -1));
@@ -803,7 +884,8 @@
       dark,
     );
     resultGen = gen;
-    tokResult = [];
+    // What is on screen stays there while the new session opens: clearing it
+    // turned the pane white on every keystroke.
     painted = "";
     colourWindow();
   }
@@ -1137,9 +1219,32 @@
             >
               {#if r.kind === "conflict"}<div class="strip"></div>{/if}
               {#if flow.left}
-                <div class="arrow" title="This region's text came from the depot side">▶</div>
+                <div
+                  class="arrow"
+                  class:instrip={r.kind === "conflict"}
+                  title="This region's text came from the depot side"
+                >
+                  ▶
+                </div>
               {:else if flow.open}
-                <div class="arrow open" title="Undecided conflict" data-region={i}>?</div>
+                <div
+                  class="arrow open"
+                  class:instrip={r.kind === "conflict"}
+                  title="Undecided conflict"
+                  data-region={i}
+                >
+                  ?
+                </div>
+              {/if}
+              {#if r.kind === "conflict"}
+                {@const w = windowOf(tops[i] + TOOLBAR, rows[i])}
+                {#each Array.from({ length: Math.max(0, w.last - w.first + 1) }, (_, n) => w.first + n) as k (k)}
+                  {#if lineTake(i, "theirs", k)}
+                    <div class="linewrap" style="top:{TOOLBAR + k * LH}px">
+                      <button class="linetake" title="Take this one line from the depot" onclick={() => takeLine(i, "theirs", k)}>›</button>
+                    </div>
+                  {/if}
+                {/each}
               {/if}
             </div>
           {/each}
@@ -1174,9 +1279,27 @@
             >
               {#if r.kind === "conflict"}<div class="strip"></div>{/if}
               {#if flow.right}
-                <div class="arrow" title="This region's text came from the workspace side">◀</div>
+                <div
+                  class="arrow"
+                  class:instrip={r.kind === "conflict"}
+                  title="This region's text came from the workspace side"
+                >
+                  ◀
+                </div>
               {:else if flow.open}
-                <div class="arrow open" title="Undecided conflict">?</div>
+                <div class="arrow open" class:instrip={r.kind === "conflict"} title="Undecided conflict">
+                  ?
+                </div>
+              {/if}
+              {#if r.kind === "conflict"}
+                {@const w = windowOf(tops[i] + TOOLBAR, rows[i])}
+                {#each Array.from({ length: Math.max(0, w.last - w.first + 1) }, (_, n) => w.first + n) as k (k)}
+                  {#if lineTake(i, "ours", k)}
+                    <div class="linewrap" style="top:{TOOLBAR + k * LH}px">
+                      <button class="linetake" title="Take this one line from the workspace" onclick={() => takeLine(i, "ours", k)}>‹</button>
+                    </div>
+                  {/if}
+                {/each}
               {/if}
             </div>
           {/each}
@@ -1411,6 +1534,49 @@
   .col.link {
     background: var(--bg-alt, #1f1f1f);
     text-align: center;
+  }
+  /* On a conflict the region’s own indicator sits in the strip above the rows,
+     which leaves every row below free for a button of its own. */
+  .arrow.instrip {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 24px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .linewrap {
+    position: absolute;
+    left: 0;
+    right: 0;
+    height: 17.4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  /* Quiet until the column is pointed at: a conflict is usually settled a whole
+     side at a time, and a column of arrows would shout over the toolbar. */
+  .linetake {
+    padding: 0 3px;
+    height: 14px;
+    line-height: 12px;
+    font-size: 11px;
+    /* Hidden means hidden: an invisible button that still takes clicks is a
+       trap, and this column is also where the region's own arrow lives. */
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 90ms linear;
+  }
+  .col.link:hover .linetake {
+    opacity: 0.55;
+    pointer-events: auto;
+  }
+  .col.link:hover .linetake:hover {
+    opacity: 1;
+    border-color: var(--accent, #d98d3a);
+    color: var(--accent, #d98d3a);
   }
   .resultcol {
     background: rgba(255, 255, 255, 0.02);

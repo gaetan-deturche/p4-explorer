@@ -53,10 +53,13 @@
     applyMove,
     applyMoveLines,
     applyRegionLines,
+    applyRegionSlice,
     applySelectAll,
     applySelectLine,
     applySelectWord,
     copyText,
+    cursorRange,
+    focusCursor,
     hasSelection,
     primaryCaret,
     singleCursor,
@@ -365,7 +368,7 @@
   const gridCols = $derived(
     single
       ? "0 0 minmax(0, 1fr)"
-      : `minmax(0, ${split}fr) 1.6rem minmax(0, ${1 - split}fr)`,
+      : `minmax(0, ${split}fr) 3rem minmax(0, ${1 - split}fr)`,
   );
   // --- what is on screen -----------------------------------------------------
   // Only the visible rows are rendered. Both panes do this: at 17942 lines this
@@ -491,7 +494,10 @@
     cacheSet("nav", "diff-ignore-ws", v ? "1" : "0");
     // The comparison changed, so the blocks have to be recomputed from the text
     // that is on screen now (edits included).
-    if (ds) rebuild(docText(ds.doc), absoluteLine());
+    if (ds) {
+      const at = absoluteCaret();
+      rebuild(docText(ds.doc), at.line, at.col);
+    }
   }
   function setInvisibles(v: boolean) {
     invisibles = v;
@@ -649,20 +655,26 @@ initSplit(leftText.trim() === "");
     if (!ds || !editable) return;
     // Re-blocking is what a selection defers; the colouring is not — the
     // document changed, so the session in hand no longer describes it.
-    if (!hasSelection(ds)) rebuild(docText(ds.doc), absoluteLine());
+    if (!hasSelection(ds)) {
+      const at = absoluteCaret();
+      rebuild(docText(ds.doc), at.line, at.col);
+    }
     scheduleRecolor(); // the edited lines have no tokens yet
   }
 
-  /** The caret's line counted from the top of the right file. */
-  function absoluteLine(): number {
-    if (!ds) return 0;
+  /** Where the caret is in the right file: its line counted from the top, and
+   *  its column. Both halves are needed — a rebuild that restores the line alone
+   *  puts the caret at the START of it, so the next character typed lands there
+   *  instead of where it was being typed. */
+  function absoluteCaret(): { line: number; col: number } {
+    if (!ds) return { line: 0, col: 0 };
     const caret = primaryCaret(ds);
     let n = 0;
     for (const r of ds.doc.regions) {
-      if (r.region === caret.region) return n + caret.line;
+      if (r.region === caret.region) return { line: n + caret.line, col: caret.col };
       n += r.lines.length;
     }
-    return n;
+    return { line: n, col: caret.col };
   }
 
   let scrollEl: HTMLDivElement | undefined = $state();
@@ -840,6 +852,13 @@ initSplit(leftText.trim() === "");
     // extra carets, and preventDefault does not stop the event bubbling to here.
     if (e.defaultPrevented) return;
     if (!e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+    // Alt+Left points the way the text moves: from the reference side into this
+    // one, for the lines the caret or the selection is on.
+    if (e.key === "ArrowLeft" && editable) {
+      e.preventDefault();
+      takeCaretLines();
+      return;
+    }
     if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
     e.preventDefault();
     goTo(current + (e.key === "ArrowDown" ? 1 : -1));
@@ -982,6 +1001,79 @@ initSplit(leftText.trim() === "");
     }
   }
 
+  /** The other side's line for row `k` of block `i`, and where it goes: the two
+   *  panes draw row k of a block beside row k of the other side, so that is the
+   *  pairing the eye is already using. A row past the end of one side has no
+   *  counterpart — it is a line this side added (take it away) or one it removed
+   *  (put it back).
+   *
+   *  `null` when there is nothing to do. */
+  function lineTake(i: number, k: number): { from: number; to: number; lines: string[] } | null {
+    const b = blocks[i];
+    const right = ds?.doc.regions[i]?.lines;
+    if (!b || !right || b.kind === "same") return null;
+    const line = b.left[k];
+    if (line === undefined) {
+      // Added here and nowhere on the other side: taking that side drops it.
+      return k < right.length ? { from: k, to: k + 1, lines: [] } : null;
+    }
+    if (k < right.length) return { from: k, to: k + 1, lines: [line] };
+    // Removed here: put it back where it sat relative to the rows around it.
+    const at = Math.min(k, right.length);
+    return { from: at, to: at, lines: [line] };
+  }
+
+  /** Take one line of a block from the other side, leaving the rest of the block
+   *  alone — the finer version of reverting the whole block. */
+  function takeLine(i: number, k: number) {
+    if (!ds || !editable) return;
+    const take = lineTake(i, k);
+    if (!take) return;
+    hist = push(hist, ds, false);
+    typing = false;
+    ds = applyRegionSlice(ds, i, take.from, take.to, take.lines);
+    dirty = true;
+    scheduleRecolor(); // the block was rewritten, as an edit rewrites it
+  }
+
+  /** The same, for every line the selection touches — or the caret’s line when
+   *  nothing is selected. The mouse takes one line at a time; this takes a run.
+   *
+   *  Each region is rewritten in ONE go: doing it line by line would move the
+   *  lines still to come. */
+  function takeCaretLines() {
+    if (!ds || !editable) return;
+    const { from, to } = cursorRange(ds.doc, focusCursor(ds));
+    let next = ds;
+    let touched = false;
+    // Bottom-up: a region above keeps its index whatever happens below it, and
+    // rewriting is per region anyway.
+    for (let n = ds.doc.regions.length - 1; n >= 0; n--) {
+      const r = ds.doc.regions[n];
+      if (blocks[n]?.kind === "same") continue;
+      const fromOrder = ds.doc.regions.findIndex((x) => x.region === from.region);
+      const toOrder = ds.doc.regions.findIndex((x) => x.region === to.region);
+      if (n < fromOrder || n > toOrder) continue;
+      const a = n === fromOrder ? from.line : 0;
+      const b = n === toOrder ? to.line + 1 : r.lines.length;
+      const lines: string[] = [];
+      for (let k = a; k < b; k++) {
+        const take = lineTake(r.region, k);
+        if (take && take.from === k && take.to === k + 1) lines.push(...take.lines);
+        else lines.push(r.lines[k]); // nothing pairs with it; leave it as it is
+      }
+      if (lines.join("\n") === r.lines.slice(a, b).join("\n")) continue;
+      next = applyRegionSlice(next, r.region, a, b, lines);
+      touched = true;
+    }
+    if (!touched) return;
+    hist = push(hist, ds, false);
+    typing = false;
+    ds = next;
+    dirty = true;
+    scheduleRecolor();
+  }
+
   /** Discard the local change in one block: take the other side's lines. */
   function revertBlock(i: number) {
     if (!ds || !editable) return;
@@ -999,7 +1091,7 @@ initSplit(leftText.trim() === "");
     saving = true;
     try {
       const text = docText(ds.doc);
-      const at = absoluteLine();
+      const at = absoluteCaret();
       // What the write REPORTS, not `text`: it keeps the file's own line endings
       // and BOM, so the bytes that landed are not the ones the model holds —
       // and the watcher compares the file against this. Recording `text` made
@@ -1017,7 +1109,7 @@ initSplit(leftText.trim() === "");
       // what it does in any editor. (Reloading from disk is the other case and
       // does still clear it: there the content came from somewhere else, and
       // undoing into it would put this window's text back over theirs.)
-      rebuild(text, at);
+      rebuild(text, at.line, at.col);
       if (changes.length) goTo(Math.min(current, changes.length - 1));
     } catch (e) {
       error = String(e);
@@ -1035,9 +1127,14 @@ initSplit(leftText.trim() === "");
     return p.split(/[\\/]/).pop() ?? p;
   }
   // An edit moves the lines the colouring was asked about, so the session no
-  // longer describes the document. Reopened after the edit rather than per
-  // keystroke — and until it is, `docGen` keeps the stale answers off the
-  // screen: no colour for a moment beats the wrong one.
+  // longer describes the document. It is reopened after the edit rather than per
+  // keystroke, and `docGen` keeps answers from the OLD session from being
+  // painted onto the new document.
+  //
+  // What stays on screen meanwhile is the colouring already there. It is a
+  // little wrong — by one line per line the edit added — and a little wrong for
+  // a fraction of a second beats the whole pane going white on every keystroke,
+  // which is what clearing it did.
   let recolorTimer: number | null = null;
   function scheduleRecolor() {
     docGen++; // the session in hand no longer describes the document
@@ -1083,8 +1180,7 @@ initSplit(leftText.trim() === "");
       dark(),
     );
     rightGen = gen;
-    tokRight = [];
-    painted = "";
+    painted = ""; // the window has to be asked for again; what it holds stays up
     colourWindow();
   }
 
@@ -1198,8 +1294,8 @@ initSplit(leftText.trim() === "");
       const text = await invoke<string>("read_text_file", { path: rightPath });
       diskText = text;
       changedOnDisk = false;
-      const at = absoluteLine();
-      rebuild(text, at);
+      const at = absoluteCaret();
+      rebuild(text, at.line, at.col);
       hist = emptyHistory();
       dirty = false;
       void openRight();
@@ -1409,7 +1505,13 @@ initSplit(leftText.trim() === "");
           {@render markers("left")}
         </div>
 
-        <!-- One button per remaining change: revert that block to the other side.
+        <!-- Two columns of buttons: the whole block on the right, one line of it
+             on the left. They have separate homes rather than sharing a slot,
+             because a control that appears where another one was is a control
+             you cannot aim at. The line arrows are drawn only for the rows on
+             screen — a file of changes would otherwise put thousands of buttons
+             in the DOM — and only show on hover, since the block arrow is the
+             one wanted most of the time.
              The gutter background doubles as the split-drag handle. -->
         <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div class="col gut splitgrip" style="height:{total}px" onpointerdown={splitDown}>
@@ -1428,6 +1530,20 @@ initSplit(leftText.trim() === "");
                   <span class="dim ro" title="Read-only diff">•</span>
                 {/if}
               </div>
+              {#if editable}
+                {@const w = windowOf(tops[i], rows[i])}
+                {#each Array.from({ length: Math.max(0, w.last - w.first + 1) }, (_, n) => w.first + n) as k (k)}
+                  {#if lineTake(i, k)}
+                    <div class="linewrap" style="top:{tops[i] + k * LH}px">
+                      <button
+                        class="rev line"
+                        title="Take this one line from {leftLabel}"
+                        onclick={() => takeLine(i, k)}>›</button
+                      >
+                    </div>
+                  {/if}
+                {/each}
+              {/if}
             {/if}
           {/each}
         </div>
@@ -1937,14 +2053,49 @@ initSplit(leftText.trim() === "");
   .head.gut {
     padding: 5px 0;
   }
-  .revwrap {
+  /* The block’s own arrow keeps the right half of the gutter; the per-line ones
+     take the left. Fixed halves, so neither ever moves under the pointer — and
+     each button is CLIPPED to its half, because a button wider than its slot
+     overflows both ways and the one drawn later then swallows the other’s
+     clicks. Which is exactly what happened when the halves were too narrow. */
+  .revwrap,
+  .linewrap {
     position: absolute;
-    left: 0;
-    right: 0;
     height: 17.4px;
     display: flex;
     align-items: center;
     justify-content: center;
+    overflow: hidden;
+  }
+  .revwrap {
+    left: 50%;
+    right: 0;
+    z-index: 2; /* the block arrow wins any overlap: it is the one wanted most */
+  }
+  .linewrap {
+    left: 0;
+    right: 50%;
+    z-index: 1;
+  }
+  .revwrap > *,
+  .linewrap > * {
+    max-width: 100%;
+    box-sizing: border-box;
+  }
+  /* Quiet until the gutter is pointed at: the whole-block arrow is what is
+     wanted most of the time, and a column of arrows would drown it. Hidden means
+     hidden — an invisible button that still takes clicks is a trap. */
+  .rev.line {
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 90ms linear;
+  }
+  .col.gut:hover .rev.line {
+    opacity: 0.55;
+    pointer-events: auto;
+  }
+  .col.gut:hover .rev.line:hover {
+    opacity: 1;
   }
   .rev {
     padding: 0 3px;

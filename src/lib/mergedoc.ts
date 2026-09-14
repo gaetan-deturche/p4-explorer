@@ -253,6 +253,37 @@ export function setRegionLines(state: CaretState, region: number, lines: string[
   };
 }
 
+/** Replace lines [from, to) of a region with `lines` — taking ONE line of a
+ *  block instead of the whole thing. An empty `lines` deletes the run, and
+ *  from === to inserts there without removing anything.
+ *
+ *  The caret lands at the end of what was put in, or at the start of the run
+ *  when nothing was: the eye is already there, and it is where the next one of
+ *  these will be aimed. */
+export function setRegionSlice(
+  state: CaretState,
+  region: number,
+  from: number,
+  to: number,
+  lines: string[],
+): CaretState {
+  const doc = clone(state.doc);
+  const r = at(doc, region);
+  if (!r) return state;
+  const start = Math.max(0, Math.min(r.lines.length, from));
+  const end = Math.max(start, Math.min(r.lines.length, to));
+  r.lines.splice(start, end - start, ...lines);
+  const line = lines.length ? start + lines.length - 1 : start;
+  return {
+    doc,
+    caret: {
+      region,
+      line: Math.max(0, Math.min(line, Math.max(0, r.lines.length - 1))),
+      col: lines.length ? lines[lines.length - 1].length : 0,
+    },
+  };
+}
+
 // --- selection -------------------------------------------------------------
 // A selection is an anchor plus the caret. It may span regions — reading across
 // them is useful — but deleting one never merges regions: each keeps its identity
@@ -728,6 +759,20 @@ export function applyDeleteWord(state: DocState, forward: boolean): DocState {
  *  cursors that were inside it have nothing left to point at: collapse to one. */
 export function applyRegionLines(state: DocState, region: number, lines: string[]): DocState {
   const r = setRegionLines({ doc: state.doc, caret: primaryCaret(state) }, region, lines);
+  return singleCursor(r.doc, r.caret);
+}
+
+/** Take one line (or a run of them) of a block, leaving the rest of the block
+ *  alone. Like applyRegionLines it collapses to a single cursor: the lines the
+ *  other cursors were on may not exist any more. */
+export function applyRegionSlice(
+  state: DocState,
+  region: number,
+  from: number,
+  to: number,
+  lines: string[],
+): DocState {
+  const r = setRegionSlice({ doc: state.doc, caret: primaryCaret(state) }, region, from, to, lines);
   return singleCursor(r.doc, r.caret);
 }
 
