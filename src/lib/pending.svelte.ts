@@ -129,6 +129,16 @@ let offlineTimer: number | null = null;
 let offlineStopped = true;
 /** When the last interactive write finished — the scan keeps clear of it. */
 let lastWriteAt = 0;
+/** Bumped whenever the workspace is about to be written to, or has just stopped
+ *  being. An offline scan snapshots it and throws its result away if it moved:
+ *  the files it looked at are not the files that are there now.
+ *
+ *  "Don't start a scan while busy" was never enough on its own. A scan of this
+ *  user's workspace takes ~160 SECONDS, so the one that matters is the one
+ *  already running when the sync starts — it spends that time watching files
+ *  being rewritten underneath it, and then caches what it saw as offline
+ *  changes. Which is precisely the list of files the sync had just updated. */
+let workspaceGen = 0;
 let offlineFocused = true;
 const OFFLINE_MS_FOCUS = 300_000; // 5 min (the scan itself is ~30s)
 const OFFLINE_MS_BG = 1_800_000; // 30 min in the background
@@ -502,6 +512,7 @@ export const pending = {
     offlineScanning = true;
     const conn = h.conn();
     const client = conn.client; // snapshot: the workspace THIS scan is for
+    const gen = workspaceGen; // and the state of it this scan describes
     try {
       let recs: P4Record[];
       try {
@@ -509,6 +520,10 @@ export const pending = {
       } catch {
         return true; // cancelled (by an interactive write) or failed — keep the list
       }
+      // Something wrote the workspace while this was running — a sync, a revert,
+      // an unshelve. What came back describes the workspace mid-write, so it is
+      // dropped rather than cached; `false` has the loop try again shortly.
+      if (gen !== workspaceGen) return false;
       // Keep only real change entries (an action + a file).
       const result = recs.filter((r) => (r.action ?? r.status) && (r.clientFile || r.depotFile));
       saveOfflineCache(client, result); // store write, keyed by the scanned workspace
@@ -1308,6 +1323,16 @@ export const pending = {
   /** Nothing is pretended about another workspace's files. */
   clearHidden() {
     if (hidden.size) hidden = new Map();
+  },
+
+  /** The workspace is about to be written to (a sync, a submit, a revert), or has
+   *  just stopped being. Cancels the scan that is running — it is about to be
+   *  describing the past, and it holds p4 busy meanwhile — and invalidates any
+   *  answer still on its way. */
+  noteBusy(busy: boolean) {
+    workspaceGen++;
+    lastWriteAt = Date.now();
+    if (busy) void p4.cancelOfflineScan().catch(() => {});
   },
 
   /** Move files into `change`. One p4 command whatever the count, so a dragged

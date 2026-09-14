@@ -80,6 +80,12 @@
   const bootBlank = bootArgs.get("new") === "1";
   const isMainWindow = getCurrentWindow().label === "main";
   let syncing = $state(false);
+  /** One place: every store that reports "busy" goes through here, so the offline
+   *  scan hears about a write whoever started it — a sync, a submit, a revert. */
+  function setSyncing(v: boolean) {
+    syncing = v;
+    pending.noteBusy(v);
+  }
   let reconciling = $state(false);
   let optionsOpen = $state(false);
   let ctxMenu = $state<{ x: number; y: number; change: string } | null>(null);
@@ -991,7 +997,7 @@
       setNotice,
       setOptionsOpen: (v) => (optionsOpen = v),
       getSyncing: () => syncing,
-      setSyncing: (v) => (syncing = v),
+      setSyncing,
       askConfirm,
       promptLogin,
       refreshViews: refreshAll,
@@ -1006,7 +1012,7 @@
       conn: () => conn,
       connected: () => connection.connected,
       syncing: () => syncing,
-      setSyncing: (v) => (syncing = v),
+      setSyncing,
       setNotice,
       setError,
       askConfirm,
@@ -1061,7 +1067,7 @@
       conn: () => conn,
       connected: () => connection.connected,
       busy: () => syncing || reconciling,
-      setSyncing: (v) => (syncing = v),
+      setSyncing,
       setReconciling: (v) => (reconciling = v),
       setNotice,
       setError,
