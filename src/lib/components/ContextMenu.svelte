@@ -27,6 +27,41 @@
 
   let openSub = $state<number | null>(null);
 
+  // --- a submenu stays in the window ------------------------------------------
+  // The menu itself is measured and moved (see below); a submenu was left to CSS
+  // at `top: -4px`, which is fine until the row it hangs off is near the bottom
+  // of the screen — "Move to changelist" on the last changelist in a long list
+  // opened past the edge of the window, and the changelists ran off it.
+  //
+  // The placement is computed from the ROW and the submenu's own HEIGHT, never
+  // from where the submenu is currently sitting. That matters: an earlier
+  // version measured its rect and assumed it was at the default offset, so the
+  // answer depended on what had happened just before — another row's lift still
+  // applied, or the menu repositioning itself in the same flush — and it came
+  // out right only sometimes. This form gives the same answer however many times
+  // it runs, and reading `at` makes it run again if the menu itself moves.
+  //
+  // SUB_TOP is where it sits when it fits: level with its row, give or take the
+  // menu's own padding.
+  const SUB_TOP = -4;
+  let subEl = $state<HTMLDivElement>();
+  let subTop = $state(SUB_TOP);
+  $effect(() => {
+    void openSub; // a different row
+    void at; // the menu moved under it
+    const el = subEl;
+    const row = el?.parentElement;
+    if (!el || !row) return;
+    const rowTop = row.getBoundingClientRect().top;
+    // offsetHeight, not the rect: the height is what it is wherever it sits, and
+    // max-height has already capped it.
+    const lowest = window.innerHeight - EDGE - el.offsetHeight;
+    const top = Math.max(EDGE, Math.min(rowTop + SUB_TOP, lowest));
+    const next = top - rowTop; // back into the row's own coordinates
+    // untracked: an effect that READ what it writes would re-run itself.
+    if (Math.abs(next - untrack(() => subTop)) > 0.5) subTop = next;
+  });
+
   // --- room for error on the way to a submenu ---------------------------------
   // A submenu opens level with its row and runs DOWNWARDS, so reaching anything
   // but its first entry means moving diagonally — and that path leaves the row
@@ -139,7 +174,12 @@
           <span>{it.label}</span><span class="chev">▸</span>
         </button>
         {#if openSub === i}
-          <div class="submenu" class:left={flipLeft}>
+          <div
+            class="submenu"
+            class:left={flipLeft}
+            bind:this={subEl}
+            style="top:{subTop}px"
+          >
             {#each it.submenu as s (s.label)}
               <button class="item" disabled={s.disabled} onclick={() => run(s)}>{s.label}</button>
             {/each}
@@ -243,7 +283,6 @@
   }
   .submenu {
     position: absolute;
-    top: -4px;
     left: 100%;
     min-width: 12rem;
     max-height: 60vh;

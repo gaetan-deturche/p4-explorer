@@ -273,6 +273,11 @@
     top: -5px;
     left: calc(100% - 1px);
     border-radius: 6px;
+    /* This one hangs off the bar, so its top is always near the top of the
+       window and only its bottom can run off: a cap is enough here, where the
+       context menu's submenu needs measuring (its row can be anywhere). */
+    max-height: calc(100vh - 4rem);
+    overflow-y: auto;
   }
   .item.on {
     background: var(--bg-hover);
