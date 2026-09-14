@@ -9,7 +9,7 @@
   //! Lines are grouped into RUNS of consecutive lines from the same changelist:
   //! repeating the same change, author and date down forty rows is noise, and
   //! what the eye needs is where one change ends and the next begins.
-  import { onMount } from "svelte";
+  import { onMount, tick } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import OverviewRuler, { type Mark } from "$lib/components/OverviewRuler.svelte";
@@ -230,12 +230,21 @@
     const c = currentHit;
     return c && c.line === line ? [c.start, c.end] : null;
   }
+  /** The bar itself, so an already-open one can be re-focused. When it is
+   *  opening, this is still undefined — the component focuses itself on mount. */
+  let findBar: { focus: () => void } | undefined = $state();
+
   function openFind() {
-    // Whatever is selected is almost always what the search is for.
-    const seed = occurQuery;
+    // Whatever is selected is almost always what the search is for — including
+    // when the bar is already open on something else, which is how a search gets
+    // moved from one word to the next.
+    const seed = selectionQuery();
     finding = true;
     hitAt = -1;
     if (seed) query = seed;
+    // After the new term reaches the box: focus() selects what is IN it, and the
+    // value it was given a line ago has not been written to the DOM yet.
+    void tick().then(() => findBar?.focus());
   }
   function closeFind() {
     finding = false;
@@ -280,9 +289,17 @@
     document.addEventListener("selectionchange", on);
     return () => document.removeEventListener("selectionchange", on);
   });
+  /** What the selection is asking about, whether or not the find bar is up.
+   *  Not `occurQuery`: that one goes quiet while a search is on screen, which is
+   *  right for MARKING but wrong for ctrl+f — pressing it with something
+   *  selected means "search for this", and it meant nothing at all once a term
+   *  was already in the box. */
+  function selectionQuery(): string {
+    return selectionTerm(nativeSel);
+  }
   const occurQuery = $derived.by(() => {
     if (finding) return ""; // a search on screen is what the eye is following
-    return selectionTerm(nativeSel);
+    return selectionQuery();
   });
   /** Where the selected text also appears on one line. Computed per DRAWN row —
    *  sixty of them — so a selection costs nothing on a file of any size, and
@@ -522,6 +539,7 @@
 
   {#if finding}
     <FindBar
+      bind:this={findBar}
       bind:query
       bind:caseSensitive
       index={hitAt}
