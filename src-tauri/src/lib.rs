@@ -204,6 +204,7 @@ pub fn run() {
             commands::file_history_job,
             commands::p4_undo_preview,
             commands::p4_revert_keep,
+            commands::p4_revert_keep_change,
             commands::p4_reopen,
             commands::p4_new_changelist,
             commands::swarm_url,

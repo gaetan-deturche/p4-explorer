@@ -20,16 +20,9 @@ type Hooks = {
   connected: () => boolean;
   syncing: () => boolean; // shared busy guard
   setSyncing: (v: boolean) => void;
-  /** Hide these depot files from the rendered changelists at once, returning the
-   *  undo. The rows live in the list component, not in this store's cache, so an
-   *  optimistic removal has to reach them there — see forgetFiles. */
-  hideFiles: (files: string[]) => () => void;
   /** The depot paths a changelist is showing right now (the rendered rows, which
    *  can be ahead of this store's caches on a fresh boot). */
   rowsOf: (change: string) => string[];
-  /** Mark every optimistic removal as covering a finished command: the next
-   *  authoritative answer decides. */
-  settleHidden: () => void;
   setNotice: (m: string, ms?: number) => void;
   setError: (m: string) => void;
   askConfirm: (msg: string, title?: string, ok?: string) => Promise<boolean>;
@@ -250,17 +243,59 @@ function twinWarning(files: string[]): string {
   );
 }
 
+// Files the UI is pretending are gone, the changelist each was hidden from, and
+// whether the command it was covering has finished.
+//
+// This is what makes an optimistic removal survive: a `p4 opened` answer that
+// was already in flight when the user acted cannot resurrect the row, and
+// neither can the stale-while-revalidate paint of the refetch that follows.
+//
+// An entry clears when an authoritative fetch of its changelist comes back
+// WITHOUT the file — the command really happened. While the command is still
+// running, a fetch that still lists the file changes nothing: the guess is about
+// a state p4 has not reached yet.
+//
+// `settled` closes the loop. Once a mutation has completed, p4's answer wins: a
+// settled entry is dropped whatever the fetch says, so a guess that turned out
+// wrong — or a file reverted and then checked out again inside the same window —
+// cannot leave a row invisible for the rest of the session.
+//
+// It lives HERE, not in the list component, because the component is destroyed
+// whenever the user leaves the tab. It used to die with it: the rows came back
+// mid-command, looking like the command had failed.
+interface Hide {
+  change: string;
+  settled: boolean;
+}
+let hidden = $state<Map<string, Hide>>(new Map());
+
+/** Which changelist the caches say holds `file` ("*" when none does — nothing on
+ *  screen is showing it, so hiding it is free and any fetch may clear it). */
+function changeHolding(file: string): string {
+  const client = h?.conn().client ?? "";
+  if (!client) return "*";
+  for (const row of currentPendingRows()) {
+    const change = String(row.change);
+    if (loadClFilesCache(client, change)?.some((f) => String(f.depotFile) === file)) return change;
+  }
+  return "*";
+}
+
 function forgetFiles(files: string[]): () => void {
   const client = h?.conn().client;
   if (!client || !files.length) return () => {};
   const gone = new Set(files);
   const undo: (() => void)[] = [];
-  // The rendered rows first. Trimming the caches below only shows up when the
-  // list refetches, which happens AFTER the p4 command — so on its own it is not
-  // an optimistic update at all: it just stops the row flashing back afterwards.
+  // Hide the rows first. Trimming the caches below only shows up when the list
+  // refetches, which happens AFTER the p4 command — so on its own it is not an
+  // optimistic update at all: it just stops the row flashing back afterwards.
   // With a fast command that was invisible; behind the offline scan's server
   // locks the whole thing sat still for ten seconds.
-  if (h) undo.push(h.hideFiles(files));
+  const before = hidden;
+  const next = new Map(hidden);
+  for (const f of files) next.set(f, { change: changeHolding(f), settled: false });
+  hidden = next;
+  undo.push(() => (hidden = before));
 
   for (const row of currentPendingRows()) {
     const change = String(row.change);
@@ -305,6 +340,64 @@ function makeOfflineNow(file: string, record: P4Record): () => void {
     storeSetMem("p4:offline", client, JSON.stringify(offline));
     offlineVer++;
   };
+}
+
+/** The files in `change`: what the list is showing, falling back to the cache.
+ *  On a fresh boot the rows are on screen before the caches are warm, and an
+ *  empty answer here used to mean the action removed nothing until p4 replied.
+ *
+ *  It matters beyond the optimistic update: a changelist-wide revert NAMES these
+ *  files, and the alternative — handing p4 `//...` and letting `-c` filter it —
+ *  expands the whole depot through the client view. Measured at 119 SECONDS on
+ *  this user's workspace, during which the app looks like it did nothing. */
+function changelistFiles(change: string): string[] {
+  const client = h?.conn().client ?? "";
+  const shown = h?.rowsOf(change) ?? [];
+  if (shown.length) return shown;
+  return (loadClFilesCache(client, change) ?? []).map((f) => String(f.depotFile));
+}
+
+// Commands run ONE AT A TIME, and a second ask waits its turn rather than being
+// thrown away. It used to be refused with "Busy — finishing the previous
+// command. Try again in a moment.", which is wrong twice over: it makes the user
+// the scheduler, and it reads as progress on the thing they just clicked rather
+// than as a refusal of it. What they asked for is now simply done, in order.
+//
+// The optimistic guess is still applied the moment they ask, so a queued command
+// looks as immediate as a running one — which is the whole point of the guess.
+let chain: Promise<unknown> = Promise.resolve();
+let running = ""; // the command on the wire, named for the notice
+let depth = 0; // asked for and not yet finished, running included
+
+/** Run `job` after the commands already asked for. `label` names it while it
+ *  waits. Never rejects: a failed command must not stop the queue. */
+function enqueue<T>(label: string, job: () => Promise<T>): Promise<T | undefined> {
+  if (depth > 0) {
+    h?.setNotice(`Queued: ${label} — it runs when ${running || "the current command"} finishes.`, 5000);
+  }
+  depth++;
+  h?.setSyncing(true);
+  const mine = chain.then(async () => {
+    running = label;
+    try {
+      return await job();
+    } finally {
+      running = "";
+      if (--depth === 0) h?.setSyncing(false);
+    }
+  });
+  // The chain itself must always resolve, or one failure would strand every
+  // command behind it.
+  chain = mine.then(
+    () => {},
+    () => {},
+  );
+  return mine.catch(() => undefined);
+}
+
+/** Is this file being optimistically hidden? */
+function isHiddenFile(file: string): boolean {
+  return hidden.has(file);
 }
 
 /** Which changelist a file is cached under, "" when it is in none. */
@@ -469,7 +562,7 @@ export const pending = {
     if (!h) return;
     // Every mutation reloads through here, so this is where a guess stops being
     // in-flight: from now on p4's answer wins over it.
-    h.settleHidden();
+    pending.settleHidden();
     const conn = h.conn();
     if (!h.connected() || !conn.client) {
       reviews = {};
@@ -581,20 +674,13 @@ export const pending = {
    *  cached file list, so the user is told how much they are discarding rather
    *  than agreeing to "the files, whatever they are". */
   revertChangelist(change: string) {
-    const client = h?.conn().client ?? "";
-    // What the list is showing, falling back to the cache: on a fresh boot the
-    // rows are on screen before these caches are warm, and an empty list here
-    // meant the revert removed nothing until p4 answered.
-    const shown = h?.rowsOf(change) ?? [];
-    const files = shown.length
-      ? shown
-      : (loadClFilesCache(client, change) ?? []).map((f) => String(f.depotFile));
+    const files = changelistFiles(change);
     const what = change === "default" ? "the default changelist" : `@${change}`;
     const count = files.length
       ? `${files.length} file${files.length === 1 ? "" : "s"} in ${what}`
       : `every file in ${what}`;
     pending.action(
-      () => p4.revertChange(h!.conn(), change),
+      () => p4.revertChange(h!.conn(), change, files),
       `Revert ${count}?\n\nTheir local changes are discarded and cannot be recovered. The changelist itself stays (delete it separately).`,
       "Revert changelist",
       "Revert all",
@@ -717,37 +803,33 @@ export const pending = {
     // A function when the message can only be written once the action has run
     // (an undo names the changelist it just created).
     okNotice: string | (() => string),
-    opts?: { refresh?: boolean; optimistic?: () => () => void },
+    opts?: { refresh?: boolean; optimistic?: () => () => void; label?: string },
   ) {
     if (!h || !h.connected()) return;
-    // A dropped click used to be silent: while the app is busy every action
-    // returned here without a word, which reads as the app ignoring you.
-    if (h.syncing()) {
-      h.setNotice("Busy — finishing the previous command. Try again in a moment.");
-      return;
-    }
     lastWriteAt = Date.now(); // keep the offline scan off the server while we write
-    // Guess the outcome first so the list reacts immediately; the reload in
-    // `finally` reconciles it, and `rollback` undoes the guess if p4 refuses.
+    // Guess the outcome NOW, even if the command has to wait its turn: the user
+    // acted now, and the list should say so. The reload at the end reconciles
+    // it, and `rollback` undoes the guess if p4 refuses.
     const rollback = opts?.optimistic?.();
-    h.setSyncing(true);
-    try {
-      // Killing the scan's client is enough: p4d drops its own reconcile ~1s later
-      // (measured via `p4 monitor show`). `p4 monitor terminate` would be the
-      // direct route but is refused for our own process on this server, despite
-      // the help offering it to "the owner of the process id".
-      await p4.cancelOfflineScan().catch(() => {});
-      await runFn();
-      h.setNotice(typeof okNotice === "string" ? okNotice : okNotice());
-      if (opts?.refresh !== false) await h.refresh();
-    } catch (e) {
-      rollback?.();
-      h.setError(String(e));
-    } finally {
-      lastWriteAt = Date.now(); // and for a while after
-      pending.load();
-      h.setSyncing(false);
-    }
+    await enqueue(opts?.label ?? "the command", async () => {
+      lastWriteAt = Date.now();
+      try {
+        // Killing the scan's client is enough: p4d drops its own reconcile ~1s
+        // later (measured via `p4 monitor show`). `p4 monitor terminate` would be
+        // the direct route but is refused for our own process on this server,
+        // despite the help offering it to "the owner of the process id".
+        await p4.cancelOfflineScan().catch(() => {});
+        await runFn();
+        h!.setNotice(typeof okNotice === "string" ? okNotice : okNotice());
+        if (opts?.refresh !== false) await h!.refresh();
+      } catch (e) {
+        rollback?.();
+        h!.setError(String(e));
+      } finally {
+        lastWriteAt = Date.now(); // and for a while after
+        pending.load();
+      }
+    });
   },
   /** As `mutate`, but confirm first. */
   async action(
@@ -760,20 +842,15 @@ export const pending = {
     opts?: { refresh?: boolean; optimistic?: () => () => void },
   ) {
     if (!h || !h.connected()) return;
-    if (h.syncing()) {
-      h.setNotice("Busy — finishing the previous command. Try again in a moment.");
-      return;
-    }
+    // Confirm NOW even if a command is still running: the answer is wanted while
+    // the user is here, and the work queues behind whatever is in flight. The
+    // title doubles as the name the queue reports it by.
     if (!(await h.askConfirm(msg, title, ok))) return;
-    await pending.mutate(runFn, note, opts);
+    await pending.mutate(runFn, note, { label: title, ...opts });
   },
 
   async submit(change: string) {
     if (!h || !h.connected()) return;
-    if (h.syncing()) {
-      h.setNotice("Busy — finishing the previous command. Try again in a moment.");
-      return;
-    }
     const what = change === "default" ? "the default changelist" : `changelist @${change}`;
     const go = await h.askConfirm(
       `Submit ${what}?\nThis commits the files to the depot and cannot be undone.`,
@@ -786,7 +863,7 @@ export const pending = {
    *  failure must not look like a failed submit (#3). If the submit is blocked by
    *  shelved files, offer to delete the shelf and submit (#1). */
   async doSubmit(change: string) {
-    if (!h || h.syncing()) return;
+    if (!h) return;
     const label = change === "default" ? "The default changelist" : `Changelist @${change}`;
     h.setSyncing(true);
     try {
@@ -895,7 +972,7 @@ export const pending = {
    *  p4 can only merge a shelf onto files that are still open, leaving them to
    *  resolve, so the dialog says so when that applies. */
   async unshelveChangelist(change: string, only: string[] = []) {
-    if (!h || !h.connected() || h.syncing()) return;
+    if (!h || !h.connected()) return;
     // Only the files being restored matter for the merge warning: unshelving one
     // file onto a changelist where a DIFFERENT file is open costs nothing.
     const cached = loadClFilesCache(h.conn().client, change) ?? [];
@@ -997,7 +1074,7 @@ export const pending = {
     change = "",
     newDesc = "",
   ) {
-    if (!h || !h.connected() || h.syncing() || !files.length) return;
+    if (!h || !h.connected() || !files.length) return;
     const what =
       verb === "edit" ? "Checked out" : verb === "add" ? "Marked for add" : "Marked for delete";
     if (verb === "delete") {
@@ -1035,7 +1112,7 @@ export const pending = {
 
   /** Rename or move a file, keeping its history. */
   async moveFile(from: string, to: string) {
-    if (!h || !h.connected() || h.syncing()) return;
+    if (!h || !h.connected()) return;
     const out: { res: OpenResult | null } = { res: null };
     await pending.mutate(
       async () => {
@@ -1058,7 +1135,7 @@ export const pending = {
    *  before anything happens. Returns the result so the caller can take the user
    *  to it; null when it was refused or cancelled. */
   async undoSubmitted(change: string, files: string[] = []): Promise<UndoResult | null> {
-    if (!h || !h.connected() || h.syncing()) return null;
+    if (!h || !h.connected()) return null;
     let preview: P4Record[] = [];
     try {
       preview = await p4.undoPreview(h.conn(), change, files);
@@ -1127,24 +1204,112 @@ export const pending = {
    *  turn it into an offline change, which is where it then shows up. Named for
    *  that outcome ("Make offline") rather than the mechanism, since "remove from
    *  changelist" reads like the edits go away. */
-  revertKeep(file: string) {
+  /** Un-open files but keep what is on disk: they leave the changelist and
+   *  reappear under Offline. One p4 command whatever the count, like reopen —
+   *  a selection of twenty is one revert, not twenty. */
+  revertKeep(files: string[]) {
+    if (!files.length) return;
+    const n = files.length;
+    const what = n === 1 ? files[0] : `${n} files`;
     pending.action(
-      () => p4.revertKeep(h!.conn(), file),
-      `${file}\n\nMake this an offline change? The file stops being checked out (it leaves the changelist, nothing is submitted) but your edited copy stays on disk — it will show up under Offline.`,
+      () => p4.revertKeep(h!.conn(), files),
+      `${what}\n\nMake ${n === 1 ? "this an offline change" : "these offline changes"}? ${
+        n === 1 ? "The file stops" : "The files stop"
+      } being checked out (${n === 1 ? "it leaves" : "they leave"} the changelist, nothing is submitted) but your edited ${
+        n === 1 ? "copy stays" : "copies stay"
+      } on disk — ${n === 1 ? "it" : "they"} will show up under Offline.`,
       "Make offline",
       "Make offline",
-      "File is now an offline change (your edits are still on disk).",
+      n === 1
+        ? "File is now an offline change (your edits are still on disk)."
+        : `${n} files are now offline changes (your edits are still on disk).`,
       {
         optimistic: () => {
           const client = h!.conn().client;
-          const rec = currentPendingRows()
-            .flatMap((row) => loadClFilesCache(client, String(row.change)) ?? [])
-            .find((f) => String(f.depotFile) === file);
-          return makeOfflineNow(file, { ...(rec ?? {}), depotFile: file } as P4Record);
+          const cached = currentPendingRows().flatMap(
+            (row) => loadClFilesCache(client, String(row.change)) ?? [],
+          );
+          const undos = files.map((file) => {
+            const rec = cached.find((f) => String(f.depotFile) === file);
+            return makeOfflineNow(file, { ...(rec ?? {}), depotFile: file } as P4Record);
+          });
+          return () => undos.forEach((u) => u());
         },
       },
     );
   },
+
+  /** The same for every file open in a changelist. The changelist itself stays,
+   *  exactly as it does after reverting one — an empty changelist is deleted
+   *  separately, so this never quietly takes the description with it. */
+  revertKeepChangelist(change: string) {
+    const client = h?.conn().client ?? "";
+    const files = changelistFiles(change);
+    const what = change === "default" ? "the default changelist" : `@${change}`;
+    const count = files.length
+      ? `${files.length} file${files.length === 1 ? "" : "s"} in ${what}`
+      : `every file in ${what}`;
+    pending.action(
+      () => p4.revertKeepChange(h!.conn(), change, files),
+      `Make ${count} offline?\n\nThey stop being checked out and leave the changelist, but your edited copies stay on disk — they will show up under Offline. Nothing is discarded and nothing is submitted. The changelist itself stays.`,
+      "Make offline",
+      "Make all offline",
+      "Those files are now offline changes (your edits are still on disk).",
+      {
+        optimistic: () => {
+          const cached = loadClFilesCache(client, change) ?? [];
+          const undos = files.map((file) => {
+            const rec = cached.find((f) => String(f.depotFile) === file);
+            return makeOfflineNow(file, { ...(rec ?? {}), depotFile: file } as P4Record);
+          });
+          return () => undos.forEach((u) => u());
+        },
+      },
+    );
+  },
+  /** Files the UI is pretending are gone. Reactive: a list that filters on this
+   *  re-renders when a guess is made, settled or reconciled away. */
+  isHidden(file: string): boolean {
+    return isHiddenFile(file);
+  },
+  get hiddenCount(): number {
+    return hidden.size;
+  },
+
+  /** Every current guess now covers a FINISHED command: from here on the next
+   *  authoritative answer decides, whatever it says. */
+  settleHidden() {
+    if (!hidden.size) return;
+    let changed = false;
+    const next = new Map(hidden);
+    for (const [file, hide] of next) {
+      if (!hide.settled) {
+        next.set(file, { ...hide, settled: true });
+        changed = true;
+      }
+    }
+    if (changed) hidden = next;
+  },
+
+  /** A fresh, authoritative list for `change` has arrived: stop hiding the files
+   *  it no longer contains (the command really happened) and the settled ones
+   *  (their command has finished, so p4's answer is the truth now). */
+  reconcileHidden(change: string, fresh: P4Record[]) {
+    if (!hidden.size) return;
+    const present = new Set(fresh.map((f) => String(f.depotFile)));
+    const next = new Map(hidden);
+    for (const [file, hide] of hidden) {
+      if (hide.change !== change && hide.change !== "*") continue;
+      if (!present.has(file) || hide.settled) next.delete(file);
+    }
+    if (next.size !== hidden.size) hidden = next;
+  },
+
+  /** Nothing is pretended about another workspace's files. */
+  clearHidden() {
+    if (hidden.size) hidden = new Map();
+  },
+
   /** Move files into `change`. One p4 command whatever the count, so a dragged
    *  selection of twenty is one move — and one optimistic update. */
   reopen(files: string[], change: string) {

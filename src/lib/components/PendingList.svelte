@@ -2,6 +2,7 @@
   import { fmtTime, firstLine, splitPath, type P4Record, type ReviewInfo } from "$lib/p4";
   import DiffView from "$lib/components/DiffView.svelte";
   import { describeFileType } from "$lib/filetype";
+  import { pending } from "$lib/pending.svelte";
 
   let {
     rows,
@@ -208,67 +209,11 @@
   };
   let cls = $state<Record<string, CL>>({});
 
-  // Files the UI is pretending are gone, the changelist each was hidden from, and
-  // whether the command it was covering has finished.
-  //
-  // This is what makes an optimistic removal survive: a `p4 opened` answer that
-  // was already in flight when the user acted cannot resurrect the row (the
-  // startup case, where those fetches are still landing), and neither can the
-  // stale-while-revalidate paint of the refetch that follows.
-  //
-  // An entry clears when an authoritative fetch of its changelist comes back
-  // WITHOUT the file — the command really happened. While the command is still
-  // running, a fetch that still lists the file changes nothing: our guess is
-  // about a state p4 has not reached yet.
-  //
-  // `settled` closes the loop. Once a mutation has completed (every one reloads
-  // the pending list, which settles what is hidden), p4's answer wins: a settled
-  // entry is dropped whatever the fetch says, so a guess that turned out wrong —
-  // or a file reverted and then checked out again inside the same window — cannot
-  // leave a row invisible for the rest of the session.
-  interface Hide {
-    change: string;
-    settled: boolean;
-  }
-  let hidden = $state<Map<string, Hide>>(new Map());
-
-  /** Which expanded changelist currently lists `file` ("*" when none does — it
-   *  is not on screen, so hiding it is free and any fetch may clear it). */
-  function changeHolding(file: string): string {
-    for (const [change, cl] of Object.entries(cls)) {
-      if (cl.local.some((f) => String(f.depotFile) === file)) return change;
-    }
-    return "*";
-  }
-
-  /** Hide these files from the list at once, and return the undo. Called by the
-   *  store's optimistic path so the rows react before p4 answers. */
-  export function forgetRows(files: string[]): () => void {
-    if (!files.length) return () => {};
-    const next = new Map(hidden);
-    for (const f of files) next.set(f, { change: changeHolding(f), settled: false });
-    hidden = next;
-    return () => {
-      const back = new Map(hidden);
-      for (const f of files) back.delete(f);
-      hidden = back;
-    };
-  }
-
-  /** The commands behind every current guess have finished: from here on, the
-   *  next authoritative answer decides, whatever it says. */
-  export function settleRows() {
-    if (!hidden.size) return;
-    let changed = false;
-    const next = new Map(hidden);
-    for (const [file, h] of next) {
-      if (!h.settled) {
-        next.set(file, { ...h, settled: true });
-        changed = true;
-      }
-    }
-    if (changed) hidden = next;
-  }
+  // WHICH files the UI is pretending are gone belongs to the store, not to this
+  // component: the guess has to outlive the tab. It used to live here, and
+  // leaving the Pending tab destroyed it — the refetch on the way back asked p4
+  // while the command was still running, p4 truthfully said the files were still
+  // open, and the rows came back as though nothing had been asked for.
 
   /** The depot paths a changelist is currently showing. The store's caches can be
    *  cold (a fresh boot reads them from SQLite asynchronously) while these rows
@@ -281,20 +226,8 @@
   /** A changelist's rows, minus anything being optimistically removed. */
   function localOf(change: string): P4Record[] {
     const list = cls[change]?.local ?? [];
-    if (!hidden.size) return list;
-    return list.filter((f) => !hidden.has(String(f.depotFile)));
-  }
-
-  /** Stop hiding files that this changelist's fresh list no longer contains. */
-  function reconcileHidden(change: string, fresh: P4Record[]) {
-    if (!hidden.size) return;
-    const present = new Set(fresh.map((f) => String(f.depotFile)));
-    const next = new Map(hidden);
-    for (const [file, h] of hidden) {
-      if (h.change !== change && h.change !== "*") continue;
-      if (!present.has(file) || h.settled) next.delete(file);
-    }
-    if (next.size !== hidden.size) hidden = next;
+    if (!pending.hiddenCount) return list;
+    return list.filter((f) => !pending.isHidden(String(f.depotFile)));
   }
 
   // Per-file inline diff, keyed by "<change>|<kind>|<depotFile>".
@@ -328,7 +261,7 @@
     const [local, shelved] = await Promise.all([onLocalFiles(change), onShelvedFiles(change)]);
     const local2 = local.filter((f) => f.depotFile);
     const shelved2 = shelved.filter((f) => f.depotFile);
-    reconcileHidden(change, local2);
+    pending.reconcileHidden(change, local2);
     cls[change] = {
       open: cls[change]?.open ?? true,
       loading: false,
@@ -399,7 +332,7 @@
     if (client !== lastClient) {
       lastClient = client;
       cls = {};
-      hidden = new Map();
+      pending.clearHidden();
       fdiff = {};
       selected = new Set();
       anchor = null;

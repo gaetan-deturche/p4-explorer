@@ -401,6 +401,14 @@
             : `Revert all files in @${cl.change}…`,
           action: () => pending.revertChangelist(cl.change),
         });
+        // The same reach as the revert above it, without the part that loses
+        // work: the files leave the changelist and stay on disk.
+        items.push({
+          label: isDefault
+            ? "Make all default-changelist files offline…"
+            : `Make all files in @${cl.change} offline…`,
+          action: () => pending.revertKeepChangelist(cl.change),
+        });
       }
       // Only when p4 would accept it: a changelist still holding files or a
       // shelf cannot be deleted, and offering it there just produced an error.
@@ -499,9 +507,7 @@
   let pendingList = $state<{
     moveFile: (file: string, from: string, to: string) => void;
     moveFiles: (files: string[], from: string, to: string) => void;
-    forgetRows: (files: string[]) => () => void;
     rowsOf: (change: string) => string[];
-    settleRows: () => void;
     selection: () => string[];
     selectedChange: () => string;
   }>();
@@ -622,8 +628,11 @@
       },
       {
         // Named for the outcome: it becomes an entry in the Offline section.
-        label: "Make offline (keep local edits)…",
-        action: () => pending.revertKeep(file.depotFile),
+        label:
+          sel.length > 1
+            ? `Make ${sel.length} files offline (keep local edits)…`
+            : "Make offline (keep local edits)…",
+        action: () => pending.revertKeep(sel),
       },
       { label: "", sep: true },
       { label: "Move to changelist", submenu: targets },
@@ -1003,11 +1012,7 @@
       askConfirm,
       askOption,
       refresh: () => browse.refresh(),
-      // The rows live in PendingList's own state, so this is how an optimistic
-      // removal reaches the screen. A no-op undo if the list isn't mounted.
-      hideFiles: (files) => pendingList?.forgetRows(files) ?? (() => {}),
       rowsOf: (change) => pendingList?.rowsOf(change) ?? [],
-      settleHidden: () => pendingList?.settleRows(),
     });
     stashes.init({
       conn: () => conn,

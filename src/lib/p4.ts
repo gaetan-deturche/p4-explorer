@@ -784,7 +784,8 @@ export const p4 = {
   /** The client's pending changelists that hold shelved files. */
   shelvedChanges: (conn: P4Conn) => call("p4_shelved_changes", { conn }),
   /** Revert every file open in a changelist, discarding their local edits. */
-  revertChange: (conn: P4Conn, change: string) => call("p4_revert_change", { conn, change }),
+  revertChange: (conn: P4Conn, change: string, depotFiles: string[]) =>
+    call("p4_revert_change", { conn, change, depotFiles }),
   /** Delete an empty pending changelist; p4 refuses if it still holds files. */
   deleteChange: (conn: P4Conn, change: string) => call("p4_delete_change", { conn, change }),
   /** Dry-run an undo (`p4 undo -n`): one row per file, `ok` false for the ones
@@ -795,7 +796,12 @@ export const p4 = {
    *  depot until that changelist is submitted. */
   undoChange: (conn: P4Conn, change: string, files: string[] = []) =>
     g<UndoResult>("p4_undo_change", { conn, change, files }),
-  revertKeep: (conn: P4Conn, depotFile: string) => call("p4_revert_keep", { conn, depotFile }),
+  /** Un-open files, keeping what is on disk. One command for the set. */
+  revertKeep: (conn: P4Conn, depotFiles: string[]) => call("p4_revert_keep", { conn, depotFiles }),
+  /** The same for every file open in a changelist. `depotFiles` is what the
+   *  caller knows is in it: naming them spares p4 a whole-depot expansion. */
+  revertKeepChange: (conn: P4Conn, change: string, depotFiles: string[]) =>
+    call("p4_revert_keep_change", { conn, change, depotFiles }),
   /** Move opened files to another changelist — one command for the set. */
   reopen: (conn: P4Conn, depotFiles: string[], change: string) =>
     call("p4_reopen", { conn, depotFiles, change }),

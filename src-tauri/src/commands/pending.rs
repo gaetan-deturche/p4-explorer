@@ -224,13 +224,40 @@ pub async fn p4_shelved_changes(conn: P4Conn) -> Res {
     run(conn, args).await
 }
 
-/// Revert every file open in a changelist (`p4 revert -c <change> //...`),
-/// discarding their local edits. The changelist itself stays — an empty
-/// changelist is deleted separately, so a revert never silently takes the
-/// description with it.
+/// Revert every file open in a changelist, discarding their local edits. The
+/// changelist itself stays — an empty changelist is deleted separately, so a
+/// revert never silently takes the description with it.
+///
+/// `depot_files` is what the caller already knows is in the changelist. NAMING
+/// them matters: `//...` makes p4 expand the whole depot through the client view
+/// before the `-c` filter applies, measured at 119s on this user's workspace
+/// against a fraction of a second for the same revert with the files spelled
+/// out. `-c` is kept either way, so a stale list can never revert a file that
+/// has since moved to another changelist. Empty = fall back to `//...`, which is
+/// slow but complete.
 #[tauri::command]
-pub async fn p4_revert_change(conn: P4Conn, change: String) -> Res {
-    run(conn, v(&["revert", "-c", &change, "//..."])).await
+pub async fn p4_revert_change(conn: P4Conn, change: String, depot_files: Vec<String>) -> Res {
+    run(conn, revert_change_args(&["revert"], &change, depot_files)).await
+}
+
+/// The same, keeping the workspace content (`-k`): the files leave the
+/// changelist and stay on disk as offline changes.
+#[tauri::command]
+pub async fn p4_revert_keep_change(conn: P4Conn, change: String, depot_files: Vec<String>) -> Res {
+    run(conn, revert_change_args(&["revert", "-k"], &change, depot_files)).await
+}
+
+/// `<head…> -c <change> <files… | //...>`.
+fn revert_change_args(head: &[&str], change: &str, depot_files: Vec<String>) -> Vec<String> {
+    let mut args = v(head);
+    args.push("-c".to_string());
+    args.push(change.to_string());
+    if depot_files.is_empty() {
+        args.push("//...".to_string());
+    } else {
+        args.extend(depot_files);
+    }
+    args
 }
 
 /// Delete an EMPTY pending changelist (`p4 change -d <change>`). p4 refuses
@@ -413,12 +440,20 @@ pub async fn p4_revert(conn: P4Conn, depot_file: String) -> Res {
     run(conn, v(&["revert", &depot_file])).await
 }
 
-/// Un-open a file while keeping the workspace content (`p4 revert -k <file>`):
-/// drops it from its changelist but leaves your local edits on disk.
+/// Un-open files while keeping the workspace content (`p4 revert -k <files…>`):
+/// drops them from their changelist but leaves your local edits on disk.
+/// One command for the whole set, like `p4_reopen`.
 #[tauri::command]
-pub async fn p4_revert_keep(conn: P4Conn, depot_file: String) -> Res {
-    run(conn, v(&["revert", "-k", &depot_file])).await
+pub async fn p4_revert_keep(conn: P4Conn, depot_files: Vec<String>) -> Res {
+    if depot_files.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut args = v(&["revert", "-k"]);
+    args.extend(depot_files);
+    run(conn, args).await
 }
+
+
 
 /// Move opened files to another pending changelist (`p4 reopen -c <change>
 /// <files…>`); `change` may be "default". One command for the whole set: a

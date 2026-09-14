@@ -112,6 +112,7 @@ export const P4_COMMANDS: P4Cmd[] = [
   { key: "p4_undo_preview", label: "undo -n (preview)", read: true },
   { key: "p4_undo_change", label: "undo (into a new changelist)", read: false },
   { key: "p4_revert_keep", label: "revert -k", read: false },
+  { key: "p4_revert_keep_change", label: "revert -k -c (whole changelist)", read: false },
   { key: "p4_reopen", label: "reopen", read: false },
   { key: "p4_new_changelist", label: "new changelist", read: false },
   { key: "p4_new_client", label: "new workspace", read: false },
