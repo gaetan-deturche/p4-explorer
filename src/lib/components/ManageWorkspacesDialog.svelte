@@ -11,6 +11,27 @@
   //! that text is the whole answer.
   import type { ClientSpec, P4Record } from "$lib/p4";
 
+  /** The start every workspace name here shares, cut back to a separator — on
+   *  this server they are all `user_host_project`, so it is the same 27
+   *  characters six times over and the project is the only part that reads.
+   *
+   *  Empty unless it leaves something of every name behind: a prefix that ate a
+   *  whole name would make that row blank. */
+  function sharedPrefix(names: string[]): string {
+    if (names.length < 2) return "";
+    let end = names[0].length;
+    for (const n of names.slice(1)) {
+      let i = 0;
+      while (i < end && i < n.length && n[i] === names[0][i]) i++;
+      end = i;
+    }
+    let cut = names[0].slice(0, end);
+    // Only up to the last separator: half a word is worse than none.
+    const at = Math.max(cut.lastIndexOf("_"), cut.lastIndexOf("."), cut.lastIndexOf("-"));
+    cut = at >= 0 ? cut.slice(0, at + 1) : "";
+    return names.every((n) => n.length > cut.length + 1) ? cut : "";
+  }
+
   let {
     clients,
     localClients,
@@ -44,6 +65,8 @@
     loadStreams: () => Promise<{ stream: string; name: string }[]>;
     askConfirm: (msg: string, title?: string, ok?: string) => Promise<boolean>;
   } = $props();
+
+  const prefix = $derived(sharedPrefix(clients.map((c) => String(c.client))));
 
   let picked = $state("");
   let spec = $state<ClientSpec | null>(null);
@@ -246,9 +269,13 @@
             <span class="dot" title={localClients.has(name) ? "Bound to this machine" : "Shared / another host"}>
               {localClients.has(name) ? "●" : "○"}
             </span>
-            <span class="nm mono">{name}</span>
-            {#if name === current}<span class="badge">in use</span>{/if}
+            <span class="nm mono" title={name}>
+              {#if prefix && name.startsWith(prefix)}<span class="pre dim">{prefix}</span>{/if}<span
+                class="tail">{prefix && name.startsWith(prefix) ? name.slice(prefix.length) : name}</span
+              >
+            </span>
             <span class="st dim mono">{c.Stream ?? ""}</span>
+            {#if name === current}<span class="badge">in use</span>{/if}
           </button>
         {:else}
           <div class="empty dim">No workspaces for this user on this server.</div>
@@ -419,13 +446,18 @@
   .list {
     border-right: 1px solid var(--border);
     padding: 4px 0;
-    overflow: auto;
+    /* Vertically only. Sideways, a row that did not fit took the pill and the
+       selection’s own background off the end of the column with it. */
+    overflow-y: auto;
+    overflow-x: hidden;
   }
   .row {
     display: flex;
     align-items: baseline;
     gap: 8px;
     width: 100%;
+    box-sizing: border-box;
+    min-width: 0;
     padding: 4px 10px;
     background: none;
     border: 0;
@@ -440,12 +472,29 @@
   .row.sel {
     background: var(--bg-sel);
   }
+  /* The name gives way from the FRONT: these are all `user_host_project`, so the
+     tail is what tells them apart and the shared start is what can go. */
   .row .nm {
-    flex: none;
+    display: flex;
+    flex: 1 1 auto;
+    min-width: 4em;
+    overflow: hidden;
+    white-space: nowrap;
     font-size: 12px;
   }
+  .row .pre {
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .row .tail {
+    flex: 0 0 auto;
+  }
+  /* Secondary: the form on the right shows the stream in full. */
   .row .st {
-    flex: 1;
+    flex: 0 1 auto;
+    min-width: 0;
     font-size: 11px;
     overflow: hidden;
     text-overflow: ellipsis;
