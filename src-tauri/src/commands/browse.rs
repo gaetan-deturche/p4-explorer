@@ -117,16 +117,59 @@ pub async fn p4_client_save(
 
 /// Delete a workspace (`client -d`).
 ///
-/// p4 refuses at severity 3 with the reason ("has files opened. To delete the
-/// client, revert any opened files and delete any pending changes first."), which
-/// reaches the caller as the error text — no forcing, and no guessing why.
+/// p4 refuses at severity 3 and its reason reaches the caller as the error text
+/// — no forcing, and no guessing why. But that reason is "Client 'x' has pending
+/// changes. To delete the client, delete any pending changes first.", which
+/// reads as "you left files open" and sends the user looking for files that are
+/// not there: a changelist belongs to the CLIENT, so an EMPTY one blocks the
+/// delete just as surely as a full one. So when that is the refusal, ask which
+/// changelists they are and name them. One extra command, and only on failure.
 #[tauri::command]
 pub async fn p4_client_delete(conn: P4Conn, client: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
-        p4::run_strict(&conn, &["client", "-d", &client]).map(|_| ())
+        match p4::run_strict(&conn, &["client", "-d", &client]) {
+            Ok(_) => Ok(()),
+            Err(e) => Err(name_the_blockers(&conn, &client, e)),
+        }
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// p4's refusal, plus the changelists it is talking about.
+fn name_the_blockers(conn: &P4Conn, client: &str, err: String) -> String {
+    let lower = err.to_lowercase();
+    if !lower.contains("pending change") && !lower.contains("files opened") {
+        return err;
+    }
+    let Ok(rows) = p4::run(conn, &["changes", "-s", "pending", "-c", client]) else {
+        return err;
+    };
+    if rows.is_empty() {
+        return err;
+    }
+    // A changelist holding a shelf carries the `shelved` field; say so, because
+    // that one cannot simply be deleted — the shelf goes first.
+    let mut named: Vec<String> = Vec::new();
+    for r in &rows {
+        let text = |key: &str| r.get(key).and_then(|v| v.as_str()).unwrap_or("");
+        let change = text("change");
+        let first = text("desc").lines().next().unwrap_or("").trim().to_string();
+        let shelf = if r.contains_key("shelved") { " (holds a shelf)" } else { "" };
+        let desc = if first.is_empty() {
+            String::new()
+        } else {
+            format!("  {}", first.chars().take(50).collect::<String>())
+        };
+        named.push(format!("  @{change}{shelf}{desc}"));
+    }
+    format!(
+        "{err}\n\n{} still owns {} pending changelist{} — p4 will not delete a workspace that owns any, even empty ones:\n{}",
+        client,
+        rows.len(),
+        if rows.len() == 1 { "" } else { "s" },
+        named.join("\n"),
+    )
 }
 
 /// Rename a workspace (`renameclient`), which p4 allows the client's OWNER —
