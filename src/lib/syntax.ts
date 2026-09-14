@@ -119,6 +119,29 @@ function core(): Promise<HighlighterCore> {
 
 const MAX_CHARS = 2_000_000; // skip highlighting on huge files (diff still works)
 
+/** Languages whose plain string literals cannot contain a line break — so a
+ *  string scope still open hundreds of lines later means the GRAMMAR is lost,
+ *  not that a string is long.
+ *
+ *  Measured on VS Code’s C++ grammar, which reads
+ *  `class F : SHADER_PERMUTATION_BOOL("USE_X");` as an inheritance clause: the
+ *  opening quote is swallowed, the closing one opens a string, and every line to
+ *  the end of the file comes back as one string token. The pattern is in every
+ *  Unreal shader permutation class.
+ *
+ *  Deliberately short. Python, YAML, bash and JS/TS all have strings that really
+ *  do span lines, and C#’s verbatim and Rust’s ordinary strings do too; for
+ *  those, a carried string state is usually the truth. C++ raw strings are the
+ *  one exception here and they carry their own scope (`.raw`). */
+const LINE_BOUND_STRINGS = new Set(["c", "cpp", "hlsl", "glsl"]);
+
+/** Is the grammar somewhere it cannot legitimately be at a checkpoint? */
+function stateIsLost(lang: string, state: unknown): boolean {
+  if (!LINE_BOUND_STRINGS.has(lang)) return false;
+  const scopes = (state as { getScopes?: () => string[] | undefined } | null)?.getScopes?.() ?? [];
+  return scopes.some((s) => s.startsWith("string.") && !s.includes(".raw"));
+}
+
 // --- a tokenizer over one language ------------------------------------------
 
 /** Shiki as `TokenSession` needs it: state in, state out, runs for a stretch of
@@ -147,6 +170,7 @@ export async function makeTokenizer(lang: string, dark: boolean): Promise<Tokeni
             grammarState: (from ?? undefined) as never,
           })
           .map((line) => line.map((tk) => ({ content: tk.content, color: tk.color }))),
+      lost: (state) => stateIsLost(lang, state),
     };
   } catch {
     return null; // unhighlighted is fine

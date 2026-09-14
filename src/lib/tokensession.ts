@@ -14,6 +14,15 @@
 //! The logic lives here, apart from Shiki, so it can be tested against a fake
 //! grammar — the property being that a window coloured this way is identical to
 //! the same lines coloured in one whole-file pass.
+//!
+//! With one deliberate exception. A grammar can get a file WRONG and stay wrong:
+//! VS Code's C++ grammar reads `class X : MACRO("Y");` as an inheritance clause,
+//! swallows the opening quote, and the closing one opens a string it never
+//! closes — every line to the end of the file is then one string token. Carrying
+//! that state faithfully reproduces the damage, so a tokenizer may declare a
+//! state `lost`, and a checkpoint holding one re-anchors. The file then agrees
+//! with a whole-file pass everywhere except the stretch the grammar had already
+//! ruined.
 
 import type { TokenRun } from "./syntax";
 
@@ -24,6 +33,10 @@ export interface Tokenizer {
   stateAfter(text: string, from: unknown | null): unknown;
   /** Coloured runs per line of `text`, tokenized starting from `from`. */
   tokens(text: string, from: unknown | null): TokenRun[][];
+  /** Optional: says this state must NOT be carried past a checkpoint, because
+   *  the grammar is plainly lost in it. Absent means carry everything, which is
+   *  what a grammar that never goes wrong would want. */
+  lost?(state: unknown): boolean;
 }
 
 /** One file being coloured a window at a time. */
@@ -57,7 +70,11 @@ export class TokenSession {
     while (this.marks.length - 1 < want) {
       const k = this.marks.length - 1;
       const chunk = this.lines.slice(k * this.every, (k + 1) * this.every).join("\n");
-      this.marks.push(this.tk.stateAfter(chunk, this.marks[k]));
+      const state = this.tk.stateAfter(chunk, this.marks[k]);
+      // A lost grammar stays lost to the end of the file, so a state that cannot
+      // be right is dropped rather than carried: the next checkpoint starts from
+      // the top of the language again and the damage stops there.
+      this.marks.push(this.tk.lost?.(state) ? null : state);
     }
   }
 
