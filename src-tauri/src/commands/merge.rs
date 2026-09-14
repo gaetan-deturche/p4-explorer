@@ -304,6 +304,26 @@ pub async fn open_merge_window(
     Ok(())
 }
 
+/// Write the result as it stands, and nothing else: ctrl+s in the window.
+///
+/// Deliberately NOT the rest of `merge_save`. Marking the file resolved,
+/// pruning the `.rej` and dropping the job are the act of FINISHING, which is
+/// what the Save button is for — and they can only happen once. Saving your work
+/// is not finishing it, so this leaves the job alive and the window usable.
+#[tauri::command]
+pub async fn merge_write(id: String, text: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let (target, splice) = {
+            let reg = registry().lock().unwrap();
+            let job = reg.get(&id).ok_or("this merge is no longer available")?;
+            (job.target.clone(), job.splice)
+        };
+        write_result(&target, &text, splice)
+    })
+    .await
+    .map_err(|e| format!("merge-write task failed: {e}"))?
+}
+
 /// The write-back half of `merge_save`, shared with the external-tool path.
 pub(crate) fn merge_save_inner(id: &str, text: &str) -> Result<String, String> {
     let (target, kind, depot, splice, rej, conn) = {

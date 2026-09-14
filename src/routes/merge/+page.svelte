@@ -65,6 +65,18 @@
 
   let data = $state<MergeData | null>(null);
   let error = $state("");
+  /** A line that appears and goes. `error` is not it: that one replaces the
+   *  whole view, which is right for "this merge cannot be shown" and wrong for
+   *  "your file is written" — or for refusing a save, which has to leave the
+   *  merge on screen, since that is where the fix is. */
+  let notice = $state("");
+  let noticeBad = $state(false);
+
+  function say(text: string, bad = false) {
+    notice = text;
+    noticeBad = bad;
+    window.setTimeout(() => (notice = ""), bad ? 8000 : 5000);
+  }
   let saving = $state(false);
   /** The result document: regions that own their lines. */
   let ds = $state<DocState | null>(null);
@@ -77,6 +89,11 @@
    *  else. It is one of the three inputs, so the whole comparison is stale —
    *  and this window ends by writing its result over that file. */
   let changedOnDisk = $state(false);
+  /** The target as it was last known to read — what "changed on disk" is measured
+   *  against. The merge is built from three inputs, but the TARGET is a file and
+   *  can simply be read, so a write that changes nothing, and this window's own
+   *  save, are not reported as somebody else's edit. */
+  let diskText = "";
   let reloading = $state(false);
   let stopWatching: (() => void) | null = null;
   /** A pane's colouring: runs per line, sparse — a line not yet asked for has
@@ -286,7 +303,7 @@
         break;
       }
       case "save":
-        void save();
+        void writeOnly(); // ctrl+s writes; finishing is the button
         break;
       case "redo": {
         typing = false;
@@ -747,6 +764,18 @@
     return occurQuery ? rangesInLine(line, occurQuery, true) : undefined;
   }
 
+  /** Put region `i` in view, a few rows below the top edge.
+   *
+   *  By GEOMETRY. next/prev used to scroll by looking up `[data-region]`, and
+   *  that attribute is on the "?" marker — which exists only while a conflict is
+   *  undecided. So on a file with no conflicts at all (a merge that only brought
+   *  code in) the selector matched nothing, `?.scrollIntoView()` did nothing, and
+   *  the counter was the only thing that moved. The same went for any conflict
+   *  the moment a side was taken for it. */
+  function scrollToRegion(i: number) {
+    if (scrollEl) scrollEl.scrollTop = Math.max(0, tops[i] - LH * 3);
+  }
+
   /** Scroll a region into view; conflicts also move the prev/next counter. */
   function jumpTo(i: number) {
     const at = conflicts.indexOf(i);
@@ -754,7 +783,7 @@
       goTo(at);
       return;
     }
-    if (scrollEl) scrollEl.scrollTop = Math.max(0, tops[i] - LH * 3);
+    scrollToRegion(i);
   }
   function seek(fraction: number) {
     if (!scrollEl) return;
@@ -764,9 +793,7 @@
   function goTo(n: number) {
     if (!stops.length) return;
     current = ((n % stops.length) + stops.length) % stops.length;
-    document
-      .querySelector(`[data-region="${stops[current]}"]`)
-      ?.scrollIntoView({ block: "center" });
+    scrollToRegion(stops[current]);
   }
 
   /** Conflicts settled by editing that ended up with no text at all: legitimate
@@ -790,6 +817,38 @@
     return null;
   }
 
+  /** Write the result to the file and leave everything else alone — ctrl+s.
+   *
+   *  Not `save`: that one also marks the file resolved, prunes the `.rej` and
+   *  retires the merge, which is why it closes the window. Saving your work is
+   *  not finishing it, and a reflex on ctrl+s should never end the session.
+   *
+   *  p4 still has the file unresolved afterwards, which is the truth: the text
+   *  is settled, the resolve is not. Save & resolve is what says it is. */
+  async function writeOnly() {
+    if (!data || !ds || saving) return;
+    const problem = saveProblem(docText(ds.doc));
+    if (problem) {
+      say(problem, true); // the merge stays up: that is where the fix is
+      return;
+    }
+    saving = true;
+    const label = getCurrentWindow().label;
+    await p4.unwatchFile(label).catch(() => {}); // our own write is not news
+    try {
+      const text = docText(ds.doc);
+      await invoke<void>("merge_write", { id, text: text.endsWith("\n") ? text : text + "\n" });
+      diskText = await invoke<string>("read_text_file", { path: data.target }).catch(() => diskText);
+      changedOnDisk = false;
+      say("Saved. The resolve is still open — Save & resolve finishes it.");
+    } catch (e) {
+      say(String(e), true);
+    } finally {
+      saving = false;
+      if (data?.target) void p4.watchFile(label, data.target).catch(() => {});
+    }
+  }
+
   async function save() {
     if (!data || !ds || unsettled.length) return;
     const problem = saveProblem(docText(ds.doc));
@@ -798,13 +857,33 @@
       return;
     }
     saving = true;
+    // Not watching across our own write. Comparing content would mostly do,
+    // but the watcher’s re-read and the baseline’s are both round trips and
+    // the event can win: it would then compare what we just wrote against
+    // what was there before it. Stopping first removes the race instead of
+    // narrowing it, and the watch is picked up again below — the window does
+    // not necessarily close here.
+    const label = getCurrentWindow().label;
+    await p4.unwatchFile(label).catch(() => {});
     try {
       const text = docText(ds.doc);
       await invoke<string>("merge_save", { id, text: text.endsWith("\n") ? text : text + "\n" });
+      // The baseline moves to what WE just wrote, before anything can ask
+      // about it. Not `text`: the write keeps the target’s own line endings
+      // and BOM (and `p4 resolve -ay` runs behind it), so the bytes on disk
+      // are not the ones the document holds — read them back with the same
+      // call the watcher compares against. The window usually closes here,
+      // but it must not depend on that: if it stays, it goes on watching,
+      // and against the right baseline.
+      diskText = await invoke<string>("read_text_file", { path: data.target }).catch(() => diskText);
+      changedOnDisk = false;
+      void p4.watchFile(label, data.target).catch(() => {}); // baseline first, then watch
       await getCurrentWindow().close();
     } catch (e) {
       error = String(e);
       saving = false;
+      // The save did not happen, so the file is someone else’s to change again.
+      if (data?.target) void p4.watchFile(label, data.target).catch(() => {});
     }
   }
 
@@ -974,11 +1053,18 @@
     if (!data?.target) return;
     const label = getCurrentWindow().label;
     void p4.watchFile(label, data.target).catch(() => {});
-    // Unlike the diff window there is nothing to compare against: the merge is
-    // built from three inputs and holds no copy of the file as it stood. Any
-    // write to it is worth saying, including one that changed nothing — the
-    // cost of a false alarm here is a button the user need not press.
-    stopWatching = await listen("file-on-disk-changed", () => (changedOnDisk = true));
+    diskText = await invoke<string>("read_text_file", { path: data.target }).catch(() => "");
+    // What is emitted is only "something touched it"; whether it MATTERS is a
+    // question about content. Reading the target and comparing is what keeps a
+    // write that changed nothing — and this window's own save — from reporting
+    // itself as somebody else's edit.
+    stopWatching = await listen("file-on-disk-changed", () => {
+      void invoke<string>("read_text_file", { path: data!.target })
+        .then((now) => {
+          if (now !== diskText) changedOnDisk = true;
+        })
+        .catch(() => {});
+    });
   });
 
   onDestroy(() => {
@@ -1011,6 +1097,9 @@
       origin = {};
       current = 0;
       changedOnDisk = false;
+      if (data?.target) {
+        diskText = await invoke<string>("read_text_file", { path: data.target }).catch(() => diskText);
+      }
       void openSides();
       void openResult();
       setTimeout(() => goTo(0), 0);
@@ -1151,6 +1240,10 @@
     />
   {/if}
 
+  {#if notice}
+    <div class="note" class:bad={noticeBad}>{notice}</div>
+  {/if}
+
   {#if changedOnDisk}
     <div class="stale">
       <span>
@@ -1227,12 +1320,7 @@
                   ▶
                 </div>
               {:else if flow.open}
-                <div
-                  class="arrow open"
-                  class:instrip={r.kind === "conflict"}
-                  title="Undecided conflict"
-                  data-region={i}
-                >
+                <div class="arrow open" class:instrip={r.kind === "conflict"} title="Undecided conflict">
                   ?
                 </div>
               {/if}
@@ -1632,6 +1720,22 @@
   .whole button {
     font-size: 11px;
     padding: 1px 8px;
+  }
+  /* The same shape as the stale bar, in the colour of something that went
+     right rather than something that wants attention. */
+  .note {
+    flex: none;
+    padding: 6px 10px;
+    font-size: 12px;
+    line-height: 1.4;
+    color: #7cc47c;
+    background: color-mix(in srgb, #7cc47c 12%, transparent);
+    border-bottom: 1px solid color-mix(in srgb, #7cc47c 30%, transparent);
+  }
+  .note.bad {
+    color: #f0c674;
+    background: color-mix(in srgb, #f0c674 12%, transparent);
+    border-bottom-color: color-mix(in srgb, #f0c674 30%, transparent);
   }
   .stale {
     flex: none;

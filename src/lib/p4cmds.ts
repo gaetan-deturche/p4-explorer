@@ -79,6 +79,7 @@ export const P4_COMMANDS: P4Cmd[] = [
   { key: "stash_delete", label: "stash (delete)", read: false },
   { key: "review_copy_files", label: "review (copy shelved files)", read: false },
   { key: "write_local_file", label: "write file (diff editor)", read: false },
+  { key: "merge_write", label: "resolve (write the result)", read: false },
   { key: "merge_save", label: "resolve (save merge)", read: false },
   { key: "merge_external", label: "resolve (P4MERGE)", read: false },
   { key: "p4_switch", label: "switch", read: false },

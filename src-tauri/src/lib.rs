@@ -126,6 +126,7 @@ pub fn run() {
             commands::merge_start_resolve,
             commands::merge_data,
             commands::merge_save,
+            commands::merge_write,
             commands::merge_cancel,
             commands::merge_external,
             commands::open_merge_window,
