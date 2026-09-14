@@ -1033,7 +1033,10 @@ initSplit(leftText.trim() === "");
     typing = false;
     ds = applyRegionSlice(ds, i, take.from, take.to, take.lines);
     dirty = true;
-    scheduleRecolor(); // the block was rewritten, as an edit rewrites it
+    // Re-diff, exactly as an edit does. Recolouring alone left the OLD blocks in
+    // place: a line taken from the other side went on being painted as a change,
+    // with its intra-line marks, and went on being counted as one.
+    reflow();
   }
 
   /** The same, for every line the selection touches — or the caret’s line when
@@ -1071,7 +1074,7 @@ initSplit(leftText.trim() === "");
     typing = false;
     ds = next;
     dirty = true;
-    scheduleRecolor();
+    reflow();
   }
 
   /** Discard the local change in one block: take the other side's lines. */
@@ -1083,7 +1086,7 @@ initSplit(leftText.trim() === "");
     typing = false;
     ds = applyRegionLines(ds, i, b.left);
     dirty = true;
-    scheduleRecolor(); // taking the other side rewrites the block — as an edit does
+    reflow(); // the text changed, so the diff has to be recomputed, as for an edit
   }
 
   async function save() {
