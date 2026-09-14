@@ -150,13 +150,135 @@ fn rebuild(base: &[String], chunks: &[Chunk], from: usize, to: usize) -> Vec<Str
     out
 }
 
-/// Cap on the LCS table. Past this the middle is reported as one big change
-/// instead — correct, just coarser than a line-by-line diff.
-const MAX_CELLS: usize = 4_000_000;
+/// How divergent a pair of files may be before the diff gives up and calls the
+/// whole middle one replacement. This is a bound on the number of EDITS, not on
+/// the size of the file: two 20,000-line files that differ in ten places cost
+/// ten steps here. The table this replaced was bounded by n*m, so a big file
+/// with edits near both ends blew through it and the merge stopped locating
+/// anything — a 3,000-line conflict whose two sides were almost entirely
+/// identical (measured: `EditorViewportClient.cpp`, a 3015 x 2956 middle
+/// against a 4,000,000-cell cap).
+const MAX_EDITS: usize = 4096;
+
+/// One step of an edit script over two line arrays.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Op {
+    Same(usize),
+    Del(usize),
+    Add(usize),
+}
+
+/// Lines as ints, so the inner loop compares numbers rather than strings.
+fn intern(a: &[String], b: &[String]) -> (Vec<u32>, Vec<u32>) {
+    let mut ids: std::collections::HashMap<&str, u32> = std::collections::HashMap::new();
+    let mut ia = Vec::with_capacity(a.len());
+    let mut ib = Vec::with_capacity(b.len());
+    for s in a {
+        let next = ids.len() as u32;
+        ia.push(*ids.entry(s.as_str()).or_insert(next));
+    }
+    for s in b {
+        let next = ids.len() as u32;
+        ib.push(*ids.entry(s.as_str()).or_insert(next));
+    }
+    (ia, ib)
+}
+
+/// Myers' greedy diff: the shortest edit script between `a` and `b`.
+///
+/// A port of the front-end's `linediff.ts`, so the resolve window and the diff
+/// window locate a change in the same place.
+fn myers(a: &[u32], b: &[u32]) -> Vec<Op> {
+    let (n, m) = (a.len(), b.len());
+    if n == 0 && m == 0 {
+        return Vec::new();
+    }
+    if n == 0 {
+        return vec![Op::Add(m)];
+    }
+    if m == 0 {
+        return vec![Op::Del(n)];
+    }
+    let max = (n + m).min(MAX_EDITS);
+    let offset = max as isize;
+    let mut v = vec![0isize; 2 * max + 1];
+    let mut trace: Vec<Vec<isize>> = Vec::new();
+    let mut found: Option<usize> = None;
+    for d in 0..=max {
+        trace.push(v.clone()); // the state the step at depth d branches from
+        let dd = d as isize;
+        let mut k = -dd;
+        while k <= dd {
+            let idx = (offset + k) as usize;
+            let mut x = if k == -dd || (k != dd && v[idx - 1] < v[idx + 1]) {
+                v[idx + 1] // down: an insertion
+            } else {
+                v[idx - 1] + 1 // right: a deletion
+            };
+            let mut y = x - k;
+            while (x as usize) < n && (y as usize) < m && a[x as usize] == b[y as usize] {
+                x += 1;
+                y += 1;
+            }
+            v[idx] = x;
+            if x as usize >= n && y as usize >= m {
+                found = Some(d);
+                break;
+            }
+            k += 2;
+        }
+        if found.is_some() {
+            break;
+        }
+    }
+    let Some(found) = found else {
+        // Past MAX_EDITS: too divergent to place, so say so in one piece.
+        return vec![Op::Del(n), Op::Add(m)];
+    };
+
+    // Backtrack the D-path into ops, then put them back in order.
+    let mut rev: Vec<Op> = Vec::new();
+    let (mut x, mut y) = (n as isize, m as isize);
+    for d in (1..=found).rev() {
+        let pv = &trace[d];
+        let dd = d as isize;
+        let k = x - y;
+        let idx = (offset + k) as usize;
+        let came_down = k == -dd || (k != dd && pv[idx - 1] < pv[idx + 1]);
+        let pk = if came_down { k + 1 } else { k - 1 };
+        let px = pv[(offset + pk) as usize];
+        let py = px - pk;
+        // The single step lands here; the snake (equal run) slides on to (x, y).
+        let step_x = if came_down { px } else { px + 1 };
+        let snake = x - step_x;
+        if snake > 0 {
+            rev.push(Op::Same(snake as usize));
+        }
+        rev.push(if came_down { Op::Add(1) } else { Op::Del(1) });
+        x = px;
+        y = py;
+    }
+    if x > 0 {
+        rev.push(Op::Same(x as usize)); // the leading equal run
+    }
+    rev.reverse();
+
+    // Merge neighbours of the same kind.
+    let mut ops: Vec<Op> = Vec::new();
+    for op in rev {
+        match (ops.last_mut(), op) {
+            (Some(Op::Same(c)), Op::Same(n)) => *c += n,
+            (Some(Op::Del(c)), Op::Del(n)) => *c += n,
+            (Some(Op::Add(c)), Op::Add(n)) => *c += n,
+            _ => ops.push(op),
+        }
+    }
+    ops
+}
 
 /// `other` expressed as replacements of ranges of `base`.
 fn diff_chunks(base: &[String], other: &[String]) -> Vec<Chunk> {
-    // Trim the common ends; only the middle needs the expensive comparison.
+    // Trim the common ends; only the middle needs the real comparison.
     let mut lo = 0usize;
     while lo < base.len() && lo < other.len() && base[lo] == other[lo] {
         lo += 1;
@@ -171,44 +293,33 @@ fn diff_chunks(base: &[String], other: &[String]) -> Vec<Chunk> {
     if b.is_empty() && o.is_empty() {
         return Vec::new();
     }
-    if b.is_empty() || o.is_empty() || b.len() * o.len() > MAX_CELLS {
-        return vec![Chunk { start: lo, end: lo + b.len(), lines: o.to_vec() }];
-    }
 
-    // LCS table, then walk it back into runs of equal / replaced lines.
-    let (n, m) = (b.len(), o.len());
-    let mut t = vec![0u32; (n + 1) * (m + 1)];
-    let at = |x: usize, y: usize| x * (m + 1) + y;
-    for x in (0..n).rev() {
-        for y in (0..m).rev() {
-            t[at(x, y)] = if b[x] == o[y] {
-                t[at(x + 1, y + 1)] + 1
-            } else {
-                t[at(x + 1, y)].max(t[at(x, y + 1)])
-            };
-        }
-    }
+    let (ib, io) = intern(b, o);
     let mut chunks: Vec<Chunk> = Vec::new();
     let (mut x, mut y) = (0usize, 0usize);
     let mut pend: Option<Chunk> = None;
-    while x < n || y < m {
-        let same = x < n && y < m && b[x] == o[y];
-        if same {
-            if let Some(c) = pend.take() {
-                chunks.push(c);
+    for op in myers(&ib, &io) {
+        match op {
+            Op::Same(count) => {
+                if let Some(c) = pend.take() {
+                    chunks.push(c);
+                }
+                x += count;
+                y += count;
             }
-            x += 1;
-            y += 1;
-            continue;
-        }
-        let c = pend.get_or_insert(Chunk { start: lo + x, end: lo + x, lines: Vec::new() });
-        // Prefer the direction the table says keeps more of the common run.
-        if y >= m || (x < n && t[at(x + 1, y)] >= t[at(x, y + 1)]) {
-            x += 1;
-            c.end = lo + x;
-        } else {
-            c.lines.push(o[y].clone());
-            y += 1;
+            // A deletion and the insertion beside it are ONE replacement: they
+            // share a pending chunk, which is what makes a changed line read as
+            // a change rather than as a removal followed by an addition.
+            Op::Del(count) => {
+                let c = pend.get_or_insert(Chunk { start: lo + x, end: lo + x, lines: Vec::new() });
+                x += count;
+                c.end = lo + x;
+            }
+            Op::Add(count) => {
+                let c = pend.get_or_insert(Chunk { start: lo + x, end: lo + x, lines: Vec::new() });
+                c.lines.extend_from_slice(&o[y..y + count]);
+                y += count;
+            }
         }
     }
     if let Some(c) = pend.take() {
@@ -324,13 +435,66 @@ mod tests {
 
     #[test]
     fn oversized_middle_degrades_to_one_chunk_without_hanging() {
-        // Two long, fully different middles: past the cell cap, so the whole
-        // middle must come back as a single change rather than line-by-line.
+        // Two long middles with nothing in common: 6,000 edits, past MAX_EDITS,
+        // so the whole middle must come back as a single change rather than
+        // line-by-line. This is the fallback, and it should stay reachable —
+        // what changed is that it now takes genuine divergence to reach it, not
+        // merely a big file.
         let n = 3000;
         let base: Vec<String> = (0..n).map(|i| format!("b{i}")).collect();
         let ours: Vec<String> = (0..n).map(|i| format!("o{i}")).collect();
         let rs = merge3(&base, &ours, &base);
         assert!(!rs.iter().any(Region::is_conflict));
         assert_eq!(flat(&rs), ours);
+    }
+
+
+    #[test]
+    fn a_big_file_with_scattered_edits_still_locates_them() {
+        // The shape that broke. 7,000 lines; one side edits near the top, the
+        // other in six places spread over the bottom half. Trimming the common
+        // ends still leaves a ~2,500-line middle on the depot side, and the old
+        // table — bounded by n*m cells — gave up on it and returned the whole
+        // middle as ONE change. Both sides then "touched" that range and the
+        // file came back as a single conflict thousands of lines long, nearly
+        // all of it identical on both sides.
+        //
+        // Measured on EditorViewportClient.cpp: a 3015 x 2956 middle against a
+        // 4,000,000-cell cap. Not one of these edits touches the same line, so
+        // there is nothing here for a person to settle — but with the depot side
+        // reduced to one slab, our line 3200 fell inside it and the two "both
+        // touched this" into a conflict spanning the lot.
+        let n = 7000usize;
+        let base: Vec<String> = (0..n).map(|i| format!("line {i}")).collect();
+        let mut ours = base.clone();
+        ours[300] = "ours near the top".to_string();
+        ours[3200] = "ours in the middle".to_string(); // inside the depot's stretch
+        let mut theirs = base.clone();
+        for i in (3000..6000).step_by(500) {
+            theirs[i] = format!("theirs {i}");
+        }
+
+        let rs = merge3(&base, &ours, &theirs);
+        assert!(
+            !rs.iter().any(Region::is_conflict),
+            "no side edited the same place: {} regions",
+            rs.len()
+        );
+        let mut want = base.clone();
+        want[300] = "ours near the top".to_string();
+        want[3200] = "ours in the middle".to_string();
+        for i in (3000..6000).step_by(500) {
+            want[i] = format!("theirs {i}");
+        }
+        assert_eq!(flat(&rs), want);
+
+        // And they are LOCATED: every changed region is one line, not a slab.
+        let biggest = rs
+            .iter()
+            .filter(|r| !matches!(r, Region::Same { .. }))
+            .map(|r| r.resolved().len())
+            .max()
+            .unwrap_or(0);
+        assert_eq!(biggest, 1, "a changed region should be the line that changed");
     }
 }
