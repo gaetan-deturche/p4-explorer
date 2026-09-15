@@ -8,6 +8,7 @@ import {
   type P4Conn,
   type P4Record,
   type ReviewInfo,
+  type UnshelveMapping,
   type UndoResult,
   type UnshelveResult,
   type OpenResult,
@@ -1019,9 +1020,23 @@ export const pending = {
 
     if (!answer.option) {
       lastUnshelve = null;
+      // A shelf made in another stream has depot paths this workspace does not
+      // map, and p4 refuses it as "not in client view" — correctly. It CAN place
+      // them through a generated branch view, so when that is what went wrong,
+      // ask p4 whether such a view would work and offer it. The question is
+      // asked inside the attempt (it is part of handling this command) and the
+      // offer comes after, when the queue slot is free.
+      let mapping: UnshelveMapping | null = null;
       await pending.mutate(
         async () => {
-          lastUnshelve = await p4.unshelve(h!.conn(), change, only);
+          try {
+            lastUnshelve = await p4.unshelve(h!.conn(), change, only);
+          } catch (e) {
+            if (/not in client view|not under client|no such file/i.test(String(e))) {
+              mapping = await p4.unshelveMapping(h!.conn(), change).catch(() => null);
+            }
+            throw e;
+          }
         },
         // A resolve left behind must not be silent, and only the finished command
         // knows whether there is one.
@@ -1031,6 +1046,7 @@ export const pending = {
               (lastUnshelve.needsResolve ? " — some need a resolve before they can be submitted." : ".")
             : `Unshelved @${change}.`,
       );
+      if (mapping) await pending.offerMapped(change, only, mapping);
       return;
     }
 
@@ -1052,6 +1068,36 @@ export const pending = {
       () =>
         `Wrote ${copied} file${copied === 1 ? "" : "s"} from the shelf of @${change} to disk` +
         (failed.length ? `, ${failed.length} skipped: ${failed[0]}` : " — nothing is checked out."),
+    );
+  },
+
+  /** The shelf is in another stream, and p4 has already said a generated branch
+   *  view would place it. Offer exactly that, in p4's own terms, and say which
+   *  way the files would travel — this writes into the workspace, so it is not
+   *  something to do on the user's behalf because the first try failed. */
+  async offerMapped(change: string, only: string[], mapping: UnshelveMapping) {
+    if (!h) return;
+    const n = mapping.files;
+    const ok = await h.askConfirm(
+      `The files shelved in @${change} are in ${mapping.from}; this workspace is ${mapping.into}, ` +
+        `so a plain unshelve cannot place them — that is what p4 refused.\n\n` +
+        `p4 can map them between the two streams. It reports that ${n} file${n === 1 ? "" : "s"} ` +
+        `would be opened here.\n\nUnshelve them through that mapping?`,
+      "Unshelve from another stream",
+      "Unshelve with the mapping",
+    );
+    if (!ok) return;
+    lastUnshelve = null;
+    await pending.mutate(
+      async () => {
+        lastUnshelve = await p4.unshelve(h!.conn(), change, only, mapping.from, mapping.into);
+      },
+      () =>
+        lastUnshelve
+          ? `Restored ${lastUnshelve.restored} file${lastUnshelve.restored === 1 ? "" : "s"} from ${mapping.from}` +
+            (lastUnshelve.needsResolve ? " — some need a resolve before they can be submitted." : ".")
+          : `Unshelved @${change} from ${mapping.from}.`,
+      { label: "Unshelve from another stream" },
     );
   },
 

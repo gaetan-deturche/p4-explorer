@@ -336,19 +336,115 @@ pub struct UnshelveResult {
     pub notes: Vec<String>,
 }
 
+/// How a shelf from ANOTHER stream could reach this workspace.
+///
+/// p4 can generate a branch view between two streams (`unshelve -S <stream>
+/// -P <parent>`), which is the only way a shelf whose files are not in the
+/// client view can be placed. Whether it accepts a given pair is p4's business,
+/// not ours to predict — so this is only ever returned after `unshelve -n` has
+/// said it would work.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnshelveMapping {
+    /// The stream the shelved files live in.
+    pub from: String,
+    /// This workspace's stream, where they would land.
+    pub into: String,
+    /// How many files the preview said it would open.
+    pub files: usize,
+}
+
+/// The stream a depot path belongs to, from a list of known streams: the longest
+/// one that prefixes it.
+fn stream_of(path: &str, streams: &[String]) -> Option<String> {
+    streams
+        .iter()
+        .filter(|s| path.starts_with(&format!("{s}/")))
+        .max_by_key(|s| s.len())
+        .cloned()
+}
+
+/// Could this shelf be unshelved through a generated branch view, and how?
+///
+/// Called only after a plain unshelve has been refused for being outside the
+/// client view. Everything here is read-only, `unshelve -n` included.
+#[tauri::command]
+pub async fn p4_unshelve_mapping(
+    conn: P4Conn,
+    change: String,
+) -> Result<Option<UnshelveMapping>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        // Where this workspace lives.
+        let info = p4::run(&conn, &["info"])?;
+        let into = info
+            .first()
+            .and_then(|r| r.get("clientStream").or_else(|| r.get("Client stream")))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if into.is_empty() {
+            return Ok(None); // not a stream client: nothing to generate a view from
+        }
+        // Where the shelved files live.
+        let shelved = p4::run(&conn, &["describe", "-S", "-s", &change])?;
+        let Some(first) = shelved
+            .iter()
+            .filter_map(|r| r.get("depotFile0").or_else(|| r.get("depotFile")))
+            .filter_map(|v| v.as_str())
+            .next()
+            .map(|s| s.to_string())
+        else {
+            return Ok(None);
+        };
+        let streams: Vec<String> = p4::run(&conn, &["streams"])?
+            .iter()
+            .filter_map(|r| r.get("Stream").and_then(|v| v.as_str()).map(String::from))
+            .collect();
+        let Some(from) = stream_of(&first, &streams) else { return Ok(None) };
+        if from == into {
+            return Ok(None); // same stream: the view was never the problem
+        }
+        // Ask p4 whether it would work, rather than reasoning about whether the
+        // two streams are related. `-n` writes nothing.
+        let preview = p4::run_notes(
+            &conn,
+            &["unshelve", "-n", "-s", &change, "-S", &from, "-P", &into],
+        );
+        match preview {
+            Ok((recs, _notes)) if !recs.is_empty() => Ok(Some(UnshelveMapping {
+                from,
+                into,
+                files: recs.iter().filter(|r| r.contains_key("depotFile")).count(),
+            })),
+            _ => Ok(None),
+        }
+    })
+    .await
+    .map_err(|e| format!("unshelve-mapping task failed: {e}"))?
+}
+
 /// `files` empty restores the whole shelf; naming files restores only those,
 /// leaving the rest shelved (`p4 unshelve -s <change> [-c <change>] [file…]`).
+///
+/// `stream`/`parent`, when given, add the generated branch view that lets a
+/// shelf from another stream land here — see `p4_unshelve_mapping`, which is
+/// what decides they are worth passing.
 #[tauri::command]
 pub async fn p4_unshelve(
     conn: P4Conn,
     change: String,
     files: Vec<String>,
+    stream: Option<String>,
+    parent: Option<String>,
 ) -> Result<UnshelveResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
         // run_notes, not run: a per-file refusal is a WARNING with exit status 0
         // (see commands/undo.rs), so `run` would drop the reason and report a
         // success that never happened.
         let mut args: Vec<&str> = vec!["unshelve", "-s", &change, "-c", &change];
+        if let (Some(s), Some(p)) = (stream.as_deref(), parent.as_deref()) {
+            args.extend(["-S", s, "-P", p]);
+        }
         args.extend(files.iter().map(String::as_str));
         let (recs, notes) = p4::run_notes(&conn, &args)?;
         if recs.is_empty() {

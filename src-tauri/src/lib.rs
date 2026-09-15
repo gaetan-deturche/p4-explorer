@@ -198,6 +198,7 @@ pub fn run() {
             commands::p4_annotate,
             commands::open_blame_window,
             commands::p4_unshelve,
+            commands::p4_unshelve_mapping,
             commands::p4_delete_change,
             commands::p4_revert_change,
             commands::p4_undo_change,

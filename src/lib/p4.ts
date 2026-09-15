@@ -410,6 +410,15 @@ export interface FileHolders {
   others: Holder[];
 }
 
+/** How a shelf from another stream could reach this workspace: p4 generates a
+ *  branch view between the two. Only ever offered after `unshelve -n` has said
+ *  it would work. */
+export interface UnshelveMapping {
+  from: string; // the stream the shelved files live in
+  into: string; // this workspace's stream
+  files: number;
+}
+
 /** What an unshelve restored. `needsResolve` is set when p4 left files flagged
  *  unresolved — it does that when the shelf lands on files that were still open. */
 export interface UnshelveResult {
@@ -588,9 +597,20 @@ export const p4 = {
    *  shelf, it does not trim it to that set. */
   shelveUpdate: (conn: P4Conn, change: string, files: string[] = []) =>
     call("p4_shelve", { conn, change, files }),
-  /** Restore a changelist's shelved files into the workspace; the shelf stays. */
-  unshelve: (conn: P4Conn, change: string, files: string[] = []) =>
-    g<UnshelveResult>("p4_unshelve", { conn, change, files }),
+  /** Restore a changelist's shelved files into the workspace; the shelf stays.
+   *  `stream`/`parent` add the generated branch view a shelf from another stream
+   *  needs — see `unshelveMapping`, which is what says they would work. */
+  unshelve: (
+    conn: P4Conn,
+    change: string,
+    files: string[] = [],
+    stream?: string,
+    parent?: string,
+  ) => g<UnshelveResult>("p4_unshelve", { conn, change, files, stream, parent }),
+  /** Whether this shelf could be unshelved here through a generated branch view.
+   *  Read-only: it answers by previewing. */
+  unshelveMapping: (conn: P4Conn, change: string) =>
+    g<UnshelveMapping | null>("p4_unshelve_mapping", { conn, change }),
   requestReview: (conn: P4Conn, change: string) =>
     g<void>("p4_request_review", { conn, change }),
   swarmUrl: (conn: P4Conn) => g<string>("swarm_url", { conn }),
