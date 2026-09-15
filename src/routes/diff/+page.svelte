@@ -1130,7 +1130,12 @@ initSplit(leftText.trim() === "");
       // does still clear it: there the content came from somewhere else, and
       // undoing into it would put this window's text back over theirs.)
       rebuild(text, at.line, at.col);
-      if (changes.length) goTo(Math.min(current, changes.length - 1));
+      // Blocks edited into agreement stop being changes, so the prev/next
+      // counter is CLAMPED to the shorter list — but nothing is scrolled. A save
+      // is not a navigation: the user is reading where they are. This used to
+      // call goTo, which scrolls, so saving jumped to the first change whenever
+      // prev/next had not been used (`current` still 0).
+      current = changes.length ? Math.min(current, changes.length - 1) : 0;
     } catch (e) {
       error = String(e);
     } finally {
