@@ -927,7 +927,7 @@ export const pending = {
   },
   updateReview(change: string) {
     pending.action(
-      () => p4.shelveUpdate(h!.conn(), change),
+      () => p4.shelveUpdate(h!.conn(), change, [], pending.hasShelf(change)),
       `Update the review for @${change} by re-shelving its files?`,
       "Update review",
       "Update",
@@ -941,7 +941,7 @@ export const pending = {
   shelveChangelist(change: string) {
     const replacing = shelved.has(change);
     pending.mutate(
-      () => p4.shelveUpdate(h!.conn(), change),
+      () => p4.shelveUpdate(h!.conn(), change, [], pending.hasShelf(change)),
       replacing ? `Shelf of @${change} replaced.` : `Files of @${change} shelved.`,
       { refresh: false }, // shelving changes no synced content
     );

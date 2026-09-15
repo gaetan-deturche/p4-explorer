@@ -593,10 +593,12 @@ export const p4 = {
   /** Remove shelved files: the whole shelf, or just `files`. */
   shelveDelete: (conn: P4Conn, change: string, files: string[] = []) =>
     call("p4_shelve_delete", { conn, change, files }),
-  /** (Re)shelve a changelist, or just `files` of it — naming files ADDS to the
-   *  shelf, it does not trim it to that set. */
-  shelveUpdate: (conn: P4Conn, change: string, files: string[] = []) =>
-    call("p4_shelve", { conn, change, files }),
+  /** `replace` makes the shelf MATCH the changelist, dropping whatever has left
+   *  it; without it the shelf is only updated and added to. Naming files is
+   *  always additive — shelving part of a changelist must not discard the rest
+   *  of the shelf. */
+  shelveUpdate: (conn: P4Conn, change: string, files: string[] = [], replace = false) =>
+    call("p4_shelve", { conn, change, files, replace }),
   /** Restore a changelist's shelved files into the workspace; the shelf stays.
    *  `stream`/`parent` add the generated branch view a shelf from another stream
    *  needs — see `unshelveMapping`, which is what says they would work. */

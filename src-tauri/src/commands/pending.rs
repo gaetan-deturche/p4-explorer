@@ -471,17 +471,35 @@ pub async fn p4_unshelve(
     .map_err(|e| format!("unshelve task failed: {e}"))?
 }
 
-/// (Re)shelve a changelist's files (`p4 shelve -f -c <change> [files…]`) — used
-/// to update an existing Swarm review (Swarm picks up the new shelf), and to
-/// shelve part of a changelist.
+/// (Re)shelve a changelist's files — used to update an existing Swarm review
+/// (Swarm picks up the new shelf), and to shelve part of a changelist.
 ///
-/// Naming files is ADDITIVE, not a replacement: verified live, shelving one file
-/// of a two-file changelist and then the other left both in the shelf. So a
-/// partial shelve adds to whatever is already there rather than trimming it,
-/// which is why the counterpart below removes files one at a time instead.
+/// `replace` is "make the shelf match the changelist": `-r`, which p4 documents
+/// as "previously shelved files will be deleted". That is what the caller wants
+/// when re-shelving a changelist whose files have changed — `-f` updates what is
+/// shelved and adds what is new but leaves the rest, so a file that had left the
+/// changelist stayed in the shelf.
+///
+/// Without it, `-f`: naming files is ADDITIVE, verified live — shelving one file
+/// of a two-file changelist and then the other left both in the shelf. That is
+/// right for shelving PART of a changelist, which must not throw away the rest
+/// of it, and it is why the counterpart below removes files one at a time.
+///
+/// The caller decides rather than this inferring it from an empty file list,
+/// because a FIRST shelve has nothing to replace and `-r` is only documented
+/// against an existing one.
 #[tauri::command]
-pub async fn p4_shelve(conn: P4Conn, change: String, files: Vec<String>) -> Res {
-    let mut args = v(&["shelve", "-f", "-c", &change]);
+pub async fn p4_shelve(
+    conn: P4Conn,
+    change: String,
+    files: Vec<String>,
+    replace: bool,
+) -> Res {
+    let mut args = if replace && files.is_empty() {
+        v(&["shelve", "-r", "-c", &change])
+    } else {
+        v(&["shelve", "-f", "-c", &change])
+    };
     args.extend(files);
     run(conn, args).await
 }
