@@ -5,9 +5,107 @@
 //! independent workspace as soon as it knows which one to open. That is all
 //! this does: name the window after the workspace and put the answer in its URL.
 
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
+
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 
 use super::diffwin::enc;
+
+/// One workspace window, as the session remembers it.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct WorkWindow {
+    pub port: String,
+    pub client: String,
+}
+
+/// What each workspace window is showing, and when it closed.
+///
+/// The close TIME is the whole trick. Tauri reports `ExitRequested` only once the
+/// windows are already destroyed, so at that moment a quit and a window the user
+/// closed an hour ago look the same. A shutdown closes every window within
+/// milliseconds of the exit, so an entry closed that recently was closed BY the
+/// shutdown and belongs to the session; anything older was closed on purpose and
+/// does not.
+struct Tracked {
+    what: WorkWindow,
+    closed: Option<Instant>,
+}
+
+fn tracked() -> &'static Mutex<HashMap<String, Tracked>> {
+    static T: OnceLock<Mutex<HashMap<String, Tracked>>> = OnceLock::new();
+    T.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// How recently a window must have closed to count as closed BY the shutdown.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(1);
+
+/// This window is showing `client` on `port` — called when a workspace window
+/// opens, and again whenever the workspace it shows changes (an empty window
+/// being pointed somewhere, or a switch).
+#[tauri::command]
+pub async fn note_workspace_window(window: tauri::Window, port: String, client: String) {
+    if client.is_empty() {
+        return;
+    }
+    tracked().lock().unwrap().insert(
+        window.label().to_string(),
+        Tracked { what: WorkWindow { port, client }, closed: None },
+    );
+}
+
+/// A workspace window has gone. Remembered, not forgotten: whether it counts is
+/// decided at exit, by how long ago this was.
+pub fn note_closed(label: &str) {
+    if let Some(e) = tracked().lock().unwrap().get_mut(label) {
+        e.closed = Some(Instant::now());
+    }
+}
+
+/// The workspace windows to restore: those still open, plus those the shutdown
+/// has just closed.
+pub fn session() -> Vec<WorkWindow> {
+    let now = Instant::now();
+    tracked()
+        .lock()
+        .unwrap()
+        .values()
+        .filter(|e| match e.closed {
+            None => true,
+            Some(at) => now.duration_since(at) < SHUTDOWN_GRACE,
+        })
+        .map(|e| e.what.clone())
+        .collect()
+}
+
+/// What the last session had open. Empty when there is nothing to restore.
+#[tauri::command]
+pub async fn workspace_session(app: AppHandle) -> Vec<WorkWindow> {
+    let Some(state) = app.try_state::<crate::index::AppState>() else { return Vec::new() };
+    let Ok(db) = state.cache_db.lock() else { return Vec::new() };
+    let json: String = db
+        .query_row(
+            "SELECT json FROM cache WHERE scope='nav' AND key='workwindows'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or_default();
+    serde_json::from_str(&json).unwrap_or_default()
+}
+
+/// Write the session down. Called as the app exits.
+pub fn save_session(app: &AppHandle) {
+    let open = session();
+    let Some(state) = app.try_state::<crate::index::AppState>() else { return };
+    let Ok(db) = state.cache_db.lock() else { return };
+    let Ok(json) = serde_json::to_string(&open) else { return };
+    let _ = db.execute(
+        "INSERT INTO cache(scope, key, json) VALUES('nav', 'workwindows', ?1)
+         ON CONFLICT(scope, key) DO UPDATE SET json=excluded.json",
+        [json],
+    );
+}
 
 /// Tauri labels take only alphanumerics, `-`, `/`, `:` and `_`, and workspace
 /// names here carry dots (`gaetan.deturche_sloclap-41_Curiosity2`).
@@ -81,9 +179,17 @@ pub async fn open_workspace_window(
         .visible(false) // shown by wingeom::apply, already at its remembered spot
         .build()
         .map_err(|e| format!("failed to open the workspace window: {e}"))?;
-    // One geometry for every workspace window, as for diff/resolve windows:
-    // the labels differ per workspace, so per-label state would rarely match.
-    crate::wingeom::apply(&win, "work");
+    if !client.is_empty() {
+        tracked().lock().unwrap().insert(
+            label.clone(),
+            Tracked { what: WorkWindow { port: port.clone(), client: client.clone() }, closed: None },
+        );
+    }
+    // Geometry PER WORKSPACE, unlike the diff and resolve windows. Theirs are
+    // interchangeable and their labels are unique per window, so per-label state
+    // would never match again; a workspace window's label is the workspace, so it
+    // comes back where that workspace was left.
+    crate::wingeom::apply(&win, &label);
     Ok(())
 }
 

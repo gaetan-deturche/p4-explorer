@@ -460,6 +460,23 @@ export function openWorkspaceWindow(port: string, client: string): Promise<void>
   return invoke<void>("open_workspace_window", { port, client });
 }
 
+/** Tell the app which workspace this window is showing, so the next session can
+ *  bring it back. Called again whenever the workspace changes. */
+export function noteWorkspaceWindow(port: string, client: string): Promise<void> {
+  return invoke<void>("note_workspace_window", { port, client });
+}
+
+/** One workspace window from the last session. */
+export interface WorkWindow {
+  port: string;
+  client: string;
+}
+
+/** The workspace windows open when the app last closed. */
+export function workspaceSession(): Promise<WorkWindow[]> {
+  return invoke<WorkWindow[]>("workspace_session");
+}
+
 /** Open (or re-focus) the window for one review. */
 export function openReviewWindow(conn: P4Conn, id: number): Promise<void> {
   return invoke<void>("open_review_window", { conn, id });

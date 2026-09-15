@@ -133,6 +133,8 @@ pub fn run() {
             commands::resolve_needed,
             commands::watch_file,
             commands::open_workspace_window,
+            commands::note_workspace_window,
+            commands::workspace_session,
             commands::unwatch_file,
             commands::merge_reload,
             commands::pick_folder,
@@ -234,6 +236,18 @@ pub fn run() {
             index::index_build_local,
             index::index_search,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| match event {
+            // A workspace window has gone. Whether it counts towards the session
+            // is decided at exit, by how recently this happened — see workwin.
+            tauri::RunEvent::WindowEvent { label, event: tauri::WindowEvent::Destroyed, .. } => {
+                commands::note_closed(&label);
+            }
+            // Everything still open, plus whatever this shutdown has just closed.
+            // Tauri reports this only once the windows are destroyed, which is why
+            // they are remembered rather than forgotten on the way out.
+            tauri::RunEvent::ExitRequested { .. } => commands::save_session(app),
+            _ => {}
+        });
 }

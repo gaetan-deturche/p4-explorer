@@ -12,6 +12,8 @@
     openBlameWindow,
     openReviewWindow,
     openWorkspaceWindow,
+    noteWorkspaceWindow,
+    workspaceSession,
     p4,
     type P4Conn,
     type P4Record,
@@ -969,6 +971,12 @@
     getCurrentWindow()
       .setTitle(conn.client ? `Auger — ${conn.client}` : "Auger")
       .catch(() => {});
+    // And the app is told, so the next session can bring this window back where
+    // it was — including a window that started empty and was pointed somewhere,
+    // or one that has since been switched.
+    if (!isMainWindow && conn.client) {
+      void noteWorkspaceWindow(conn.port, conn.client).catch(() => {});
+    }
   });
 
   onMount(() => {
@@ -1096,6 +1104,16 @@
       // immediately — every pane paints from the store — and the real connect
       // validates in the background.
       const last = loadLastServer();
+      // The main window brings back the workspace windows that were open when the
+      // app last closed. Only it does this: a restored window opening its own
+      // would multiply them every launch.
+      if (isMainWindow) {
+        void workspaceSession()
+          .then((windows) => {
+            for (const w of windows) void openWorkspaceWindow(w.port, w.client).catch(() => {});
+          })
+          .catch(() => {});
+      }
       if (bootClient || bootBlank) {
         // A workspace window: open what it was opened FOR, not the last session.
         void connection.openAt(bootPort || last, bootClient);
