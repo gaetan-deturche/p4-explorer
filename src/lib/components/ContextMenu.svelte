@@ -28,39 +28,40 @@
   let openSub = $state<number | null>(null);
 
   // --- a submenu stays in the window ------------------------------------------
-  // The menu itself is measured and moved (see below); a submenu was left to CSS
-  // at `top: -4px`, which is fine until the row it hangs off is near the bottom
-  // of the screen — "Move to changelist" on the last changelist in a long list
-  // opened past the edge of the window, and the changelists ran off it.
+  // It is FIXED and placed by hand, in viewport coordinates, once per opening.
+  // Both halves of that matter, and the second one cost an app freeze.
   //
-  // The placement is computed from the ROW and the submenu's own HEIGHT, never
-  // from where the submenu is currently sitting. That matters: an earlier
-  // version measured its rect and assumed it was at the default offset, so the
-  // answer depended on what had happened just before — another row's lift still
-  // applied, or the menu repositioning itself in the same flush — and it came
-  // out right only sometimes. This form gives the same answer however many times
-  // it runs, and reading `at` makes it run again if the menu itself moves.
+  // Fixed, because an absolutely positioned submenu is part of the menu's scroll
+  // box: it counts towards `menuEl.scrollHeight`, which is what the menu below
+  // measures to decide whether it must scroll. Out of flow, it cannot.
+  //
+  // Placed ONCE, in a frame after it is in the DOM, rather than from an effect.
+  // An effect that reads where the menu is and writes where the submenu goes
+  // closes a loop: submenu moves -> the menu's measured height changes -> the
+  // menu repositions -> the submenu is placed again. That spun the main thread
+  // — the app stopped answering at all, timers included — when "Move to
+  // changelist" was opened. A plain function called on open cannot.
   //
   // SUB_TOP is where it sits when it fits: level with its row, give or take the
   // menu's own padding.
   const SUB_TOP = -4;
   let subEl = $state<HTMLDivElement>();
-  let subTop = $state(SUB_TOP);
-  $effect(() => {
-    void openSub; // a different row
-    void at; // the menu moved under it
+  let subPos = $state<{ left: number; top: number } | null>(null);
+
+  /** Put the open submenu beside its row and inside the window. */
+  function placeSub() {
     const el = subEl;
     const row = el?.parentElement;
     if (!el || !row) return;
-    const rowTop = row.getBoundingClientRect().top;
-    // offsetHeight, not the rect: the height is what it is wherever it sits, and
-    // max-height has already capped it.
-    const lowest = window.innerHeight - EDGE - el.offsetHeight;
-    const top = Math.max(EDGE, Math.min(rowTop + SUB_TOP, lowest));
-    const next = top - rowTop; // back into the row's own coordinates
-    // untracked: an effect that READ what it writes would re-run itself.
-    if (Math.abs(next - untrack(() => subTop)) > 0.5) subTop = next;
-  });
+    const r = row.getBoundingClientRect();
+    const w = el.offsetWidth;
+    const h = el.offsetHeight;
+    const left = flipLeft
+      ? Math.max(EDGE, r.left - w + 1)
+      : Math.min(window.innerWidth - EDGE - w, r.right - 1);
+    const top = Math.max(EDGE, Math.min(r.top + SUB_TOP, window.innerHeight - EDGE - h));
+    subPos = { left, top };
+  }
 
   // --- room for error on the way to a submenu ---------------------------------
   // A submenu opens level with its row and runs DOWNWARDS, so reaching anything
@@ -79,7 +80,9 @@
   }
   function openSubmenu(i: number) {
     cancelClose();
+    subPos = null; // hidden until measured, so it never flashes at the corner
     openSub = i;
+    requestAnimationFrame(placeSub); // once it is in the DOM and has a size
   }
   function scheduleClose() {
     cancelClose();
@@ -118,7 +121,10 @@
     if (!menuEl) return;
     void x;
     void y;
-    void openSub; // a submenu can change the height
+    // No `openSub` here. A submenu used to be part of this element's scroll box,
+    // so opening one changed the height measured below; it is fixed now and
+    // cannot, and re-running this when one opens is what let the two feed each
+    // other.
     const r = menuEl.getBoundingClientRect();
     const maxW = window.innerWidth - EDGE;
     const maxH = window.innerHeight - EDGE;
@@ -176,9 +182,10 @@
         {#if openSub === i}
           <div
             class="submenu"
-            class:left={flipLeft}
             bind:this={subEl}
-            style="top:{subTop}px"
+            style={subPos
+              ? `left:${subPos.left}px; top:${subPos.top}px`
+              : "visibility:hidden"}
           >
             {#each it.submenu as s (s.label)}
               <button class="item" disabled={s.disabled} onclick={() => run(s)}>{s.label}</button>
@@ -281,9 +288,10 @@
   .item:hover .chev {
     color: #fff;
   }
+  /* Fixed: placed in viewport coordinates by placeSub, and— more importantly —
+     not part of the menu's scroll box. */
   .submenu {
-    position: absolute;
-    left: 100%;
+    position: fixed;
     min-width: 12rem;
     max-height: 60vh;
     overflow-y: auto;
@@ -293,8 +301,5 @@
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
     padding: 4px 0;
   }
-  .submenu.left {
-    left: auto;
-    right: 100%;
-  }
+
 </style>
