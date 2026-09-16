@@ -63,6 +63,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Build and publish release
+        id: tauri
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -75,3 +76,23 @@ jobs:
           releaseBody: ${{ steps.changelog.outputs.notes }}
           releaseDraft: false
           prerelease: false
+
+      # The symbols for the binary this release actually ships.
+      #
+      # A PDB is matched to an exe by a GUID both carry, stamped at link time,
+      # so only the PDB from THIS build can name the frames in a stack from THIS
+      # installer. Rebuilding the same tag later does not reproduce it: the
+      # v0.58.0 rebuild came out 8,496 bytes apart in .text with a different
+      # GUID, and every debugger refuses it. Without this step a report from a
+      # shipped build reads `Auger.exe+0x1d9add` and stays unreadable; with it,
+      # the same frame reads `tao … EventLoop::run`. Cargo's release defaults
+      # emit no debuginfo, but the linker still writes a PDB with the public
+      # symbols, which is what names those frames — 12 MB, kept per release.
+      - name: Publish debug symbols
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          V="${GITHUB_REF_NAME#v}"
+          cp src-tauri/target/release/Auger.pdb "Auger_${V}_x64.pdb"
+          gh release upload "${GITHUB_REF_NAME}" "Auger_${V}_x64.pdb" --clobber
