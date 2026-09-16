@@ -196,9 +196,129 @@
     window.removeEventListener("mouseup", bodyMouseUp);
   }
 
-  // Drag-and-drop: move an opened file from one changelist to another.
+  // --- moving a file to another changelist by dragging -------------------------
+  // Mouse events, deliberately NOT the HTML5 drag API. A native drag hands the
+  // mouse to the OS for its duration, and the webview delivers no input until
+  // the system reports that the drag ended; when that report goes missing the
+  // window is deaf to mouse AND keyboard while it carries on painting and
+  // polling. That is not a theory — it is what the frozen v0.58.0 instance
+  // measured as: message loop idle in GetMessageW, renderer still running its
+  // 20s poll on time, every window answering, and the dragged rows still dimmed
+  // because `dragend` never arrived either. The flag that gates input lives in
+  // the webview's browser process, so nothing the page can do will clear it.
+  // A drag made of mousedown/mousemove/mouseup never opens that gate.
   let drag = $state<{ files: string[]; from: string } | null>(null);
   let dragOver = $state<string | null>(null); // CL currently hovered as a drop target
+  let dragPos = $state<{ x: number; y: number } | null>(null); // the ghost follows the cursor
+  let pressed: { x: number; y: number; file: string; change: string } | null = null;
+  const DRAG_SLOP = 4; // px before a press counts as a drag, so a click stays a click
+  const DRAG_EDGE = 26; // px from the list edge that scrolls while dragging
+  let edgeTimer: number | null = null;
+  let edgeDir = 0;
+
+  function rowMouseDown(file: string, change: string, e: MouseEvent) {
+    if (e.button !== 0) return;
+    pressed = { x: e.clientX, y: e.clientY, file, change };
+    window.addEventListener("mousemove", dragMove);
+    window.addEventListener("mouseup", dragUp);
+    window.addEventListener("keydown", dragKey, true);
+    window.addEventListener("blur", cancelDrag);
+  }
+
+  /** The changelist under a point, if these files can actually go there. */
+  function dropTarget(x: number, y: number): string | null {
+    const el = document.elementFromPoint(x, y) as HTMLElement | null;
+    const to = el?.closest<HTMLElement>(".clsec")?.dataset.change ?? null;
+    return to && to !== drag?.from ? to : null;
+  }
+
+  function dragMove(e: MouseEvent) {
+    if (pressed && !drag) {
+      if (Math.abs(e.clientX - pressed.x) < DRAG_SLOP && Math.abs(e.clientY - pressed.y) < DRAG_SLOP)
+        return;
+      // Dragging a row that is part of the selection drags the SELECTION;
+      // grabbing an unselected row drags (and selects) just that one, which is
+      // what makes a stray drag predictable.
+      let files: string[];
+      if (selected.has(pressed.file)) {
+        files = [...selected];
+      } else {
+        files = [pressed.file];
+        selected = new Set(files);
+        anchor = pressed.file;
+      }
+      drag = { files, from: pressed.change };
+    }
+    if (!drag) return;
+    e.preventDefault(); // no text selection dragged along with it
+    dragPos = { x: e.clientX, y: e.clientY };
+    dragOver = dropTarget(e.clientX, e.clientY);
+    edgeScroll(e.clientY);
+  }
+
+  /** Keep scrolling while the cursor rests near the top or bottom of the list,
+   *  re-testing the target as changelists move under a still cursor. */
+  function edgeScroll(y: number) {
+    const r = bodyEl.getBoundingClientRect();
+    edgeDir = y < r.top + DRAG_EDGE ? -1 : y > r.bottom - DRAG_EDGE ? 1 : 0;
+    if (!edgeDir) return stopEdge();
+    if (edgeTimer != null) return;
+    edgeTimer = window.setInterval(() => {
+      bodyEl.scrollTop += edgeDir * 12;
+      if (dragPos) dragOver = dropTarget(dragPos.x, dragPos.y);
+    }, 16);
+  }
+  function stopEdge() {
+    if (edgeTimer != null) clearInterval(edgeTimer);
+    edgeTimer = null;
+  }
+
+  function dragUp() {
+    const d = drag;
+    const to = dragOver;
+    endDrag();
+    if (!d) return;
+    if (to && to !== d.from) moveFiles(d.files, d.from, to);
+    swallowNextClick();
+  }
+  function dragKey(e: KeyboardEvent) {
+    if (e.key === "Escape") cancelDrag();
+  }
+  function cancelDrag() {
+    const was = !!drag;
+    endDrag();
+    if (was) swallowNextClick();
+  }
+
+  /** The press that began a drag must not also land as a click and collapse the
+   *  selection to the one row it started from. The timeout is the release: a
+   *  drag that ended without a click (mouseup outside the window) would
+   *  otherwise leave the swallower armed for the next real one. */
+  function swallowNextClick() {
+    const eat = (e: MouseEvent) => {
+      e.stopPropagation();
+      e.preventDefault();
+      window.removeEventListener("click", eat, true);
+    };
+    window.addEventListener("click", eat, true);
+    setTimeout(() => window.removeEventListener("click", eat, true), 0);
+  }
+
+  /** Every exit goes through here. A drag left half-torn-down is what dimmed
+   *  rows and a stranded ghost look like, so there is exactly one way out. */
+  function endDrag() {
+    pressed = null;
+    drag = null;
+    dragOver = null;
+    dragPos = null;
+    stopEdge();
+    window.removeEventListener("mousemove", dragMove);
+    window.removeEventListener("mouseup", dragUp);
+    window.removeEventListener("keydown", dragKey, true);
+    window.removeEventListener("blur", cancelDrag);
+  }
+  // Unmounting mid-drag would strand those listeners on window.
+  $effect(() => endDrag);
 
   type CL = {
     open: boolean;
@@ -413,29 +533,10 @@
              alike. Aiming at the title alone meant an expanded changelist was
              mostly a dead zone, and the obvious place to drop a file is among the
              files it will join. -->
-        <!-- svelte-ignore a11y_no_static_element_interactions -->
-        <div
-          class="clsec"
-          class:dropinto={dragOver === r.change}
-          ondragover={(e) => {
-            if (drag && drag.from !== r.change) {
-              e.preventDefault();
-              dragOver = r.change;
-            }
-          }}
-          ondragleave={(e) => {
-            // Only when the pointer actually leaves the section: moving between
-            // its own rows fires dragleave on each of them.
-            const to = e.relatedTarget as Node | null;
-            if (dragOver === r.change && (!to || !e.currentTarget.contains(to))) dragOver = null;
-          }}
-          ondrop={(e) => {
-            e.preventDefault();
-            if (drag && drag.from !== r.change) moveFiles(drag.files, drag.from, r.change);
-            drag = null;
-            dragOver = null;
-          }}
-        >
+        <!-- data-change is how a drag hit-tests this section: the drop target
+             is read from the element under the cursor, so the section carries
+             its own identity instead of every row handling drag events. -->
+        <div class="clsec" data-change={String(r.change)} class:dropinto={dragOver === String(r.change)}>
         <button
           class="cl"
           class:contextsel={contextChange === r.change}
@@ -584,6 +685,11 @@
       </div>
     {/if}
   </div>
+  {#if drag && dragPos}
+    <div class="dragghost mono" style="left:{dragPos.x + 14}px;top:{dragPos.y + 12}px">
+      {drag.files.length === 1 ? splitPath(drag.files[0]).name : `${drag.files.length} files`}
+    </div>
+  {/if}
   {#if marquee}
     <div
       class="marquee"
@@ -601,12 +707,15 @@
     class="frow mono"
     data-file={kind === "local" ? f.depotFile : undefined}
     class:dragging={drag?.files.includes(f.depotFile)}
+    class:candrag={kind === "local"}
     class:selected={kind === "local"
       ? selected.has(f.depotFile)
       : shelvedOf === change && shelvedSel.has(f.depotFile)}
     style="padding-left:{depth * 16 + 4}px"
     title={"Double-click to open in external diff\n" + f.depotFile}
-    draggable={kind === "local"}
+    onmousedown={(e) => {
+      if (kind === "local") rowMouseDown(f.depotFile, String(change), e);
+    }}
     onclick={(e) =>
       kind === "local" ? clickFile(f.depotFile, e) : clickShelved(change, f.depotFile, e)}
     onkeydown={(e) => {
@@ -637,29 +746,6 @@
         }
         onShelvedContext(f, change, e, [...shelvedSel]);
       }
-    }}
-    ondragstart={(e) => {
-      if (kind !== "local") return;
-      // Dragging a row that is part of the selection drags the SELECTION;
-      // grabbing an unselected row drags (and selects) just that one, which is
-      // what makes a stray drag predictable.
-      let files: string[];
-      if (selected.has(f.depotFile)) {
-        files = [...selected];
-      } else {
-        files = [f.depotFile];
-        selected = new Set(files);
-        anchor = f.depotFile;
-      }
-      drag = { files, from: change };
-      if (e.dataTransfer) {
-        e.dataTransfer.effectAllowed = "move";
-        e.dataTransfer.setData("text/plain", files.join("\n"));
-      }
-    }}
-    ondragend={() => {
-      drag = null;
-      dragOver = null;
     }}
   >
     <button
@@ -862,8 +948,24 @@
   .frow:hover {
     background: var(--bg-hover);
   }
-  .frow[draggable="true"] {
+  .frow.candrag {
     cursor: grab;
+  }
+  .frow.candrag:active {
+    cursor: grabbing;
+  }
+  /* Fixed and pointer-events:none: the ghost sits under the cursor, and the
+     drop test reads the element under the cursor. */
+  .dragghost {
+    position: fixed;
+    z-index: 60;
+    pointer-events: none;
+    padding: 1px 7px;
+    border: 1px solid var(--accent);
+    border-radius: 3px;
+    background: var(--bg-sel);
+    color: var(--text);
+    font-size: 12px;
   }
   .frow.dragging {
     opacity: 0.4;
