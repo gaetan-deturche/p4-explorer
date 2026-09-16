@@ -29,7 +29,7 @@
 
   // --- a submenu stays in the window ------------------------------------------
   // It is FIXED and placed by hand, in viewport coordinates, once per opening.
-  // Both halves of that matter, and the second one cost an app freeze.
+  // Both halves of that matter.
   //
   // Fixed, because an absolutely positioned submenu is part of the menu's scroll
   // box: it counts towards `menuEl.scrollHeight`, which is what the menu below
@@ -37,10 +37,12 @@
   //
   // Placed ONCE, in a frame after it is in the DOM, rather than from an effect.
   // An effect that reads where the menu is and writes where the submenu goes
-  // closes a loop: submenu moves -> the menu's measured height changes -> the
-  // menu repositions -> the submenu is placed again. That spun the main thread
-  // — the app stopped answering at all, timers included — when "Move to
-  // changelist" was opened. A plain function called on open cannot.
+  // closes a loop: the submenu moves -> the menu's measured height changes ->
+  // the menu repositions -> the submenu is placed again. The placement below is
+  // idempotent, so that loop settles rather than running away — but it still
+  // makes the result depend on what ran just before, which is how the first
+  // attempt came to work only sometimes. A plain function called on open has
+  // neither problem.
   //
   // SUB_TOP is where it sits when it fits: level with its row, give or take the
   // menu's own padding.
