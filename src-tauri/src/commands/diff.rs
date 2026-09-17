@@ -35,23 +35,45 @@ pub struct PatchedFile {
     pub binary: bool,
 }
 
-/// Build a unified-diff patch for `files`, or for all opened files of `change`
-/// when `files` is empty. Returns the patch, what it carries, and the files it
-/// could NOT carry (deletes — a unified diff has no way to say "remove this").
-///
-/// Shared by the Save-As export and by the stash: a stashed change is byte for
-/// byte the `.patch` the export would have written, so it applies through the
-/// same preview, the same fuzz placement and the same conflict handling.
-pub(crate) fn build_patch(
-    conn: &P4Conn,
-    change: &str,
-    files: Vec<String>,
-) -> Result<(String, Vec<PatchedFile>, Vec<String>), String> {
+/// Where the content a patch describes is read from.
+#[derive(Clone, Copy)]
+pub(crate) enum PatchSource<'a> {
+    /// Files open in this workspace: the new side of each file is on disk.
+    Opened,
+    /// A shelf: the new side is `@=change` in the depot. Nothing is read from
+    /// the workspace, which is the point — a shelf made in ANOTHER client, or
+    /// one whose paths this client does not even map, still exports. (`p4 where`
+    /// on such a file answers "file(s) not in client view", so the opened-file
+    /// route cannot serve a shelf at all.)
+    Shelved(&'a str),
+}
+
+/// What a patch needs to know about one file, whichever side it came from.
+struct FileFacts {
+    depot: String,
+    action: String,
+    /// The revision this change is against ("" when p4 names none, as for an add).
+    base: String,
+    /// That revision as a p4 spec — `#have` for an opened file, `#12` for a
+    /// shelved one, which is what the shelf itself records.
+    base_spec: String,
+    /// Where the NEW content is read from; "" means "the local file".
+    new_spec: String,
+    /// The workspace file, when there is one.
+    local: String,
+    binary: bool,
+    is_add: bool,
+    /// The other end of a move, when p4 reports one.
+    moved_to: String,
+}
+
+/// The facts for every opened file the patch should cover.
+fn opened_facts(conn: &P4Conn, change: &str, files: Vec<String>) -> Result<Vec<FileFacts>, String> {
     // The given selection, else all opened files of the changelist.
     let targets: Vec<String> = if !files.is_empty() {
         files
     } else if !change.is_empty() {
-        p4::run(&conn, &["opened", "-c", &change])
+        p4::run(conn, &["opened", "-c", change])
             .unwrap_or_default()
             .iter()
             .filter_map(|r| r.get("depotFile").and_then(|v| v.as_str()).map(String::from))
@@ -62,12 +84,8 @@ pub(crate) fn build_patch(
     if targets.is_empty() {
         return Err("No modified files to include in the patch.".into());
     }
-    // Sort the targets: text files go through `p4 diff`; binaries and adds
-    // carry no unified diff, so their WHOLE content is embedded as a
-    // standard `GIT binary patch` literal section instead (adds included —
-    // p4 has no diff for those either, whatever their type).
     let meta = p4::run(
-        &conn,
+        conn,
         &{
             let mut a: Vec<&str> =
                 vec!["fstat", "-T", "depotFile,headType,type,action,clientFile,haveRev,movedFile"];
@@ -78,46 +96,194 @@ pub(crate) fn build_patch(
         },
     )
     .unwrap_or_default();
-    let mut text_targets: Vec<String> = Vec::new();
-    let mut embed: Vec<(String, String, bool)> = Vec::new(); // (depot, local, is_add)
-    let mut deletes: Vec<String> = Vec::new();
+    Ok(targets
+        .iter()
+        .map(|t| {
+            let r = meta
+                .iter()
+                .find(|r| r.get("depotFile").and_then(|v| v.as_str()) == Some(t.as_str()));
+            let get = |k: &str| {
+                r.and_then(|r| r.get(k)).and_then(|v| v.as_str()).unwrap_or("").to_string()
+            };
+            let action = get("action");
+            FileFacts {
+                base: get("haveRev"),
+                // #have, not #<haveRev>: for a file that isn't opened at all,
+                // p4 would otherwise compare against #head, so a workspace that
+                // is behind would carry the depot's changes too.
+                base_spec: format!("{t}#have"),
+                new_spec: String::new(),
+                local: get("clientFile"),
+                binary: get("type").contains("binary") || get("headType").contains("binary"),
+                is_add: action == "add" || action == "move/add" || get("headType").is_empty(),
+                moved_to: get("movedFile"),
+                action,
+                depot: t.clone(),
+            }
+        })
+        .collect())
+}
+
+/// The facts for every file in a shelf, read from the shelf itself.
+///
+/// `describe -S -s` carries the action, the type and the revision each file was
+/// opened at, so nothing here consults the workspace. Its records pack the files
+/// into `depotFile0`, `action0`, ... on ONE record, hence explode_indexed.
+///
+/// One thing it does NOT carry is the other end of a move, so a renamed file in
+/// a shelf travels as a delete and an add rather than as one rename section.
+/// Both halves are present and apply correctly; it is the single `p4 move` on
+/// the way back in that is lost.
+fn shelved_facts(conn: &P4Conn, shelf: &str, files: Vec<String>) -> Result<Vec<FileFacts>, String> {
+    let recs = p4::run(conn, &["describe", "-S", "-s", shelf])
+        .map_err(|e| format!("cannot read the shelf of @{shelf}: {e}"))?;
+    let want: std::collections::HashSet<String> = files.into_iter().collect();
+    let mut out: Vec<FileFacts> = Vec::new();
+    for rec in &recs {
+        for row in p4::explode_indexed(rec, "depotFile") {
+            let get = |k: &str| row.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let depot = get("depotFile");
+            if depot.is_empty() || (!want.is_empty() && !want.contains(&depot)) {
+                continue;
+            }
+            let action = get("action");
+            let rev = get("rev");
+            let is_add = action == "add" || action == "move/add";
+            out.push(FileFacts {
+                base: if is_add { String::new() } else { rev.clone() },
+                base_spec: format!("{depot}#{rev}"),
+                new_spec: format!("{depot}@={shelf}"),
+                local: String::new(),
+                binary: get("type").contains("binary"),
+                is_add,
+                moved_to: String::new(),
+                action,
+                depot,
+            });
+        }
+    }
+    if out.is_empty() {
+        return Err(format!("@{shelf} has no shelved files to put in a patch."));
+    }
+    Ok(out)
+}
+
+/// A depot file's bytes at `spec`, or None if p4 cannot print it.
+///
+/// `p4 print -o` writes to a file rather than to stdout, which is what keeps a
+/// binary intact. The name carries a counter as well as the pid: two windows can
+/// export at the same moment, and the pid alone would have them writing the same
+/// temp file.
+fn print_bytes(conn: &P4Conn, spec: &str) -> Option<Vec<u8>> {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = std::env::temp_dir().join(format!("auger-print-{}-{n}", std::process::id()));
+    let tmp_s = tmp.to_string_lossy().to_string();
+    let bytes = p4::run_raw(conn, &["print", "-q", "-o", &tmp_s, spec])
+        .ok()
+        .and_then(|_| std::fs::read(&tmp).ok());
+    // `p4 print -o` writes the file READ-ONLY, the way a versioned file is
+    // written, so a plain remove fails on Windows and the temp directory fills
+    // up one file per print. Clearing the flag first is what actually deletes it.
+    if let Ok(meta) = std::fs::metadata(&tmp) {
+        let mut perms = meta.permissions();
+        perms.set_readonly(false);
+        let _ = std::fs::set_permissions(&tmp, perms);
+    }
+    let _ = std::fs::remove_file(&tmp);
+    bytes
+}
+
+/// The git blob id of a depot file at `spec`.
+fn blob_sha_at(conn: &P4Conn, spec: &str) -> Option<String> {
+    print_bytes(conn, spec).map(|b| super::gitbin::blob_sha(&b))
+}
+
+/// One shelved text file as a git section: p4's hunks under git's header.
+///
+/// `p4 diff2` is the only way to diff a shelved revision and it takes exactly
+/// two specs, so this runs once per file where the opened route diffs the whole
+/// selection in one call. Its own `---`/`+++` lines name the same depot path
+/// twice with no revision, which no git tool can resolve, so only the hunks are
+/// kept and the header is written here.
+fn shelf_section(conn: &P4Conn, f: &FileFacts, root: &str) -> Option<String> {
+    let diff = p4::run_raw_stdout_diff(conn, &["diff2", "-u", &f.base_spec, &f.new_spec]).ok()?;
+    let hunks: String = diff
+        .split('\n')
+        .map(|l| l.strip_suffix('\r').unwrap_or(l))
+        .skip_while(|l| !l.starts_with("@@"))
+        .map(|l| format!("{l}\n"))
+        .collect();
+    if hunks.is_empty() {
+        return None; // identical at both ends: p4 prints the headers regardless
+    }
+    let rel = relative(&f.depot, root);
+    let mut out = format!("diff --git a/{rel} b/{rel}\n");
+    if let (Some(old), Some(new)) =
+        (blob_sha_at(conn, &f.base_spec), blob_sha_at(conn, &f.new_spec))
+    {
+        out.push_str(&format!("index {old}..{new} 100644\n"));
+    }
+    out.push_str(&format!("--- a/{rel}\n+++ b/{rel}\n{hunks}"));
+    Some(out)
+}
+
+/// Build a unified-diff patch for `files`, or for everything `source` offers
+/// when `files` is empty. Returns the patch, what it carries, and the files it
+/// could NOT carry (deletes — a unified diff has no way to say "remove this").
+///
+/// Shared by the Save-As export and by the stash: a stashed change is byte for
+/// byte the `.patch` the export would have written, so it applies through the
+/// same preview, the same fuzz placement and the same conflict handling. A shelf
+/// exports through this same path, so a patch from a shelf is the same patch —
+/// adds and binaries embedded as git literal sections included.
+pub(crate) fn build_patch(
+    conn: &P4Conn,
+    change: &str,
+    files: Vec<String>,
+    source: PatchSource,
+) -> Result<(String, Vec<PatchedFile>, Vec<String>), String> {
+    let facts = match source {
+        PatchSource::Opened => opened_facts(conn, change, files)?,
+        PatchSource::Shelved(shelf) => shelved_facts(conn, shelf, files)?,
+    };
+    let targets: Vec<String> = facts.iter().map(|f| f.depot.clone()).collect();
+    // Sort the files: text goes through p4's diff; binaries and adds carry no
+    // unified diff, so their WHOLE content is embedded as a standard
+    // `GIT binary patch` literal section instead (adds included — p4 has no
+    // diff for those either, whatever their type).
+    let mut text: Vec<&FileFacts> = Vec::new();
+    let mut embed: Vec<&FileFacts> = Vec::new();
+    let mut deletes: Vec<&FileFacts> = Vec::new();
     let mut carried: Vec<PatchedFile> = Vec::new();
     // depot path -> where p4 says it moved to/from. A move is a `move/delete` at
     // one path and a `move/add` at the other; pairing them is what turns two
     // half-sections into one rename the apply can carry out with `p4 move`.
     let mut moved: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-    for t in &targets {
-        let r = meta
-            .iter()
-            .find(|r| r.get("depotFile").and_then(|v| v.as_str()) == Some(t.as_str()));
-        let get = |k: &str| {
-            r.and_then(|r| r.get(k)).and_then(|v| v.as_str()).unwrap_or("").to_string()
-        };
-        let action = get("action");
-        let moved_to = get("movedFile");
-        if !moved_to.is_empty() {
-            moved.insert(t.clone(), moved_to);
+    for f in &facts {
+        if !f.moved_to.is_empty() {
+            moved.insert(f.depot.clone(), f.moved_to.clone());
         }
-        if action == "delete" || action == "move/delete" {
-            deletes.push(t.clone());
+        if f.action == "delete" || f.action == "move/delete" {
+            deletes.push(f);
             continue;
         }
-        let is_add = action == "add" || action == "move/add" || get("headType").is_empty();
-        let binary = get("type").contains("binary") || get("headType").contains("binary");
-        let local = get("clientFile");
         // What the patch will carry, and the revision it is a change AGAINST —
         // which is the only thing that lets a later apply say "this was taken
         // at #12 and you are on #17" instead of finding out hunk by hunk.
         carried.push(PatchedFile {
-            depot_file: t.clone(),
-            action: action.clone(),
-            rev: get("haveRev"),
-            binary,
+            depot_file: f.depot.clone(),
+            action: f.action.clone(),
+            rev: f.base.clone(),
+            binary: f.binary,
         });
-        if (is_add || binary) && !local.is_empty() {
-            embed.push((t.clone(), local, is_add));
+        // An opened file can only be embedded if the workspace maps it; a
+        // shelved one is read from the depot, so it always can.
+        let embeddable = if f.new_spec.is_empty() { !f.local.is_empty() } else { true };
+        if (f.is_add || f.binary) && embeddable {
+            embed.push(f);
         } else {
-            text_targets.push(t.clone());
+            text.push(f);
         }
     }
 
@@ -133,42 +299,47 @@ pub(crate) fn build_patch(
     // #have is REQUIRED: for a file that isn't opened, a bare `p4 diff -f`
     // compares against #head, so on a workspace that is behind, the patch
     // would also carry the depot changes not yet synced.
-    let mut patch = if text_targets.is_empty() {
-        String::new()
-    } else {
-        let specs: Vec<String> = text_targets.iter().map(|t| format!("{t}#have")).collect();
-        let mut args: Vec<&str> = vec!["diff", "-f", "-du"];
-        for s in &specs {
-            args.push(s.as_str());
+    let mut patch = String::new();
+    if !text.is_empty() {
+        match source {
+            PatchSource::Opened => {
+                let specs: Vec<String> = text.iter().map(|f| f.base_spec.clone()).collect();
+                let mut args: Vec<&str> = vec!["diff", "-f", "-du"];
+                for s in &specs {
+                    args.push(s.as_str());
+                }
+                patch = gitify(conn, &p4::run_raw_stdout_diff(conn, &args)?, &root);
+            }
+            // One call per file: diff2 takes exactly two specs.
+            PatchSource::Shelved(_) => {
+                for f in &text {
+                    if let Some(section) = shelf_section(conn, f, &root) {
+                        patch.push_str(&section);
+                    }
+                }
+            }
         }
-        gitify(conn, &p4::run_raw_stdout_diff(conn, &args)?, &root)
-    };
+    }
 
-    for (depot, local, is_add) in &embed {
-        let data = std::fs::read(local)
-            .map_err(|e| format!("cannot read {local} for the patch: {e}"))?;
+    for f in &embed {
+        let data = if f.new_spec.is_empty() {
+            std::fs::read(&f.local)
+                .map_err(|e| format!("cannot read {} for the patch: {e}", f.local))?
+        } else {
+            print_bytes(conn, &f.new_spec)
+                .ok_or_else(|| format!("cannot read {} out of the shelf.", f.depot))?
+        };
         // `git apply` verifies the OLD blob id against the file it patches,
-        // so a modified file's section hashes the have revision (one print
-        // per binary; an export is an explicit action). Failing that, an
-        // all-zero id still applies fine in Auger.
-        let old_sha = if *is_add {
+        // so a modified file's section hashes the revision it was taken
+        // against (one print per binary; an export is an explicit action).
+        // Failing that, an all-zero id still applies fine in Auger.
+        let old_sha = if f.is_add {
             None
         } else {
-            let tmp = std::env::temp_dir().join(format!(
-                "auger-export-have-{}",
-                std::process::id()
-            ));
-            let tmp_s = tmp.to_string_lossy().to_string();
-            let spec = format!("{depot}#have");
-            let sha = p4::run_raw(&conn, &["print", "-q", "-o", &tmp_s, &spec])
-                .ok()
-                .and_then(|_| std::fs::read(&tmp).ok())
-                .map(|old| super::gitbin::blob_sha(&old));
-            let _ = std::fs::remove_file(&tmp);
-            Some(sha.unwrap_or_else(|| "0".repeat(40)))
+            Some(blob_sha_at(conn, &f.base_spec).unwrap_or_else(|| "0".repeat(40)))
         };
         patch.push_str(&super::gitbin::encode_section(
-            &relative(depot, &root),
+            &relative(&f.depot, &root),
             &data,
             old_sha.as_deref(),
         ));
@@ -187,7 +358,7 @@ pub(crate) fn build_patch(
     for (from, to) in &moved {
         // Only when BOTH ends are in this patch. A half-move would move a file
         // the patch never says anything else about.
-        if deletes.iter().any(|d| d == from) && target_set.contains(to.as_str()) {
+        if deletes.iter().any(|d| &d.depot == from) && target_set.contains(to.as_str()) {
             renamed_away.insert(from.clone());
             patch.push_str(&rename_section(&relative(from, &root), &relative(to, &root)));
             carried.push(PatchedFile {
@@ -199,13 +370,13 @@ pub(crate) fn build_patch(
         }
     }
     for d in &deletes {
-        if renamed_away.contains(d) {
+        if renamed_away.contains(&d.depot) {
             continue; // its rename section already says where it went
         }
-        let body = deleted_body(conn, d);
-        patch.push_str(&delete_section(&relative(d, &root), &body));
+        let body = deleted_body(conn, &d.base_spec);
+        patch.push_str(&delete_section(&relative(&d.depot, &root), &body));
         carried.push(PatchedFile {
-            depot_file: d.clone(),
+            depot_file: d.depot.clone(),
             action: "delete".into(),
             rev: String::new(),
             binary: body.is_empty(),
@@ -341,14 +512,7 @@ fn gitify(conn: &P4Conn, diff: &str, root: &str) -> String {
 /// effort — without it a patch still applies, it just cannot be 3-way merged.
 fn index_line(conn: &P4Conn, depot: &str, local: &str) -> Option<String> {
     let new = std::fs::read(local).ok().map(|b| super::gitbin::blob_sha(&b))?;
-    let tmp = std::env::temp_dir().join(format!("auger-idx-{}", std::process::id()));
-    let tmp_s = tmp.to_string_lossy().to_string();
-    let spec = format!("{depot}#have");
-    let old = p4::run_raw(conn, &["print", "-q", "-o", &tmp_s, &spec])
-        .ok()
-        .and_then(|_| std::fs::read(&tmp).ok())
-        .map(|b| super::gitbin::blob_sha(&b));
-    let _ = std::fs::remove_file(&tmp);
+    let old = blob_sha_at(conn, &format!("{depot}#have"));
     Some(format!("index {}..{new} 100644\n", old?))
 }
 
@@ -367,15 +531,8 @@ fn strip_tab(s: &str) -> &str {
 /// our own applier can show what is going away — rather than a bare header. A
 /// file that is binary or unreadable gets no body: the header alone still says
 /// it is gone, which is the part that matters.
-fn deleted_body(conn: &P4Conn, depot: &str) -> String {
-    let tmp = std::env::temp_dir().join(format!("auger-del-{}", std::process::id()));
-    let tmp_s = tmp.to_string_lossy().to_string();
-    let spec = format!("{depot}#have");
-    let text = p4::run_raw(conn, &["print", "-q", "-o", &tmp_s, &spec])
-        .ok()
-        .and_then(|_| std::fs::read(&tmp).ok())
-        .and_then(|b| String::from_utf8(b).ok());
-    let _ = std::fs::remove_file(&tmp);
+fn deleted_body(conn: &P4Conn, base_spec: &str) -> String {
+    let text = print_bytes(conn, base_spec).and_then(|b| String::from_utf8(b).ok());
     let Some(text) = text else { return String::new() };
     let body = text.strip_suffix('\n').unwrap_or(&text);
     if body.is_empty() {
@@ -391,9 +548,13 @@ fn deleted_body(conn: &P4Conn, depot: &str) -> String {
     out
 }
 
-/// Generate a unified-diff `.patch` from `files` (or all opened files of
-/// `change` when `files` is empty), prompt a Save-As dialog, and write it.
+/// Generate a unified-diff `.patch` from `files` (or everything the source
+/// offers when `files` is empty), prompt a Save-As dialog, and write it.
 /// Returns the saved path, or None if the user cancelled.
+///
+/// `shelved` switches the content from the workspace's open files to the shelf
+/// of `change`, which is how a shelf is exported without unshelving it into a
+/// workspace first — or needing one that maps it at all.
 #[tauri::command]
 pub async fn export_patch(
     app: AppHandle,
@@ -401,9 +562,11 @@ pub async fn export_patch(
     change: String,
     files: Vec<String>,
     default_name: String,
+    shelved: bool,
 ) -> Result<Option<String>, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let (patch, _, _) = build_patch(&conn, &change, files)?;
+        let source = if shelved { PatchSource::Shelved(&change) } else { PatchSource::Opened };
+        let (patch, _, _) = build_patch(&conn, &change, files, source)?;
         let picked = app
             .dialog()
             .file()

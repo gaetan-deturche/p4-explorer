@@ -739,8 +739,15 @@ export const p4 = {
   diffLocal: (conn: P4Conn, depotFile: string) => g<string>("p4_diff_local", { conn, depotFile }),
   diffOffline: (conn: P4Conn, depotFile: string) =>
     g<string>("p4_diff_local_forced", { conn, depotFile }),
-  exportPatch: (conn: P4Conn, change: string, files: string[], defaultName: string) =>
-    g<string | null>("export_patch", { conn, change, files, defaultName }),
+  /** `shelved` reads the SHELF of `change` instead of the workspace's open
+   *  files, so a shelf exports without being unshelved first. */
+  exportPatch: (
+    conn: P4Conn,
+    change: string,
+    files: string[],
+    defaultName: string,
+    shelved = false,
+  ) => g<string | null>("export_patch", { conn, change, files, defaultName, shelved }),
   /** Take a stash from `files`, or from every opened file of `change`. Nothing
    *  is reverted — a stash is a copy. Returns the new stash's id. */
   stashSave: (conn: P4Conn, name: string, change: string, files: string[]) =>

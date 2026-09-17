@@ -1439,19 +1439,24 @@ export const pending = {
     }
   },
 
-  /** Export a .patch from a changelist (files=[]) or an explicit file set. */
-  async generatePatch(change: string, files: string[]) {
+  /** Export a .patch from a changelist (files=[]) or an explicit file set.
+   *  `shelved` takes the content from the changelist's SHELF instead of from
+   *  the workspace — which is also the only route that works for a shelf made
+   *  in another workspace, since none of its files are on this disk. */
+  async generatePatch(change: string, files: string[], shelved = false) {
     if (!h) return;
     const base =
       files.length === 1
         ? files[0].split("/").pop() || "file"
         : files.length > 1
           ? "selected"
-          : change && change !== "default"
-            ? `change-${change}`
-            : "workspace";
+          : shelved
+            ? `shelf-${change}`
+            : change && change !== "default"
+              ? `change-${change}`
+              : "workspace";
     try {
-      const path = await p4.exportPatch(h.conn(), change, files, `${base}.patch`);
+      const path = await p4.exportPatch(h.conn(), change, files, `${base}.patch`, shelved);
       if (path) h.setNotice(`Patch saved to ${path}`, 6000);
     } catch (e) {
       h.setError(String(e));

@@ -396,6 +396,15 @@
     }
     group();
     items.push({ label: "Generate patch…", action: () => generatePatch(cl.change, []) });
+    // The shelf is a different change from the open files — it is what the
+    // files looked like when they were shelved — so it gets its own entry
+    // rather than quietly changing what "Generate patch" means.
+    if (hasShelf) {
+      items.push({
+        label: "Generate patch from shelf…",
+        action: () => generatePatch(cl.change, [], true),
+      });
+    }
     items.push({ label: "Stash…", action: () => stash(cl.change, []) });
     if (own) {
       group();
@@ -523,7 +532,8 @@
   function onPendingFileContext(file: P4Record, change: string, e: MouseEvent, files: string[]) {
     fileCtx = { x: e.clientX, y: e.clientY, file, change, files };
   }
-  const generatePatch = (change: string, files: string[]) => pending.generatePatch(change, files);
+  const generatePatch = (change: string, files: string[], shelved = false) =>
+    pending.generatePatch(change, files, shelved);
   /** The name prompt for a stash about to be taken, and what it will cover. */
   let stashFrom = $state<{ change: string; files: string[]; suggestion: string } | null>(null);
   let stashRenaming = $state<StashRow | null>(null);
@@ -1664,6 +1674,14 @@
       holdersMenu(f.depotFile),
       blameMenu(f.depotFile),
       copyMenu(f.depotFile),
+      { label: "", sep: true },
+      {
+        label:
+          shelvedSel.length > 1
+            ? `Generate patch (${shelvedSel.length} files)…`
+            : "Generate patch…",
+        action: () => generatePatch(ch, shelvedSel, true),
+      },
       { label: "", sep: true },
       // The counterpart of a partial shelve: without this, one file shelved by
       // mistake could only be cleared by deleting the whole shelf.

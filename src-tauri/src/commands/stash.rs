@@ -110,7 +110,8 @@ pub async fn stash_save(
     let built = tauri::async_runtime::spawn_blocking({
         let conn = conn.clone();
         move || {
-            let (patch, carried, skipped) = super::diff::build_patch(&conn, &change, files)?;
+            let (patch, carried, skipped) =
+                super::diff::build_patch(&conn, &change, files, super::diff::PatchSource::Opened)?;
             Ok::<_, String>((patch, carried, skipped, stream_of(&conn)))
         }
     })
