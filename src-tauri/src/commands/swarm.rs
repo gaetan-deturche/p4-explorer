@@ -724,6 +724,50 @@ fn strip_rev(spec: &str) -> String {
     }
 }
 
+/// What a review's content changelist actually is.
+enum Content {
+    /// A shelf, and its files as (depot path, action).
+    Shelf(Vec<(String, String)>),
+    /// A review submitted without approval: submitting deletes the shelf, so the
+    /// submitted changelist IS the content.
+    Submitted(Vec<(String, String)>),
+    /// Pending with nothing shelved — there is no content to apply.
+    Nothing,
+}
+
+/// Which of the three `change` is, and the files that go with it.
+///
+/// `p4 describe` answers both, but neither answer is where it looks. Its files
+/// are packed into `depotFile0`, `depotFile1`, ... on ONE record, so they exist
+/// only after explode_indexed — reading `depotFile` off the record finds
+/// nothing, whatever the changelist holds. And `-S` distinguishes nothing by
+/// itself: on a SUBMITTED change it still lists the submitted files, so "-S
+/// returned something" is true of a change with no shelf at all. The `shelved`
+/// key is p4's own flag for it, and being un-indexed it reads straight off.
+fn review_content(conn: &P4Conn, change: &str) -> Content {
+    fn rows(recs: &[p4::Record]) -> Vec<(String, String)> {
+        recs.iter()
+            .flat_map(|r| p4::explode_indexed(r, "depotFile"))
+            .filter_map(|r| {
+                let f = r.get("depotFile").and_then(|v| v.as_str())?.to_string();
+                let a = r.get("action").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                Some((f, a))
+            })
+            .collect()
+    }
+    let probe = p4::run(conn, &["describe", "-S", "-s", change]).unwrap_or_default();
+    let Some(rec) = probe.first() else { return Content::Nothing };
+    if rec.get("shelved").is_some() {
+        Content::Shelf(rows(&probe))
+    } else if rec.get("status").and_then(|v| v.as_str()) == Some("submitted") {
+        Content::Submitted(rows(
+            &p4::run(conn, &["describe", "-s", change]).unwrap_or_default(),
+        ))
+    } else {
+        Content::Nothing
+    }
+}
+
 /// Write `change`'s shelved content out as a patch file and report what it
 /// covers. The caller then runs the ordinary patch preview/apply on it, so a
 /// review applies through exactly the same path (and the same conflict handling)
@@ -734,52 +778,16 @@ pub async fn review_patch(conn: P4Conn, change: String) -> Result<ReviewPatch, S
         if change.trim().is_empty() {
             return Err("This review has no shelved changelist to apply.".into());
         }
-        // A review's content is normally a shelf — but a review that was submitted
-        // without approval has none (submitting deletes it), and then the
-        // changelist itself is the content. Ask what this one is before diffing.
-        let shelved = p4::run(&conn, &["describe", "-S", "-s", &change])
-            .unwrap_or_default()
-            .iter()
-            .any(|r| r.get("depotFile").is_some());
-        // -S: shelved content, -du: unified diff. P4DIFF is cleared inside
-        // run_raw_stdout_diff, so an external diff tool cannot hijack this.
-        let args: Vec<&str> = if shelved {
-            vec!["describe", "-S", "-du", &change]
-        } else {
-            vec!["describe", "-du", &change]
+        let (shelved, shelf) = match review_content(&conn, &change) {
+            Content::Shelf(files) => (true, files),
+            Content::Submitted(files) => (false, files),
+            Content::Nothing => {
+                return Err(format!(
+                    "@{change} has nothing shelved and has not been submitted, \
+                     so there is nothing to apply."
+                ))
+            }
         };
-        let describe = p4::run_raw_stdout_diff(&conn, &args)?;
-        let (patch, _) = shelf_to_patch(&describe);
-        let covered: std::collections::HashSet<String> = patch
-            .lines()
-            .filter_map(|l| l.strip_prefix("--- "))
-            .map(|s| s.to_string())
-            .collect();
-        let files = covered.len();
-
-        // The shelf is the authority on what the review contains: anything it
-        // holds that the diff did not cover has to be copied verbatim instead,
-        // so it is listed rather than quietly dropped.
-        let list_args: Vec<&str> = if shelved {
-            vec!["describe", "-S", "-s", &change]
-        } else {
-            vec!["describe", "-s", &change]
-        };
-        let shelf: Vec<(String, String)> = p4::run(&conn, &list_args)
-            .unwrap_or_default()
-            .iter()
-            .filter_map(|r| {
-                let f = r.get("depotFile").and_then(|v| v.as_str())?;
-                let a = r.get("action").and_then(|v| v.as_str()).unwrap_or("");
-                Some((f.to_string(), a.to_string()))
-            })
-            .collect();
-        let skipped: Vec<String> = shelf
-            .iter()
-            .map(|(f, _)| f.clone())
-            .filter(|f| !covered.contains(f))
-            .collect();
-
         if shelf.is_empty() {
             return Err(format!("@{change} has no files to apply."));
         }
@@ -796,6 +804,51 @@ pub async fn review_patch(conn: P4Conn, change: String) -> Result<ReviewPatch, S
                 "This review is on {depot}, which this workspace does not map."
             ));
         }
+
+        let (patch, files, skipped) = if shelved {
+            // The shelf goes through the ordinary patch generator, so applying a
+            // review applies the same kind of patch as a stash or an export:
+            // adds and binaries travel INSIDE it as git literal sections rather
+            // than being left for the copy step to fetch afterwards.
+            let (patch, carried, _) = super::diff::build_patch(
+                &conn,
+                &change,
+                Vec::new(),
+                super::diff::PatchSource::Shelved(&change),
+            )?;
+            let covered: std::collections::HashSet<&str> =
+                carried.iter().map(|c| c.depot_file.as_str()).collect();
+            // Still computed against the shelf rather than assumed empty: what
+            // the patch carries is the generator's business, and the caller's
+            // contract is "what it did not".
+            let skipped: Vec<String> = shelf
+                .iter()
+                .filter(|(f, _)| !covered.contains(f.as_str()))
+                .map(|(f, _)| f.clone())
+                .collect();
+            (patch, carried.len(), skipped)
+        } else {
+            // A submitted change has no `@=` revision to diff against, so its
+            // patch still comes from describe. -du: unified diff. P4DIFF is
+            // cleared inside run_raw_stdout_diff, so an external diff tool
+            // cannot hijack this.
+            let describe = p4::run_raw_stdout_diff(&conn, &["describe", "-du", &change])?;
+            let (patch, _) = shelf_to_patch(&describe);
+            // describe prints no diff for binaries or adds, so anything it did
+            // not cover is listed for the copy step rather than quietly dropped.
+            let covered: std::collections::HashSet<String> = patch
+                .lines()
+                .filter_map(|l| l.strip_prefix("--- "))
+                .map(|s| s.to_string())
+                .collect();
+            let skipped: Vec<String> = shelf
+                .iter()
+                .map(|(f, _)| f.clone())
+                .filter(|f| !covered.contains(f))
+                .collect();
+            (patch, covered.len(), skipped)
+        };
+
         if files == 0 && skipped.is_empty() {
             return Err("This review's shelf has no changes to apply.".into());
         }
@@ -860,29 +913,13 @@ pub async fn review_copy_files(
         if change.trim().is_empty() || files.is_empty() {
             return Ok(Vec::new());
         }
-        // Each file's action decides how to open it. Where that list comes from
-        // depends on the source: a shelf (`-S`) or, for a review submitted without
-        // approval, the submitted changelist itself.
-        let shelved = p4::run(&conn, &["describe", "-S", "-s", &change])
-            .unwrap_or_default()
-            .iter()
-            .any(|r| r.get("depotFile").is_some());
-        let list_args: Vec<&str> = if shelved {
-            vec!["describe", "-S", "-s", &change]
-        } else {
-            vec!["describe", "-s", &change]
+        // Each file's action decides how to open it, and whether an `add` is
+        // new HERE depends on which kind of content this is — see review_content.
+        let (shelved, action_of) = match review_content(&conn, &change) {
+            Content::Shelf(files) => (true, files.into_iter().collect()),
+            Content::Submitted(files) => (false, files.into_iter().collect()),
+            Content::Nothing => (false, std::collections::HashMap::new()),
         };
-        let mut action_of: std::collections::HashMap<String, String> =
-            std::collections::HashMap::new();
-        if let Ok(recs) = p4::run(&conn, &list_args) {
-            for r in &recs {
-                let f = r.get("depotFile").and_then(|v| v.as_str()).unwrap_or("");
-                let a = r.get("action").and_then(|v| v.as_str()).unwrap_or("");
-                if !f.is_empty() {
-                    action_of.insert(f.to_string(), a.to_string());
-                }
-            }
-        }
 
         let wanted: Vec<String> = files;
         let mut out: Vec<CopyResult> = Vec::new();
