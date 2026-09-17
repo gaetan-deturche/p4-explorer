@@ -585,6 +585,8 @@ export const p4 = {
   /** Repair have/disk desyncs: update the have record to #head, disk untouched. */
   flush: (conn: P4Conn, files: string[]) => call("p4_flush", { conn, files }),
   status: (conn: P4Conn) => call("p4_status", { conn }),
+  /** Files p4 has never heard of under one folder (a scoped `reconcile -a`). */
+  newFiles: (conn: P4Conn, path: string) => call("p4_new_files", { conn, path }),
   cancelOfflineScan: () => g<void>("cancel_offline_scan"),
   resync: (conn: P4Conn, files: string[], force: boolean) =>
     call("p4_resync", { conn, files, force }),
@@ -819,6 +821,8 @@ export const p4 = {
     g<Blame>("p4_annotate", { conn, depotFile, revSpec, follow }),
   /** Check out / mark for add / mark for delete. One p4 call per file so a
    *  refusal can be attributed; `change` empty = the default changelist. */
+  /** Native multi-select picker for files to mark for add, opening at `start`. */
+  pickFilesToAdd: (start: string) => g<string[]>("pick_files_to_add", { start }),
   openFiles: (conn: P4Conn, verb: "edit" | "add" | "delete", files: string[], change = "") =>
     g<OpenResult[]>("p4_open_files", { conn, verb, files, change }),
   /** Rename/move a file, keeping its history (p4 edit + p4 move). */

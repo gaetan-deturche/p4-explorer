@@ -123,6 +123,11 @@ function currentPendingRows(): P4Record[] {
 // Offline list is DERIVED from the store (scope `p4:offline`, key = client); the
 // scan only writes it. `offlineVer` bumps to re-run the getter (bootstrap + after
 // a scan). `offlineScanning` is transient status, not data — it stays $state.
+// Files a scoped "find new files" turned up. Kept apart from the offline list
+// because no scan produces them: the offline scan leaves out reconcile's `-a`
+// (a ~14x slower walk), so these exist only for as long as the session, until
+// they are checked out or the next look replaces them.
+let newFiles = $state<P4Record[]>([]);
 let offlineVer = $state(0);
 let offlineScanning = $state(false);
 let offlineScannedAt = $state<number | null>(null); // last completed scan (freshness stamp)
@@ -463,6 +468,27 @@ export const pending = {
   },
   get offline() {
     return currentOffline();
+  },
+  get newFiles() {
+    return newFiles;
+  },
+  /** Look under `path` for files p4 does not know about, and list them with the
+   *  offline changes — where "Check out" already opens each one as an add. */
+  async findNewFiles(path: string) {
+    if (!h || !h.connected() || !path) return;
+    h.setNotice(`Looking for new files under ${path.split(/[\\/]/).pop() ?? path}…`, 4000);
+    try {
+      const recs = await p4.newFiles(h.conn(), path);
+      newFiles = recs.filter((r) => r.depotFile);
+      h.setNotice(
+        newFiles.length
+          ? `${newFiles.length} new file${newFiles.length === 1 ? "" : "s"} — listed under Offline changes.`
+          : "No new files there.",
+        6000,
+      );
+    } catch (e) {
+      h.setError(String(e));
+    }
   },
   get offlineScanning() {
     return offlineScanning;
@@ -1113,15 +1139,31 @@ export const pending = {
       { refresh: false },
     );
   },
+  /** The Swarm address of a changelist's review, or "" when the server has no
+   *  Swarm URL configured.
+   *
+   *  A review that exists is named directly (`/reviews/<id>`) — that is the
+   *  address someone expects to be handed, and it stays right if the review is
+   *  later updated from another changelist. A review only REQUESTED has no id
+   *  yet (id 0), and a changelist may have no review at all; both fall back to
+   *  `/changes/<change>`, which Swarm resolves to the review once there is one. */
+  async reviewUrl(change: string): Promise<string> {
+    if (!h) return "";
+    if (!swarmBase) swarmBase = await p4.swarmUrl(h.conn()).catch(() => "");
+    if (!swarmBase) return "";
+    const base = swarmBase.replace(/\/$/, "");
+    const id = reviews[change]?.id ?? 0;
+    return id > 0 ? `${base}/reviews/${id}` : `${base}/changes/${change}`;
+  },
   async openReview(change: string) {
     if (!h) return;
     try {
-      if (!swarmBase) swarmBase = await p4.swarmUrl(h.conn()).catch(() => "");
-      if (!swarmBase) {
+      const url = await pending.reviewUrl(change);
+      if (!url) {
         h.setError("Swarm URL is not configured on the server.");
         return;
       }
-      await openUrl(`${swarmBase.replace(/\/$/, "")}/changes/${change}`);
+      await openUrl(url);
     } catch (e) {
       h.setError(String(e));
     }

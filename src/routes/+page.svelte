@@ -366,6 +366,14 @@
         action: () => (renameCl = { change: cl.change, desc: (cl.desc ?? "").trim() }),
       });
     }
+    // Marking a NEW file for add had one home, the Browse tab's menu, which is
+    // not where anyone looks after creating a file. Nothing surfaces new files
+    // on their own either: the offline scan leaves out reconcile's `-a`, and
+    // measurably has to (14x slower, and mostly build output when it finishes).
+    if (own) {
+      group();
+      items.push({ label: "Add files…", action: () => void addFilesTo(cl.change) });
+    }
     // Every shelf action in one group: put the work on the server, take it back,
     // throw the server copy away. Each appears only when p4 would accept it —
     // nothing to shelve without open files, nothing to unshelve or delete
@@ -393,6 +401,7 @@
     }
     if (!isDefault) {
       items.push({ label: "Open review in browser", action: () => pending.openReview(cl.change) });
+      items.push({ label: "Copy review link", action: () => void copyReviewLink(cl.change) });
     }
     group();
     items.push({ label: "Generate patch…", action: () => generatePatch(cl.change, []) });
@@ -623,6 +632,10 @@
       holdersMenu(file.depotFile),
       blameMenu(file.depotFile),
       { label: openInLabel, action: () => openLocalInEditor(file.depotFile) },
+      {
+        label: "Show in File Explorer",
+        action: () => void revealLocal(file.depotFile, file.clientFile),
+      },
       { label: "", sep: true },
       copyMenu(file.depotFile, file.clientFile),
       { label: "", sep: true },
@@ -790,8 +803,15 @@
    *  only thing that ever learns about it. */
   const offlineRows = $derived.by(() => {
     const rows = pending.offline;
-    if (!sync.blockers.length) return rows;
     const known = new Set(rows.map((r) => String(r.depotFile)));
+    // Files a scoped "find new files" turned up. No scan reports these, so they
+    // are merged in rather than stored — and they leave through the same
+    // optimistic hide a checkout already uses, so a checked-out one goes at once.
+    const found = pending.newFiles.filter(
+      (f) => !known.has(String(f.depotFile)) && !pending.isHidden(String(f.depotFile)),
+    );
+    for (const f of found) known.add(String(f.depotFile));
+    if (!sync.blockers.length) return found.length ? [...rows, ...found] : rows;
     const extra = sync.blockers
       .filter((b) => b.depotFile && !known.has(b.depotFile))
       .map((b) => ({
@@ -801,7 +821,7 @@
         reason: b.reason,
         blocked: true,
       })) as unknown as P4Record[];
-    return [...rows, ...extra];
+    return [...rows, ...found, ...extra];
   });
   let detailsCtx = $state<{ x: number; y: number; file: P4Record } | null>(null);
 
@@ -811,16 +831,57 @@
       .then(() => setNotice(`Copied ${label}.`, 2500))
       .catch((e) => setError(String(e)));
   }
+  /** Mark files on disk for add, straight into this changelist. */
+  async function addFilesTo(change: string) {
+    const picked = await p4.pickFilesToAdd(browse.clientRoot).catch((e) => {
+      setError(String(e));
+      return [] as string[];
+    });
+    if (picked.length) void pending.openFiles("add", picked, change);
+  }
+
+  /** A changelist's review address on the clipboard — the thing that actually
+   *  gets pasted into a message, where opening it in a browser does not help. */
+  async function copyReviewLink(change: string) {
+    const url = await pending.reviewUrl(change);
+    if (!url) {
+      setError("No Swarm server is configured (P4.Swarm.URL is unset).");
+      return;
+    }
+    copied(url, "review link");
+  }
+
   /** The local (workspace) path of a depot path: stream mapping first, `p4 fstat`
-   *  for files outside it. */
-  async function copyWorkspacePath(depotFile: string, known?: string) {
-    if (known) return copied(known, "workspace path");
+   *  for files outside it. "" when this workspace does not map it at all. */
+  async function localPathOf(depotFile: string): Promise<string> {
     const mapped = localPathFor(browse.clientRoot, browse.rootPath, depotFile);
-    if (mapped) return copied(mapped, "workspace path");
+    if (mapped) return mapped;
     const recs = await p4.fstat(conn, depotFile).catch(() => [] as P4Record[]);
-    const local = recs[0]?.clientFile;
+    return String(recs[0]?.clientFile ?? "");
+  }
+  async function copyWorkspacePath(depotFile: string, known?: string) {
+    const local = known || (await localPathOf(depotFile));
     if (local) copied(local, "workspace path");
     else setError("This file has no workspace path here.");
+  }
+  /** Show a file in File Explorer, selected in its folder.
+   *
+   *  A file open for delete, missing on disk, or simply not synced has nothing
+   *  to select, and revealing the folder it belongs to says more than an error
+   *  does — it is usually the answer to "where is this?" anyway. */
+  async function revealLocal(depotFile: string, known?: string) {
+    const local = known || (await localPathOf(depotFile));
+    if (!local) {
+      setError("This file has no workspace path here.");
+      return;
+    }
+    const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
+    try {
+      await revealItemInDir(local);
+    } catch {
+      const dir = local.replace(/[\\/][^\\/]+$/, "");
+      await revealItemInDir(dir).catch(() => setError(`Nothing on disk at ${local}.`));
+    }
   }
   /** This file's revisions, in their own window. A window rather than the
    *  History tab: the question "what happened to this file" comes up WHILE
@@ -1404,6 +1465,8 @@
           onOfflineContext={(f, e, files) =>
             (offlineCtx = { x: e.clientX, y: e.clientY, file: f, files })}
           onMoveFile={(files: string[], to: string) => pending.reopen(files, to)}
+          onAddFiles={(files: string[], change: string) =>
+            void pending.openFiles("add", files, change)}
         />
       {:else}
         <div class="hsplit">
@@ -1615,10 +1678,13 @@
     x={treeCtx.x}
     y={treeCtx.y}
     items={[
-      // Files: Local source opens the on-disk file; Workspace/Depot download the
-      // head revision from the server (p4 print to temp) and open that.
+      // A folder is the only place a `-a` reconcile is affordable, so that is
+      // where the "anything here p4 has not got?" question is asked from.
       ...(dir
-        ? []
+        ? [
+            { label: "Find new files here…", action: () => void pending.findNewFiles(p) },
+            { label: "", sep: true },
+          ]
         : [
             {
               label: browse.source === "local" ? openInLabel : `${openInLabel} (from server)`,
@@ -1627,6 +1693,7 @@
                   ? openLocalInEditor(p)
                   : openSpecInEditor(browse.source === "depot" ? p : browse.toQuery(p)),
             },
+            { label: "Show in File Explorer", action: () => void revealLocal(p) },
             historyMenu(p),
             holdersMenu(p),
             blameMenu(p),
@@ -1736,6 +1803,10 @@
           if (local) editorOpen(() => editor.openLocal(local));
           else if (f.depotFile) openLocalInEditor(f.depotFile);
         },
+      },
+      {
+        label: "Show in File Explorer",
+        action: () => void revealLocal(String(f.depotFile ?? ""), f.clientFile),
       },
       ...(f.depotFile ? [historyMenu(f.depotFile), holdersMenu(f.depotFile), blameMenu(f.depotFile)] : []),
       { label: "", sep: true },

@@ -411,6 +411,44 @@ pub async fn p4_status(
     .map_err(|e| format!("status task failed: {e}"))?
 }
 
+/// Files under `path` that p4 has never heard of (`reconcile -n -a -m`).
+///
+/// Scoped to one folder, and it has to be. `-a` is a full filesystem walk:
+/// measured at 249s against the offline scan's 17s over Engine/Source alone
+/// (~14x), which puts a workspace-wide run near 40 minutes — and over
+/// Games/Curiosity it answered with 599 files that were nearly all Binaries and
+/// generated sources. One folder comes back in seconds and is worth reading,
+/// which is why this is an action on a folder rather than part of the scan.
+///
+/// Shares the offline scan's kill slot on purpose: any reconcile holds server
+/// locks that block interactive writes, so an interactive write has to be able
+/// to kill this one for exactly the reason it kills that one.
+#[tauri::command]
+pub async fn p4_new_files(
+    state: tauri::State<'_, crate::index::AppState>,
+    conn: P4Conn,
+    path: String,
+) -> Res {
+    use std::sync::atomic::Ordering;
+    let path = path.trim().trim_end_matches('/').trim_end_matches('\\').to_string();
+    if path.is_empty() {
+        return Err("No folder to look in.".into());
+    }
+    let spec = format!("{path}/...");
+    let pid_slot = state.offline_pid.clone();
+    let abort = state.offline_abort.clone();
+    abort.store(false, Ordering::SeqCst);
+    tauri::async_runtime::spawn_blocking(move || {
+        let res = p4::run_killable(&conn, &["reconcile", "-n", "-a", "-m", &spec], &pid_slot);
+        if abort.swap(false, Ordering::SeqCst) {
+            return Err("scan cancelled".to_string());
+        }
+        res
+    })
+    .await
+    .map_err(|e| format!("new-files task failed: {e}"))?
+}
+
 /// Distinguish REAL offline edits from have/disk desyncs: a file whose disk
 /// content matches HEAD while the have record lags behind (e.g. an interrupted
 /// sync that wrote the file but never recorded it) diffs against have exactly

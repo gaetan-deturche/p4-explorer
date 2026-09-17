@@ -23,6 +23,35 @@
 
 use crate::p4::{self, P4Conn};
 use serde::Serialize;
+use tauri::AppHandle;
+use tauri_plugin_dialog::DialogExt;
+
+/// Prompt for files to mark for add, opening at `start` (the workspace root, so
+/// the picker lands where the files can actually come from).
+///
+/// Returns LOCAL paths: `p4 add` takes those, not depot paths. Nothing is
+/// filtered here — a file outside the client view, or one already in the depot,
+/// is refused by p4 per file with its own words, and `p4_open_files` already
+/// reports those verbatim. Guessing at it here would only be a worse version of
+/// the same message.
+#[tauri::command]
+pub async fn pick_files_to_add(app: AppHandle, start: String) -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut dlg = app.dialog().file();
+        if !start.is_empty() {
+            dlg = dlg.set_directory(&start);
+        }
+        Ok(dlg
+            .blocking_pick_files()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|fp| fp.into_path().ok())
+            .map(|p| p.display().to_string())
+            .collect())
+    })
+    .await
+    .map_err(|e| format!("pick-files task failed: {e}"))?
+}
 
 /// What happened to one file.
 #[derive(Serialize, Clone)]

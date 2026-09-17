@@ -33,6 +33,7 @@
     onShelvedContext,
     onOfflineContext,
     onMoveFile,
+  onAddFiles,
   }: {
     rows: P4Record[];
     loading: boolean;
@@ -69,6 +70,8 @@
     // right-click an offline file → (file, event, selected depot files)
     onOfflineContext?: (file: P4Record, e: MouseEvent, files: string[]) => void;
     onMoveFile: (files: string[], toChange: string) => void; // drag files onto another CL
+  // Files dropped from the OS onto a changelist, as local paths.
+  onAddFiles: (files: string[], change: string) => void;
   } = $props();
 
   // Multi-select of local (opened) AND offline files via click / Ctrl+click /
@@ -225,12 +228,58 @@
     window.addEventListener("blur", cancelDrag);
   }
 
+  /** The changelist section at a viewport point, whatever is being dragged. */
+  function sectionAt(x: number, y: number): string | null {
+    const el = document.elementFromPoint(x, y) as HTMLElement | null;
+    return el?.closest<HTMLElement>(".clsec")?.dataset.change ?? null;
+  }
+
   /** The changelist under a point, if these files can actually go there. */
   function dropTarget(x: number, y: number): string | null {
-    const el = document.elementFromPoint(x, y) as HTMLElement | null;
-    const to = el?.closest<HTMLElement>(".clsec")?.dataset.change ?? null;
+    const to = sectionAt(x, y);
     return to && to !== drag?.from ? to : null;
   }
+
+  // --- files dropped from the OS (Explorer) ------------------------------------
+  // `p4 add` had one home, the Browse tab's context menu, and nothing surfaces a
+  // new file on its own — the offline scan leaves out reconcile's `-a`, which is
+  // 14x slower and mostly finds build output. Dropping the file on the
+  // changelist it belongs in is the gesture people try first.
+  //
+  // This is Tauri's OS drag-drop handler, which used to be disabled app-wide
+  // because it swallowed the HTML5 drag this list once used to move files
+  // between changelists. That drag is mouse events now, so the handler is free.
+  let osDropOver = $state<string | null>(null);
+  $effect(() => {
+    let stop: (() => void) | null = null;
+    let gone = false;
+    void (async () => {
+      const { getCurrentWebview } = await import("@tauri-apps/api/webview");
+      const un = await getCurrentWebview().onDragDropEvent((event) => {
+        const p = event.payload;
+        if (p.type === "leave") {
+          osDropOver = null;
+          return;
+        }
+        // The OS reports PHYSICAL pixels; the DOM hit test wants CSS ones.
+        const ratio = window.devicePixelRatio || 1;
+        const change = sectionAt(p.position.x / ratio, p.position.y / ratio);
+        if (p.type === "drop") {
+          osDropOver = null;
+          if (change && p.paths.length) onAddFiles(p.paths, change);
+        } else {
+          osDropOver = change; // enter / over
+        }
+      });
+      // Unmounted while the listener was still being registered.
+      if (gone) un();
+      else stop = un;
+    })();
+    return () => {
+      gone = true;
+      stop?.();
+    };
+  });
 
   function dragMove(e: MouseEvent) {
     if (pressed && !drag) {
@@ -536,7 +585,11 @@
         <!-- data-change is how a drag hit-tests this section: the drop target
              is read from the element under the cursor, so the section carries
              its own identity instead of every row handling drag events. -->
-        <div class="clsec" data-change={String(r.change)} class:dropinto={dragOver === String(r.change)}>
+        <div
+          class="clsec"
+          data-change={String(r.change)}
+          class:dropinto={dragOver === String(r.change) || osDropOver === String(r.change)}
+        >
         <button
           class="cl"
           class:contextsel={contextChange === r.change}

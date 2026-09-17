@@ -172,10 +172,6 @@ pub async fn open_workspace_window(
         .title(title)
         .inner_size(1280.0, 780.0)
         .min_inner_size(900.0, 500.0)
-        // Same as the main window: Tauri's OS drag-drop handler otherwise
-        // swallows the in-webview HTML5 drag that moves a file between
-        // changelists.
-        .disable_drag_drop_handler()
         .visible(false) // shown by wingeom::apply, already at its remembered spot
         .build()
         .map_err(|e| format!("failed to open the workspace window: {e}"))?;
