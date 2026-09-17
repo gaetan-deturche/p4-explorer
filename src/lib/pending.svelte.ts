@@ -123,6 +123,22 @@ function currentPendingRows(): P4Record[] {
 // Offline list is DERIVED from the store (scope `p4:offline`, key = client); the
 // scan only writes it. `offlineVer` bumps to re-run the getter (bootstrap + after
 // a scan). `offlineScanning` is transient status, not data — it stays $state.
+/** Drop found files that have stopped being new, by depot OR workspace path.
+ *
+ *  Both, because the routes that end it disagree on which they hand over: a
+ *  checkout from Offline passes depot paths, while the picker and an Explorer
+ *  drop pass what the OS gave them. Compared case-insensitively with separators
+ *  normalised — Windows hands back `H:\\Dev\\...` where p4 says `H:/Dev/...`. */
+function forgetNewFiles(paths: string[]) {
+  if (!newFiles.length || !paths.length) return;
+  const norm = (s: string) => s.replace(/\\/g, "/").toLowerCase();
+  const gone = new Set(paths.map(norm));
+  const kept = newFiles.filter(
+    (f) => !gone.has(norm(String(f.depotFile ?? ""))) && !gone.has(norm(String(f.clientFile ?? ""))),
+  );
+  if (kept.length !== newFiles.length) newFiles = kept;
+}
+
 // Files a scoped "find new files" turned up. Kept apart from the offline list
 // because no scan produces them: the offline scan leaves out reconcile's `-a`
 // (a ~14x slower walk), so these exist only for as long as the session, until
@@ -479,7 +495,12 @@ export const pending = {
     h.setNotice(`Looking for new files under ${path.split(/[\\/]/).pop() ?? path}…`, 4000);
     try {
       const recs = await p4.newFiles(h.conn(), path);
-      newFiles = recs.filter((r) => r.depotFile);
+      // reconcile calls the action "add" because that is what it WOULD do;
+      // nothing is open yet, so the row says `untracked` — the same word (and
+      // badge) a sync blocker uses for a file p4 has never heard of.
+      newFiles = recs
+        .filter((r) => r.depotFile)
+        .map((r) => ({ ...r, action: "untracked" }) as P4Record);
       h.setNotice(
         newFiles.length
           ? `${newFiles.length} new file${newFiles.length === 1 ? "" : "s"} — listed under Offline changes.`
@@ -1208,6 +1229,9 @@ export const pending = {
         `${what} ${done} file${done === 1 ? "" : "s"}` +
         (failed.length ? ` · ${failed.length} refused: ${failed[0].message}` : "."),
     );
+    // Whatever p4 accepted is no longer a file it has never heard of. Only the
+    // ones it took: a refusal leaves the file exactly as new as it was.
+    if (done) forgetNewFiles(files.filter((f) => !failed.some((r) => r.file === f)));
     // A refusal is the interesting outcome, so it gets the error line too — the
     // notice above is transient and a blocked checkout is worth reading twice.
     if (failed.length && !done) h.setError(`${failed[0].file}\n${failed[0].message}`);
@@ -1579,6 +1603,7 @@ export const pending = {
         optimistic: () => forgetFiles(files), // leaves Offline now, not in 30s
       },
     );
+    forgetNewFiles(files); // opened now: no scan reports these, so drop them here
     void pending.scanOffline(); // reconciles the guess with a real scan
   },
   /** Revert a selection that may mix OPENED and OFFLINE files: opened files are

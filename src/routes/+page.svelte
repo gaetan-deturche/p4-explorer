@@ -805,8 +805,10 @@
     const rows = pending.offline;
     const known = new Set(rows.map((r) => String(r.depotFile)));
     // Files a scoped "find new files" turned up. No scan reports these, so they
-    // are merged in rather than stored — and they leave through the same
-    // optimistic hide a checkout already uses, so a checked-out one goes at once.
+    // are merged in rather than stored, and pending.forgetNewFiles is what drops
+    // one for good once p4 takes it. isHidden only covers the moment between the
+    // click and that — it EXPIRES, which is why it cannot be the only filter:
+    // the row used to come back, showing the file in its changelist and here.
     const found = pending.newFiles.filter(
       (f) => !known.has(String(f.depotFile)) && !pending.isHidden(String(f.depotFile)),
     );
@@ -1775,7 +1777,12 @@
   <!-- Patch/revert act on the WHOLE selection (opened + offline mix); only
        "Check out" is inherently offline-only, so it uses the offline subset. -->
   {@const sel = offlineCtx.files.length ? offlineCtx.files : f.depotFile ? [f.depotFile] : []}
-  {@const offSel = sel.filter((d) => pending.offline.some((o) => o.depotFile === d))}
+  <!-- Filtered against the rows actually SHOWN here, not against the scan's list.
+       This section also holds files a sync could not write, and files a scoped
+       "find new files" turned up; neither is in pending.offline, so filtering on
+       that left offSel empty for them and "Check out" was present, enabled, and
+       silently did nothing. -->
+  {@const offSel = sel.filter((d) => offlineRows.some((o) => String(o.depotFile) === d))}
   {@const co = offSel.length > 1 ? ` (${offSel.length} files)` : ""}
   {@const many = sel.length > 1 ? ` (${sel.length} files)` : ""}
   <!-- Same grouping as the pending file menu: look at it, copy it, produce
