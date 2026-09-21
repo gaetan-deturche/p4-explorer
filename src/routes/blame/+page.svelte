@@ -17,6 +17,8 @@
   import { langForFile, openSyntax, type SyntaxSession, type TokenRun } from "$lib/syntax";
   import { colorParts, renderLine } from "$lib/invisibles";
   import FindBar from "$lib/components/FindBar.svelte";
+  import ChangeDetails from "$lib/components/ChangeDetails.svelte";
+  import { history } from "$lib/history.svelte";
   import { findHits, rangesByLine, rangesInLine, selectionTerm, stepHit } from "$lib/find";
   import { cacheGet, cacheSet } from "$lib/store.svelte";
   import { openDiff } from "$lib/opendiff";
@@ -69,6 +71,10 @@
       revSpec = job.revSpec ?? "";
       void editor.init(); // openDiff reads the diff-tool choice from this store
       void shortcuts.init(); // honour rebindings here too
+      // The same store the History tab and the file-history window use; it runs
+      // its own p4 commands off this connection, so the changelist panel below
+      // needs nothing else.
+      history.init({ conn: () => conn, setNotice, toQuery: (path: string) => path });
       follow = ((await cacheGet("nav", "follow-branches")) ?? "1") === "1";
       await load();
     } catch (e) {
@@ -460,10 +466,22 @@
     void openBlameWindow(conn, r.file || file, "#" + (rev - 1)).catch((e) => (error = String(e)));
   }
 
+  // --- the whole changelist, beside the line -----------------------------------
+  // Blame answers "which change wrote this line"; the next question is always
+  // "and what else did it do". A panel rather than a window: the line being
+  // asked about stays on screen next to the answer.
+  let clShown = $state("");
+  function showChange(change: string) {
+    clShown = change;
+    void history.selectChange(change); // fills descRows for ChangeDetails
+  }
+
   // --- gutter context menu ---------------------------------------------------
   let ctx = $state<{ x: number; y: number; run: Run } | null>(null);
   function menuItems(r: Run) {
     return [
+      { label: `Show all of @${r.change}`, action: () => showChange(r.change) },
+      { label: "", sep: true },
       { label: "Diff against previous revision", disabled: !r.rev, action: () => diffChange(r) },
       {
         label: !r.rev
@@ -496,6 +514,9 @@
       return;
     }
     if (e.key === "Escape" && finding) return closeFind();
+    // The panel is the innermost thing open, so it goes first — Escape only
+    // closes the window once there is nothing else to dismiss.
+    if (e.key === "Escape" && clShown) return (clShown = "");
     if (e.key === "Escape") return close();
     if (shortcuts.match(e, ["app"]) === "closeWindow") {
       e.preventDefault();
@@ -558,6 +579,24 @@
 
   {#if ctx}
     <ContextMenu x={ctx.x} y={ctx.y} items={menuItems(ctx.run)} onClose={() => (ctx = null)} />
+  {/if}
+
+  {#if clShown}
+    <aside class="clpanel">
+      <div class="clhead">
+        <span class="mono" style="color:{shade(clShown, 0.9)}">@{clShown}</span>
+        <button class="clclose" title="Close (Esc)" onclick={() => (clShown = "")}>✕</button>
+      </div>
+      <div class="clbody">
+        <ChangeDetails
+          change={clShown}
+          rows={history.descRows}
+          loading={history.descLoading}
+          onDiff={(f, r) => history.fileDiff(f, r)}
+          onOpenDiff={(f, r) => history.openFileDiff(f, r)}
+        />
+      </div>
+    </aside>
   {/if}
 
   {#if loading}
@@ -679,6 +718,43 @@
     flex: none;
     padding: 6px 10px;
     font-size: 12px;
+  }
+  /* Docked to the right, over the code rather than reflowing it: the line the
+     question was asked about must not move while it is being answered. */
+  .clpanel {
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: min(46vw, 620px);
+    z-index: 40;
+    display: flex;
+    flex-direction: column;
+    background: var(--bg-panel);
+    border-left: 1px solid var(--border);
+    box-shadow: -6px 0 18px rgb(0 0 0 / 0.28);
+  }
+  .clhead {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 4px 6px 4px 10px;
+    border-bottom: 1px solid var(--border);
+  }
+  .clclose {
+    border: none;
+    background: none;
+    color: var(--text-dim);
+    cursor: pointer;
+    padding: 2px 6px;
+  }
+  .clclose:hover {
+    color: var(--text);
+  }
+  .clbody {
+    flex: 1;
+    overflow: auto;
   }
   .err {
     color: #f08a8a;
