@@ -196,6 +196,11 @@ function charRange(a: string, b: string): { la: [number, number]; lb: [number, n
 // common change, and it is what the earliest-position bug looked like.
 
 const SLIDE_CAP = 100; // a pathological run of repeated lines is not worth scoring
+// How much better a placement must score before an insertion is moved out of a
+// del+add block. A pure run takes the best score going; this one is breaking a
+// modification's line-to-line pairing to do it, so it only moves on a clear
+// structural win, not on a rounding difference.
+const MIXED_MARGIN = 20;
 
 function indentOf(line: string): number {
   let n = 0;
@@ -257,9 +262,17 @@ function placementScore(run: string[], before: string | undefined, after: string
 }
 
 /** Move each pure insertion / deletion to the best-scoring position in its
- *  ambiguity window. Paired del+add runs (a modification) are left alone: their
- *  rows are matched line to line, which is what the intra-line highlight is
- *  computed from, and moving them would break that pairing. */
+ *  ambiguity window.
+ *
+ *  A del+add block is a modification, and its rows ARE matched line to line —
+ *  that pairing is what the intra-line highlight is computed from, so the block
+ *  is not moved as a unit. The insertion alone still can move, though, and must:
+ *  a one-line deletion sitting in front of a forty-line insertion pairs that
+ *  line with whatever the insertion happens to start with, and if the insertion
+ *  starts on a `}` the brace closing the SAME function is matched pages later.
+ *  When the insertion's head repeats after it, moving it down turns
+ *  `del + add` into `del + same + add` at identical edit cost, and the braces
+ *  line up. See slideInsertion. */
 function slideRuns(a: string[], b: string[], ops: Op[], opts?: DiffOptions): Op[] {
   const same = (x: string | undefined, y: string | undefined) =>
     x !== undefined && y !== undefined && lineKey(x, opts) === lineKey(y, opts);
@@ -281,6 +294,44 @@ function slideRuns(a: string[], b: string[], ops: Op[], opts?: DiffOptions): Op[
       j++;
     }
     const pure = dels === 0 && adds > 0 ? "add" : adds === 0 && dels > 0 ? "del" : "";
+    // A modification whose insertion can be moved off the deletion. Only the
+    // plain `del` then `add` shape, which is what Myers emits for a changed
+    // region: with more ops interleaved, what "the insertion" even means stops
+    // being obvious, and the pairing is worth more than the guess.
+    if (!pure && j === i + 2 && out[i].type === "del" && out[i + 1].type === "add") {
+      const next = out[j];
+      let down = 0;
+      if (next && next.type === "same") {
+        while (
+          down < next.count &&
+          down < SLIDE_CAP &&
+          same(b[ib + down], b[ib + adds + down])
+        ) {
+          down++;
+        }
+      }
+      let best = 0;
+      let bestScore = placementScore(b.slice(ib, ib + adds), b[ib - 1], b[ib + adds]) + MIXED_MARGIN;
+      for (let shift = 1; shift <= down; shift++) {
+        const from = ib + shift;
+        const score = placementScore(b.slice(from, from + adds), b[from - 1], b[from + adds]);
+        if (score > bestScore) {
+          bestScore = score;
+          best = shift;
+        }
+      }
+      if (best > 0) {
+        // `best` same-lines leave the run that follows and sit between the
+        // deletion and the insertion — the insertion has moved down by that
+        // much, and the deletion has not moved at all.
+        out.splice(i + 1, 0, { type: "same", count: best });
+        j++;
+        out[j].count -= best;
+        if (out[j].count === 0) out.splice(j, 1);
+        dels += best; // the new `same` consumes from both sides
+        adds += best;
+      }
+    }
     if (pure) {
       const lines = pure === "add" ? b : a;
       const at = pure === "add" ? ib : ia;
