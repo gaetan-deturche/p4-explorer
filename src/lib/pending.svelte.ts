@@ -445,6 +445,19 @@ function currentChangeOf(file: string): string {
 }
 
 /** Move a file between two changelists' cached lists. */
+/** A changelist the UI is showing before p4 has named it.
+ *
+ *  p4 assigns the number, so a guessed row cannot have the real one. It gets a
+ *  provisional key instead, and the reload at the end of the command replaces
+ *  the whole pending list with the truth — real number included — so the
+ *  placeholder never has to be renamed in place. The prefix cannot collide with
+ *  a real changelist: those are all digits. */
+const NEW_CL = "new:";
+let newClSeq = 0;
+export function isProvisionalChange(change: string): boolean {
+  return change.startsWith(NEW_CL);
+}
+
 function moveFileNow(file: string, from: string, to: string): () => void {
   const client = h?.conn().client;
   if (!client) return () => {};
@@ -1473,7 +1486,39 @@ export const pending = {
         await p4.reopen(h!.conn(), files, ch);
       },
       files.length === 1 ? "Moved to a new changelist." : `Moved ${files.length} files to a new changelist.`,
-      { refresh: false },
+      {
+        refresh: false,
+        // The row cannot wait for p4 to name the changelist. The command runs
+        // behind the queue — and behind an offline scan being cancelled, which
+        // is where the seconds went — while the files have visibly left the
+        // changelist they were in. Moving into an EXISTING changelist has
+        // always guessed; this is the same guess with a provisional key.
+        optimistic: () => {
+          const client = h?.conn().client;
+          const before = client ? storeGet("p4:pending", client) : undefined;
+          // Nothing loaded yet: there is no list to add a row to, and writing
+          // one would turn "still loading" into "loaded, with one row".
+          if (!client || before === undefined) return () => {};
+          const temp = `${NEW_CL}${++newClSeq}`;
+          const rows = JSON.parse(before) as P4Record[];
+          const row = {
+            change: temp,
+            desc,
+            user: h!.conn().user,
+            time: String(Math.floor(Date.now() / 1000)),
+          } as unknown as P4Record;
+          storeSetMem("p4:pending", client, JSON.stringify([row, ...rows]));
+          // Seed its file cache before moving anything in: moveFileNow only
+          // ADDS to a changelist it can already read, so without this the files
+          // would leave the old row and appear nowhere.
+          storeSetMem(`p4:clfiles:${client}`, temp, "[]");
+          const undos = files.map((f) => moveFileNow(f, currentChangeOf(f), temp));
+          return () => {
+            storeSetMem("p4:pending", client, before);
+            undos.forEach((u) => u());
+          };
+        },
+      },
     );
   },
   rename(change: string, desc: string) {
@@ -1536,6 +1581,9 @@ export const pending = {
     return loadClCacheDeep("p4:clfiles", change);
   },
   async localFiles(change: string): Promise<P4Record[]> {
+    // `p4 opened -c new:1` is an error, and the empty result would be cached
+    // over the guessed contents — emptying the row the guess just filled.
+    if (isProvisionalChange(change)) return loadClFilesCache(h!.conn().client, change) ?? [];
     const conn = h!.conn();
     const recs = await p4.opened(conn, change).catch(() => [] as P4Record[]);
     const files = recs.filter((r) => r.depotFile); // drop any non-file header record
@@ -1551,6 +1599,7 @@ export const pending = {
   },
   async shelvedFiles(change: string): Promise<P4Record[]> {
     if (change === "default") return [];
+    if (isProvisionalChange(change)) return []; // it does not exist yet, so it has no shelf
     const conn = h!.conn();
     const recs = await p4.describeShelved(conn, change).catch(() => [] as P4Record[]);
     // `describe -S` returns a header record (the change itself, no depotFile)

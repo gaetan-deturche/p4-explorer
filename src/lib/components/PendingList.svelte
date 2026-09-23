@@ -2,7 +2,7 @@
   import { fmtTime, firstLine, splitPath, type P4Record, type ReviewInfo } from "$lib/p4";
   import DiffView from "$lib/components/DiffView.svelte";
   import { describeFileType } from "$lib/filetype";
-  import { pending } from "$lib/pending.svelte";
+  import { pending, isProvisionalChange } from "$lib/pending.svelte";
 
   let {
     rows,
@@ -575,6 +575,7 @@
         {@const rv = reviews[r.change]}
         {@const shown = localOf(String(r.change))}
         {@const empty = !!s && !s.loading && shown.length === 0 && s.shelved.length === 0}
+        {@const provisional = isProvisionalChange(String(r.change))}
         <!-- Section wrapper = the sticky header's containing block, so the pinned
              CL row is pushed out by its own section's end (clean hand-off to the
              next CL) instead of being painted over mid-overlap. -->
@@ -590,14 +591,20 @@
           data-change={String(r.change)}
           class:dropinto={dragOver === String(r.change) || osDropOver === String(r.change)}
         >
+        <!-- A changelist p4 has not named yet: shown so the move is visible at
+             once, but it answers to nothing — every action needs the number,
+             and the reload replaces this row with the real one within moments. -->
         <button
           class="cl"
           class:contextsel={contextChange === r.change}
-          onclick={() => toggleCL(r.change)}
-          oncontextmenu={(e) => onContext(r, e)}
+          class:provisional
+          onclick={() => !provisional && toggleCL(r.change)}
+          oncontextmenu={(e) => (provisional ? e.preventDefault() : onContext(r, e))}
         >
-          <span class="tw">{empty ? "" : s?.open ? "▾" : "▸"}</span>
-          <span class="cnum mono">{r.change === "default" ? "Default" : "@" + r.change}</span>
+          <span class="tw">{empty || provisional ? "" : s?.open ? "▾" : "▸"}</span>
+          <span class="cnum mono">
+            {r.change === "default" ? "Default" : provisional ? "@…" : "@" + r.change}
+          </span>
           <span class="desc" title={r.desc}>
             {r.change === "default" ? "" : firstLine(r.desc) || "(no description)"}
           </span>
@@ -1031,6 +1038,12 @@
   }
   .cl.contextsel {
     background: var(--bg-sel);
+  }
+  /* Visibly not-yet-real: it is about to be replaced by the same changelist
+     carrying its number. */
+  .cl.provisional {
+    opacity: 0.6;
+    cursor: default;
   }
   .fchev {
     flex: none;
