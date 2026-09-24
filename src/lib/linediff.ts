@@ -162,6 +162,30 @@ function charRange(a: string, b: string): { la: [number, number]; lb: [number, n
   return { la: [p, sa], lb: [p, sb] };
 }
 
+/** How much two lines look alike: the share of the longer one their common head
+ *  and tail cover. 1 is identical, 0 is nothing in common at either end.
+ *
+ *  The same prefix/suffix walk the intra-line highlight uses, so a line scores
+ *  well here exactly when the highlight would have something small to point at:
+ *  a renamed identifier leaves everything around it in place. */
+function resemblance(x: string, y: string): number {
+  const longest = Math.max(x.length, y.length);
+  if (longest === 0) return 1;
+  const lim = Math.min(x.length, y.length);
+  let head = 0;
+  while (head < lim && x[head] === y[head]) head++;
+  let tail = 0;
+  while (tail < lim - head && x[x.length - 1 - tail] === y[y.length - 1 - tail]) tail++;
+  return (head + tail) / longest;
+}
+
+/** How far the pairing of a lopsided hunk is allowed to be searched. Beyond
+ *  this the scan is not worth its cost, and position is as good a guess as any. */
+const PAIR_SCAN = 200;
+/** Total resemblance the best offset must beat position 0 by before the rows
+ *  move. Under a quarter of one line's worth is noise, not correspondence. */
+const PAIR_MARGIN = 0.25;
+
 // --- where to place an ambiguous run ---------------------------------------
 //
 // Myers is free to put an insertion (or deletion) anywhere its boundary lines
@@ -435,7 +459,11 @@ export function diffLines(leftText: string, rightText: string, opts?: DiffOption
   const ops = slideRuns(a, b, raw, opts);
 
   // Expand ops into rows, pairing each del-run with the add-run that follows it
-  // (line i of the deletion pairs with line i of the insertion → "mod" rows).
+  // ("mod" rows). WHICH lines pair is chosen by resemblance rather than by
+  // position: pairing deleted line i with added line i is right when the two
+  // runs are the same length, and wrong the moment the insertion leads with new
+  // code — a renamed identifier then pairs with a line it has nothing to do
+  // with, and its own rewrite renders as a plain add with no highlight on it.
   const rows: DiffRow[] = [];
   let la = 0;
   let lb = 0;
@@ -464,6 +492,41 @@ export function diffLines(leftText: string, rightText: string, opts?: DiffOption
       i++;
     }
     const paired = Math.min(dels, adds);
+    // Where the paired rows start within the longer run. Ties keep position 0,
+    // so a hunk whose lines resemble nothing stays exactly as it was.
+    let offset = 0;
+    const spread = Math.max(dels, adds) - paired;
+    if (paired > 0 && spread > 0 && spread <= PAIR_SCAN) {
+      const delSide = dels > adds;
+      const score = (at: number) => {
+        let s = 0;
+        for (let k = 0; k < paired; k++) {
+          s += delSide
+            ? resemblance(a[la + at + k], b[lb + k])
+            : resemblance(a[la + k], b[lb + at + k]);
+        }
+        return s;
+      };
+      const base = score(0);
+      let best = base + PAIR_MARGIN;
+      for (let at = 1; at <= spread; at++) {
+        const s = score(at);
+        if (s > best) {
+          best = s;
+          offset = at;
+        }
+      }
+    }
+    // Whatever the offset skipped comes first, as plain rows: those lines are
+    // new (or gone), not a rewrite of anything.
+    for (let k = 0; k < (dels > adds ? offset : 0); k++) {
+      rows.push({ type: "del", l: { no: la + 1, text: a[la] } });
+      la++;
+    }
+    for (let k = 0; k < (adds > dels ? offset : 0); k++) {
+      rows.push({ type: "add", r: { no: lb + 1, text: b[lb] } });
+      lb++;
+    }
     for (let k = 0; k < paired; k++) {
       const lt = a[la];
       const rt = b[lb];
@@ -478,11 +541,11 @@ export function diffLines(leftText: string, rightText: string, opts?: DiffOption
       la++;
       lb++;
     }
-    for (let k = paired; k < dels; k++) {
+    for (let k = paired + (dels > adds ? offset : 0); k < dels; k++) {
       rows.push({ type: "del", l: { no: la + 1, text: a[la] } });
       la++;
     }
-    for (let k = paired; k < adds; k++) {
+    for (let k = paired + (adds > dels ? offset : 0); k < adds; k++) {
       rows.push({ type: "add", r: { no: lb + 1, text: b[lb] } });
       lb++;
     }
