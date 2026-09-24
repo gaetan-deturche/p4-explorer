@@ -114,6 +114,15 @@
      *  edit painted the whole line as changed. */
     lhot: (readonly [number, number] | null)[];
     rhot: (readonly [number, number] | null)[];
+    /** Rows at the top of the block the left side has no line for, so a paired
+     *  line is drawn beside the line it is paired WITH. A hunk whose insertion
+     *  leads with new code pairs its old lines with the rewrites further down
+     *  (see linediff), and drawing both sides from the top of the block put the
+     *  old line next to the new code instead — highlighted against a line it
+     *  was not compared to. The mirror case, a deletion whose rewrites come
+     *  last, is not handled: that side is the editable document, which lays
+     *  itself out. */
+    leftPad: number;
   }
 
   let leftText = "";
@@ -551,6 +560,8 @@
       const kind: Block["kind"] = row.type === "same" ? "same" : "change";
       const last = out[out.length - 1];
       if (last && last.kind === kind) {
+        // Still before this block's first left line: the left side starts lower.
+        if (!row.l && last.left.length === 0) last.leftPad++;
         if (row.l) {
           last.left.push(row.l.text);
           last.lhot.push(row.lh ?? null);
@@ -568,6 +579,7 @@
         lhot: row.l ? [row.lh ?? null] : [],
         rhot: row.r ? [row.rh ?? null] : [],
         leftFrom: row.l?.no ?? (last ? last.leftFrom + last.left.length : 1),
+        leftPad: row.l ? 0 : 1,
       });
     }
     return out;
@@ -1358,8 +1370,9 @@ initSplit(leftText.trim() === "");
   kind: string,
   fill = 0,
   top = 0,
+  pad = 0,
 )}
-  {@const win = windowOf(top, lines.length)}
+  {@const win = windowOf(top + pad * LH, lines.length)}
   {@const first = win.first}
   {@const last = win.last}
   <!-- Each drawn row is PLACED at its line's own offset: nothing accumulates,
@@ -1367,7 +1380,7 @@ initSplit(leftText.trim() === "");
        the overlays drawn over it (comment markers, and the result pane's caret
        and selection). A spacer sized in nominal rows could, and did. -->
   {#each lines.slice(first, last + 1) as line, k}
-    <div class="line k-{kind}" style="top:{(first + k) * LH}px"><span class="mk"
+    <div class="line k-{kind}" style="top:{(first + k + pad) * LH}px"><span class="mk"
         >{kind === "del" ? "-" : ""}</span
       ><span class="ln"
         >{base + first + k + 1}</span
@@ -1392,10 +1405,13 @@ initSplit(leftText.trim() === "");
        real empty line — only the line numbers gave it away. Drawn as ONE element
        spanning the whole run, so the diagonals run continuously instead of
        restarting (and visibly stepping) at every row. -->
-  {#if fill > 0}
+  {#if pad > 0}
+    <div class="void" style="top:0px; height:{pad * LH}px" aria-hidden="true"></div>
+  {/if}
+  {#if fill - pad > 0}
     <div
       class="void"
-      style="top:{lines.length * LH}px; height:{fill * LH}px"
+      style="top:{(pad + lines.length) * LH}px; height:{(fill - pad) * LH}px"
       aria-hidden="true"
     ></div>
   {/if}
@@ -1545,7 +1561,15 @@ initSplit(leftText.trim() === "");
               data-change={b.kind === "same" ? undefined : i}
               style="top:{tops[i]}px; height:{rows[i] * LH}px"
             >
-              {@render pane(b.left, b.lhot, starts[i].l - 1, leftKind(i), rows[i] - b.left.length, tops[i])}
+              {@render pane(
+              b.left,
+              b.lhot,
+              starts[i].l - 1,
+              leftKind(i),
+              rows[i] - b.left.length,
+              tops[i],
+              b.leftPad,
+            )}
             </div>
           {/each}
           {@render markers("left")}
