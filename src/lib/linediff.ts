@@ -434,11 +434,23 @@ function slideRuns(a: string[], b: string[], ops: Op[], opts?: DiffOptions): Op[
   return out.filter((o) => o.count > 0);
 }
 
-/** Aligned side-by-side rows for two file contents. */
+/** Aligned side-by-side rows for two file contents.
+ *
+ *  Matching is always EXACT, whatever the options say. "Ignore whitespace" is
+ *  applied at the end, by folding rows whose two sides differ only in
+ *  whitespace into unchanged ones.
+ *
+ *  Comparing by a whitespace-blind key instead made `}` and `\t}` the same
+ *  line, and every `}` in a file interchangeable with every other. Myers then
+ *  had equal-cost alignments that anchored a closing brace to the wrong block:
+ *  measured on one real file, the same 57 changed rows came out as 22 change
+ *  blocks with the option on against 17 with it off, the function's closing
+ *  brace matched to an `if`'s and its own brace reported as an addition. The
+ *  option should hide changes, never rearrange them. */
 export function diffLines(leftText: string, rightText: string, opts?: DiffOptions): DiffRow[] {
   const a = splitLines(leftText);
   const b = splitLines(rightText);
-  const same = (x: string, y: string) => lineKey(x, opts) === lineKey(y, opts);
+  const same = (x: string, y: string) => x === y;
 
   // Trim common prefix/suffix before Myers — the dominant cost saver.
   let pre = 0;
@@ -451,12 +463,12 @@ export function diffLines(leftText: string, rightText: string, opts?: DiffOption
     sufB--;
   }
 
-  const { ia, ib } = intern(a.slice(pre, sufA), b.slice(pre, sufB), opts);
+  const { ia, ib } = intern(a.slice(pre, sufA), b.slice(pre, sufB));
   const raw: Op[] = [];
   if (pre > 0) raw.push({ type: "same", count: pre });
   raw.push(...myers(ia, ib));
   if (a.length - sufA > 0) raw.push({ type: "same", count: a.length - sufA });
-  const ops = slideRuns(a, b, raw, opts);
+  const ops = slideRuns(a, b, raw);
 
   // Expand ops into rows, pairing each del-run with the add-run that follows it
   // ("mod" rows). WHICH lines pair is chosen by resemblance rather than by
@@ -550,7 +562,15 @@ export function diffLines(leftText: string, rightText: string, opts?: DiffOption
       lb++;
     }
   }
-  return rows;
+  if (!opts?.ignoreWhitespace) return rows;
+  // The option, applied: a pair that differs only in whitespace is not a change.
+  // Only PAIRED rows can fold — a line that has no counterpart is an insertion
+  // or a deletion whatever its spacing, which is the same thing git means by it.
+  return rows.map((r) =>
+    r.type === "mod" && r.l && r.r && lineKey(r.l.text, opts) === lineKey(r.r.text, opts)
+      ? { type: "same" as const, l: r.l, r: r.r }
+      : r,
+  );
 }
 
 /** First row index of every change block (for prev/next navigation). */
