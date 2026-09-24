@@ -523,7 +523,6 @@
    *  side's answer land on the other side's identical line. */
   let tokLeft = $state<Toks>([]);
   let tokRight = $state<Toks>([]);
-  let current = $state(0);
   let typing = false;
 
   /** Do the two sides of block `i` currently agree? Under the same rule the diff
@@ -593,6 +592,24 @@
     });
   });
   const total = $derived(rows.reduce((sum, r) => sum + r * LH, 0));
+  /** Which change the view is on: the last one at or above the top of it, or the
+   *  first when the view sits above them all.
+   *
+   *  DERIVED from the scroll, never remembered. The counter has to follow the
+   *  scroll, and prev/next have to step from where the reader is looking rather
+   *  than from the last button press — otherwise "next" from the middle of a
+   *  file flies back to change 2. Both were true before the panes were
+   *  virtualised, answered by walking the rendered rows; the walk could not
+   *  survive rows that are not rendered, and this cannot fall out of step. */
+  const current = $derived.by(() => {
+    if (!changes.length) return 0;
+    let at = 0;
+    for (let k = 0; k < changes.length; k++) {
+      if (tops[changes[k]] <= viewTop + LH) at = k;
+      else break;
+    }
+    return at;
+  });
   /** First line number of each block, per side (each side is its own file). */
   const starts = $derived.by(() => {
     let r = 1;
@@ -890,9 +907,13 @@ initSplit(leftText.trim() === "");
   }
 
   function goTo(n: number) {
-    if (!changes.length) return;
-    current = ((n % changes.length) + changes.length) % changes.length;
-    document.querySelector(`[data-change="${changes[current]}"]`)?.scrollIntoView({ block: "center" });
+    if (!changes.length || !scrollEl) return;
+    const at = ((n % changes.length) + changes.length) % changes.length;
+    // By position, not by element: a block outside the rendered window is not in
+    // the DOM, so scrollIntoView had nothing to scroll to and a jump to a
+    // distant change did nothing at all. A third of the way down, as the find
+    // bar places its hits — the change reads better with its lead-in visible.
+    scrollEl.scrollTop = Math.max(0, tops[changes[at]] - scrollEl.clientHeight / 3);
   }
 
   /** Actions that only look: caret, selection, copy. A read-only pane keeps
@@ -1130,12 +1151,11 @@ initSplit(leftText.trim() === "");
       // does still clear it: there the content came from somewhere else, and
       // undoing into it would put this window's text back over theirs.)
       rebuild(text, at.line, at.col);
-      // Blocks edited into agreement stop being changes, so the prev/next
-      // counter is CLAMPED to the shorter list — but nothing is scrolled. A save
-      // is not a navigation: the user is reading where they are. This used to
-      // call goTo, which scrolls, so saving jumped to the first change whenever
-      // prev/next had not been used (`current` still 0).
-      current = changes.length ? Math.min(current, changes.length - 1) : 0;
+      // Blocks edited into agreement stop being changes, and the counter simply
+      // follows: it is derived from where the view is, so there is nothing to
+      // clamp and nothing to scroll. A save is not a navigation — the user is
+      // reading where they are. This used to call goTo, which scrolls, so saving
+      // jumped to the first change whenever prev/next had not been used.
     } catch (e) {
       error = String(e);
     } finally {
