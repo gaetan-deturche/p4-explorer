@@ -47,9 +47,45 @@ impl Region {
 }
 
 /// Merge `ours` and `theirs` over their common `base`.
+/// Move each ambiguous edit to the one position both sides will agree on.
+///
+/// Myers anchors an insertion wherever its search lands, so the SAME edit made
+/// on both sides can come back at different base offsets — measured at base[13]
+/// against base[17] for one 61-line block, whose ranges then never overlap and
+/// whose content the merge took twice. Sliding as far down as the content
+/// allows depends only on the base and the edited lines, so both sides land in
+/// the same place and identical edits meet.
+///
+/// Bounded by the next chunk, so sliding cannot reorder or collide them.
+fn slide_chunks(base: &[String], chunks: &mut [Chunk]) {
+    for i in 0..chunks.len() {
+        let limit = chunks.get(i + 1).map(|n| n.start).unwrap_or(base.len());
+        let c = &mut chunks[i];
+        if c.start == c.end && !c.lines.is_empty() {
+            // An insertion steps over the base line it matches, rotating as it
+            // goes: base[..p] + L + base[p..] is the same file as
+            // base[..p+1] + rotate(L) + base[p+1..] when L[0] == base[p].
+            while c.end < limit && c.lines[0] == base[c.end] {
+                c.lines.rotate_left(1);
+                c.start += 1;
+                c.end += 1;
+            }
+        } else if c.lines.is_empty() && c.start < c.end {
+            // A deletion steps down while the line after it repeats the first
+            // line it removes.
+            while c.end < limit && base[c.start] == base[c.end] {
+                c.start += 1;
+                c.end += 1;
+            }
+        }
+    }
+}
+
 pub fn merge3(base: &[String], ours: &[String], theirs: &[String]) -> Vec<Region> {
-    let a = diff_chunks(base, ours);
-    let b = diff_chunks(base, theirs);
+    let mut a = diff_chunks(base, ours);
+    let mut b = diff_chunks(base, theirs);
+    slide_chunks(base, &mut a);
+    slide_chunks(base, &mut b);
     let mut out: Vec<Region> = Vec::new();
     let mut pos = 0usize; // how far through base we've emitted
     let (mut i, mut j) = (0usize, 0usize);
@@ -355,6 +391,28 @@ mod tests {
         let rs = merge3(&base, &ours, &theirs);
         assert!(!rs.iter().any(Region::is_conflict), "{rs:?}");
         assert_eq!(flat(&rs), v(&["A", "b", "c", "d", "E"]));
+    }
+
+    #[test]
+    fn the_same_insertion_anchored_differently_still_collapses() {
+        // ValueHeatMap.ush: both sides added the same block, and Myers anchored
+        // it one blank line apart on each side. Unslid, the ranges never
+        // overlapped and the block was taken twice.
+        let base: Vec<String> =
+            ["a", "", "b", "", "c"].iter().map(|s| s.to_string()).collect();
+        let add: Vec<String> = ["", "NEW1", "NEW2"].iter().map(|s| s.to_string()).collect();
+        // Same resulting file, reached by inserting at two different offsets.
+        let mut ours = base.clone();
+        ours.splice(1..1, add.clone());
+        let mut theirs = base.clone();
+        theirs.splice(1..1, add.clone());
+        let rs = merge3(&base, &ours, &theirs);
+        assert!(
+            rs.iter().all(|r| !matches!(r, Region::Ours { .. } | Region::Theirs { .. })),
+            "one-sided region for an edit both sides made: {rs:?}"
+        );
+        let merged: Vec<String> = rs.iter().flat_map(|r| r.resolved().to_vec()).collect();
+        assert_eq!(merged, ours, "the block was taken twice");
     }
 
     #[test]
