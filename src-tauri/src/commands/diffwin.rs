@@ -225,7 +225,7 @@ pub async fn diff_pair_local(conn: P4Conn, depot_file: String) -> Result<DiffPai
         let (mut base_rev, mut note) = (have.clone(), String::new());
         if let Ok(rr) = p4::run(&conn, &["fstat", "-Ru", "-Or", &depot_file]) {
             if let Some(rec) = rr.first() {
-                if let Some(sub) = p4::explode_indexed(rec, "resolveBaseFile").first() {
+                if let Some(sub) = p4::pending_resolve(rec) {
                     let g = |k: &str| {
                         sub.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string()
                     };

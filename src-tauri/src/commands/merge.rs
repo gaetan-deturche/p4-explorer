@@ -154,8 +154,7 @@ pub(crate) fn prepare_resolve_merge(conn: &P4Conn, depot_file: &str) -> Result<S
         .and_then(|v| v.as_str())
         .ok_or("this file is not in the current workspace")?
         .to_string();
-    let subs = p4::explode_indexed(rec, "resolveBaseFile");
-    let sub = subs.first().ok_or("p4 gave no resolve record for this file")?;
+    let sub = p4::pending_resolve(rec).ok_or("p4 gave no resolve record for this file")?;
     let get = |k: &str| sub.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
     let (bf, br) = (get("resolveBaseFile"), get("resolveBaseRev"));
     let (ff, fr) = (get("resolveFromFile"), get("resolveEndFromRev"));

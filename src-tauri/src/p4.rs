@@ -776,6 +776,21 @@ fn value_as_i64(v: &Value) -> Option<i64> {
 /// is absent. Non-indexed keys (no trailing digit) are treated as shared
 /// header fields and copied onto every row — e.g. the top-level `depotFile`
 /// in filelog, or `change`/`desc`/`user` in describe.
+/// The resolve p4 is actually waiting on, out of an `fstat -Or` record.
+///
+/// p4 lists every resolve a file has had, settled ones included — an `ignored`
+/// base #1/from #2 can sit in front of the `unresolved` base #2/from #3. Taking
+/// the first merges against a base two syncs old, which makes content the
+/// workspace already holds read as a local add and the depot's copy as an
+/// incoming one: the same block, taken twice.
+pub fn pending_resolve(rec: &Record) -> Option<Record> {
+    let subs = explode_indexed(rec, "resolveBaseFile");
+    subs.iter()
+        .find(|s| s.get("resolveAction").and_then(|v| v.as_str()) == Some("unresolved"))
+        .or_else(|| subs.last())
+        .cloned()
+}
+
 pub fn explode_indexed(rec: &Record, anchor: &str) -> Vec<Record> {
     // Header fields: keys with no trailing digit and no comma (integration
     // sub-arrays like "file0,0" are always skipped).
@@ -813,6 +828,43 @@ pub fn explode_indexed(rec: &Record, anchor: &str) -> Vec<Record> {
         i += 1;
     }
     rows
+}
+
+#[cfg(test)]
+mod resolve_tests {
+    use super::{pending_resolve, Record};
+    use serde_json::json;
+
+    /// The shape `fstat -Or` returned for ValueHeatMap.ush: a settled resolve in
+    /// front of the pending one.
+    fn two_resolves() -> Record {
+        let mut r = Record::new();
+        for (k, v) in [
+            ("resolveAction0", "ignored"),
+            ("resolveBaseRev0", "1"),
+            ("resolveEndFromRev0", "2"),
+            ("resolveAction1", "unresolved"),
+            ("resolveBaseRev1", "2"),
+            ("resolveEndFromRev1", "3"),
+            ("resolveBaseFile0", "//d/f"),
+            ("resolveBaseFile1", "//d/f"),
+        ] {
+            r.insert(k.to_string(), json!(v));
+        }
+        r
+    }
+
+    #[test]
+    fn takes_the_unresolved_one_not_the_first() {
+        let sub = pending_resolve(&two_resolves()).expect("a resolve");
+        assert_eq!(sub.get("resolveBaseRev").unwrap(), "2");
+        assert_eq!(sub.get("resolveEndFromRev").unwrap(), "3");
+    }
+
+    #[test]
+    fn a_record_with_no_resolves_yields_none() {
+        assert!(pending_resolve(&Record::new()).is_none());
+    }
 }
 
 #[cfg(test)]
