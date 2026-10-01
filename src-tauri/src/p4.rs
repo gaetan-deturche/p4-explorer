@@ -510,15 +510,7 @@ pub fn run_raw_stdout_diff(conn: &P4Conn, args: &[&str]) -> Result<String, Strin
 ///
 /// Error records (severity >= E_FAILED) are collected; if there are no data
 /// records we return them (joined) as an `Err`. Warnings are dropped silently.
-/// Parse `-ztag -Mj` stdout into records, turning a failure record into an
-/// `Err` only when there are no data records (data masks errors — fine for
-/// reads; `run_strict` is the strict variant for mutations).
-fn parse_records(stdout: &[u8], success: bool, stderr: &[u8]) -> Result<Vec<Record>, String> {
-    let (records, _errors) = parse_records_full(stdout, success, stderr)?;
-    Ok(records)
-}
-
-/// As `parse_records`, but ALSO returns the error strings that data records
+/// Parse `-ztag -Mj` stdout into records AND the error strings that data records
 /// would otherwise mask — for batch mutations (e.g. a multi-file sync) where a
 /// partial failure must not disappear behind the successes.
 fn parse_records_full(
@@ -651,11 +643,14 @@ fn tagged_output(conn: &P4Conn, args: &[&str]) -> Result<std::process::Output, S
 /// Like `run`, but spawns the child and records its PID in `pid_slot` so a long
 /// command (the offline-changes scan) can be killed mid-flight to release its
 /// server locks — otherwise it blocks interactive writes (submit, reopen).
+/// Returns the warnings as well as the records: p4 refuses some files with a
+/// warning and NO data record (a `+l` file another client holds), and a scan
+/// that keeps only records drops the one sentence explaining the absence.
 pub fn run_killable(
     conn: &P4Conn,
     args: &[&str],
     pid_slot: &std::sync::Arc<std::sync::Mutex<Option<u32>>>,
-) -> Result<Vec<Record>, String> {
+) -> Result<(Vec<Record>, Vec<String>), String> {
     // Shares the auth retry (run_output) while still publishing the child PID so
     // the scan can be killed mid-flight.
     let out = run_output(conn, args, |c| {
@@ -688,7 +683,7 @@ pub fn run_killable(
         }
         out
     })?;
-    parse_records(&out.stdout, out.status.success(), &out.stderr)
+    parse_tagged(&out.stdout, out.status.success(), &out.stderr, true)
 }
 
 /// Like `run`, but a failure record (severity >= E_FAILED) is ALWAYS surfaced as

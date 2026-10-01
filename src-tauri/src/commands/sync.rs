@@ -403,7 +403,8 @@ pub async fn p4_status(
         if abort.swap(false, Ordering::SeqCst) {
             return Err("offline scan cancelled".to_string());
         }
-        let mut recs = res?;
+        let (mut recs, notes) = res?;
+        recs.extend(locked_offline(&conn, &notes));
         mark_desyncs(&conn, &mut recs);
         Ok(recs)
     })
@@ -443,10 +444,83 @@ pub async fn p4_new_files(
         if abort.swap(false, Ordering::SeqCst) {
             return Err("scan cancelled".to_string());
         }
-        res
+        res.map(|(recs, _notes)| recs)
     })
     .await
     .map_err(|e| format!("new-files task failed: {e}"))?
+}
+
+/// The offline changes p4 found but refused to report.
+///
+/// A `binary+l` file another client has open cannot be opened here, so
+/// reconcile answers with a warning and no data record — and the file vanished
+/// from the list with nothing said to explain it. It is an offline change like
+/// any other; what differs is that checking it out has to wait for the holder.
+///
+/// The refusal only means p4 would not OPEN it, so the content difference is
+/// confirmed rather than assumed (`-se`: unopened files that differ). A handful
+/// of paths, so this costs a fraction of a second against the scan's minutes —
+/// where running `-se` over the whole workspace measured 245s against the
+/// scan's own 22s and found nothing the refusals had not already named.
+fn locked_offline(conn: &P4Conn, notes: &[String]) -> Vec<p4::Record> {
+    let refused: Vec<String> = notes
+        .iter()
+        .filter(|n| n.contains("exclusive file already opened"))
+        .filter_map(|n| n.split(" - ").next())
+        .map(str::trim)
+        .filter(|f| f.starts_with("//"))
+        .map(str::to_string)
+        .collect();
+    if refused.is_empty() {
+        return Vec::new();
+    }
+
+    // Who holds it, so the row can say why a checkout will be refused.
+    let mut held: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut args: Vec<&str> = vec!["opened", "-a"];
+    for f in &refused {
+        args.push(f.as_str());
+    }
+    for r in p4::run(conn, &args).unwrap_or_default() {
+        let get = |k: &str| r.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let (file, user, client) = (get("depotFile"), get("user"), get("client"));
+        if !file.is_empty() && !user.is_empty() {
+            held.insert(file, format!("{user}@{client}"));
+        }
+    }
+
+    // And confirm each one really differs: a timestamp that moved without the
+    // content would otherwise be listed as an edit that is not there.
+    let specs: Vec<String> = refused.iter().map(|f| format!("{f}#have")).collect();
+    let mut dargs: Vec<&str> = vec!["diff", "-se"];
+    for s in &specs {
+        dargs.push(s.as_str());
+    }
+    p4::run(conn, &dargs)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|r| {
+            let get = |k: &str| r.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let depot = get("depotFile");
+            if depot.is_empty() {
+                return None;
+            }
+            let by = held.get(&depot).cloned().unwrap_or_else(|| "another workspace".into());
+            let mut rec = p4::Record::new();
+            rec.insert("depotFile".into(), serde_json::json!(depot));
+            rec.insert("clientFile".into(), serde_json::json!(get("clientFile")));
+            rec.insert("action".into(), serde_json::json!("edit"));
+            rec.insert("lockedBy".into(), serde_json::json!(by.clone()));
+            rec.insert(
+                "reason".into(),
+                serde_json::json!(format!(
+                    "Exclusively opened by {by}, so p4 will not open it here. The edit is \
+                     yours and still on disk; checking it out has to wait for them."
+                )),
+            );
+            Some(rec)
+        })
+        .collect()
 }
 
 /// Distinguish REAL offline edits from have/disk desyncs: a file whose disk

@@ -721,6 +721,11 @@
                   >
                 {/if}
                 <span class="fpath"><span class="pfile">{sp.name}</span><span class="pdir dim">{sp.dir}</span></span>
+                {#if f.lockedBy}
+                  <!-- p4 will refuse to check this out until the holder lets go;
+                       the edit itself is here on disk like any other. -->
+                  <span class="clash" title={String(f.reason ?? "")}>locked by {f.lockedBy}</span>
+                {/if}
                 {#if caseTwin(f.depotFile ?? "")}
                   <!-- Why this row keeps coming back however often it is reverted. -->
                   <span
