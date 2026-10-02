@@ -442,11 +442,17 @@ pub async fn swarm_set_state(conn: P4Conn, id: u64, state: String) -> Result<Str
     tauri::async_runtime::spawn_blocking(move || {
         let sw = swarm_conn(&conn)?;
         let url = format!("{}/api/v9/reviews/{id}/state", sw.base);
+        // Swarm spells "approve and commit" as one transition key; the API takes
+        // it as approved plus a flag.
+        let form: Vec<(&str, &str)> = match state.as_str() {
+            "approved:commit" => vec![("state", "approved"), ("commit", "true")],
+            s => vec![("state", s)],
+        };
         let resp = sw
             .client
-            .post(&url)
+            .patch(&url)
             .basic_auth(&sw.user, Some(&sw.ticket))
-            .form(&[("state", state.as_str())])
+            .form(&form)
             .send()
             .map_err(|e| format!("Swarm unreachable: {e}"))?;
         let status = resp.status();
