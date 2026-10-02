@@ -165,6 +165,28 @@
   );
   const MARK: Record<string, string> = { add: "+", del: "-", vs: "!", keep: "=" };
 
+  /** The glyph a side's rows carry, when its kind would not say. An open
+   *  conflict is `vs` on both sides, so each pane says what IT brings. */
+  function sideMark(r: MergeRegion, which: Side, i: number): string | null {
+    if (r.kind !== "conflict" || origin[i] !== undefined) return null;
+    // Only where the count settles it: two rival rewrites of the same lines add
+    // and remove nothing, and `!` is the honest mark for them.
+    if (r[which].length > r.base.length) return "+";
+    if (r[which].length < r.base.length) return "-";
+    return null;
+  }
+
+  /** What a pane says when its side holds no lines at all. Without it a
+   *  deletion and "there was never anything here" are the same empty band —
+   *  and a removed blank line is invisible twice over. */
+  function ghost(r: MergeRegion, which: Side): string {
+    if (r.kind === "same" || side(r, which).length) return "";
+    if (!r.base.length) return "nothing on this side";
+    const blank = r.base.every((l) => !l.trim());
+    const n = r.base.length;
+    return `${n} ${blank ? "blank " : ""}line${n > 1 ? "s" : ""} removed`;
+  }
+
   /** Which side(s) feed a region — the arrows in the link columns. */
   function flows(r: MergeRegion, i: number): { left: boolean; right: boolean; open: boolean } {
     const o = origin[i];
@@ -1137,6 +1159,8 @@
   top = 0,
   pi = 0,
   strip = 0,
+  mark: string | null = null,
+  absent = "",
 )}
   {@const win = windowOf(top, lines.length)}
   {@const first = win.first}
@@ -1145,9 +1169,13 @@
        nothing accumulates, so the three panes and the result pane's caret and
        selection all agree by construction. `strip` is the conflict toolbar the
        rows sit below. -->
+  {#if !lines.length && absent}
+    <div class="line k-del ghost" style="top:{strip}px"><span class="mk">-</span><span
+        class="ln"></span><span class="src">{absent}</span></div>
+  {/if}
   {#each lines.slice(first, last + 1) as line, k}
     <div class="line k-{kind}" style="top:{strip + (first + k) * LH}px"><span class="mk"
-        >{MARK[kind] ?? ""}</span
+        >{mark ?? MARK[kind] ?? ""}</span
       ><span class="ln"
         >{base + first + k + 1}</span
       ><span class="src"
@@ -1313,7 +1341,7 @@
               style="top:{tops[i]}px; height:{rows[i] * LH + (r.kind === 'conflict' ? TOOLBAR : 0)}px"
             >
               {#if r.kind === "conflict"}<div class="strip"></div>{/if}
-              {@render pane(side(r, "theirs"), tokTheirs, starts[i].t - 1, sideKind(r, "theirs", i), tops[i] + (r.kind === "conflict" ? TOOLBAR : 0), 0, r.kind === "conflict" ? TOOLBAR : 0)}
+              {@render pane(side(r, "theirs"), tokTheirs, starts[i].t - 1, sideKind(r, "theirs", i), tops[i] + (r.kind === "conflict" ? TOOLBAR : 0), 0, r.kind === "conflict" ? TOOLBAR : 0, sideMark(r, "theirs", i), ghost(r, "theirs"))}
             </div>
           {/each}
         </div>
@@ -1425,7 +1453,7 @@
               style="top:{tops[i]}px; height:{rows[i] * LH + (r.kind === 'conflict' ? TOOLBAR : 0)}px"
             >
               {#if r.kind === "conflict"}<div class="strip"></div>{/if}
-              {@render pane(side(r, "ours"), tokOurs, starts[i].o - 1, sideKind(r, "ours", i), tops[i] + (r.kind === "conflict" ? TOOLBAR : 0), 1, r.kind === "conflict" ? TOOLBAR : 0)}
+              {@render pane(side(r, "ours"), tokOurs, starts[i].o - 1, sideKind(r, "ours", i), tops[i] + (r.kind === "conflict" ? TOOLBAR : 0), 1, r.kind === "conflict" ? TOOLBAR : 0, sideMark(r, "ours", i), ghost(r, "ours"))}
             </div>
           {/each}
         </div>
@@ -1822,6 +1850,11 @@
   }
   .k-add .mk {
     color: #7cc47c;
+  }
+  .ghost {
+    font-style: italic;
+    opacity: 0.6;
+    user-select: none;
   }
   .k-del {
     background: rgba(217, 135, 58, 0.14);
