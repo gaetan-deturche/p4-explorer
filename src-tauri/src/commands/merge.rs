@@ -194,7 +194,8 @@ pub(crate) fn prepare_resolve_merge(conn: &P4Conn, depot_file: &str) -> Result<S
 #[tauri::command]
 pub async fn merge_save(app: AppHandle, id: String, text: String) -> Result<String, String> {
     let job = id.clone();
-    let out = tauri::async_runtime::spawn_blocking(move || merge_save_inner(&id, &text))
+    let handle = app.clone();
+    let out = tauri::async_runtime::spawn_blocking(move || merge_save_inner(&handle, &id, &text))
         .await
         .map_err(|e| format!("merge-save task failed: {e}"))?;
     if out.is_ok() {
@@ -226,7 +227,7 @@ pub async fn merge_cancel(id: String) -> Result<(), String> {
 /// Hand the job to P4MERGE (`p4merge base theirs yours merged`), wait for it to
 /// close, and take the merged file if the tool wrote one.
 #[tauri::command]
-pub async fn merge_external(id: String) -> Result<String, String> {
+pub async fn merge_external(app: AppHandle, id: String) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let conn = {
             let reg = registry().lock().unwrap();
@@ -275,7 +276,7 @@ pub async fn merge_external(id: String) -> Result<String, String> {
         if merged_lines == base && base != ours && base != theirs {
             return Ok("unchanged".to_string());
         }
-        merge_save_inner(&id, &merged)
+        merge_save_inner(&app, &id, &merged)
     })
     .await
     .map_err(|e| format!("merge-external task failed: {e}"))?
@@ -324,7 +325,7 @@ pub async fn merge_write(id: String, text: String) -> Result<(), String> {
 }
 
 /// The write-back half of `merge_save`, shared with the external-tool path.
-pub(crate) fn merge_save_inner(id: &str, text: &str) -> Result<String, String> {
+pub(crate) fn merge_save_inner(app: &AppHandle, id: &str, text: &str) -> Result<String, String> {
     let (target, kind, depot, splice, rej, conn) = {
         let reg = registry().lock().unwrap();
         let job = reg.get(id).ok_or("this merge is no longer available")?;
@@ -339,6 +340,11 @@ pub(crate) fn merge_save_inner(id: &str, text: &str) -> Result<String, String> {
     };
     write_result(&target, text, splice)?;
     if kind == "resolve" {
+        // A workspace-wide `reconcile` holds server locks that block this write,
+        // so the scan goes down first — the same reason the pending list kills it
+        // before its own mutations.
+        use tauri::Manager;
+        super::sync::kill_offline_scan(&app.state::<crate::index::AppState>());
         p4::run(&conn, &["resolve", "-ay", &depot])
             .map_err(|e| format!("the merge was written but p4 resolve failed: {e}"))?;
     }

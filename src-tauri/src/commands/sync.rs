@@ -1000,6 +1000,12 @@ pub async fn p4_sync_blockers(conn: P4Conn, files: Vec<String>) -> Result<Vec<Sy
 pub async fn cancel_offline_scan(
     state: tauri::State<'_, crate::index::AppState>,
 ) -> Result<(), String> {
+    kill_offline_scan(&state);
+    Ok(())
+}
+
+/// The kill itself, for the write paths that are not a frontend command.
+pub(crate) fn kill_offline_scan(state: &crate::index::AppState) {
     use std::sync::atomic::Ordering;
     let pid = *state.offline_pid.lock().unwrap();
     if let Some(pid) = pid {
@@ -1013,7 +1019,6 @@ pub async fn cancel_offline_scan(
                 .output();
         }
     }
-    Ok(())
 }
 
 #[cfg(test)]
