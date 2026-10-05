@@ -1621,11 +1621,13 @@ export const pending = {
    *  was listed, and waiting for the rescan left a fixed file sitting in Offline
    *  for the length of a workspace-wide scan. `mutate` puts it back if p4
    *  refuses, and the scan still follows to reconcile the guess. */
-  async repairDesync(file: string) {
+  async repairDesync(files: string[]) {
+    if (!files.length) return;
+    const n = files.length;
     await pending.mutate(
-      () => p4.flush(h!.conn(), [file]),
-      "Sync record repaired (have = head, file untouched).",
-      { refresh: false, optimistic: () => forgetFiles([file]) },
+      () => p4.flush(h!.conn(), files),
+      `Sync record repaired for ${n} file${n === 1 ? "" : "s"} (have = head, files untouched).`,
+      { refresh: false, optimistic: () => forgetFiles(files) },
     );
     void pending.scanOffline();
   },

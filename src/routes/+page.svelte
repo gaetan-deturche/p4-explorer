@@ -1783,7 +1783,14 @@
        that left offSel empty for them and "Check out" was present, enabled, and
        silently did nothing. -->
   {@const offSel = sel.filter((d) => offlineRows.some((o) => String(o.depotFile) === d))}
+  <!-- The desync rows of the selection: a `p4 flush` on a file that really IS
+       modified moves its have record for nothing and leaves it listed as a
+       plain offline edit, so the repair takes only the rows it explains. -->
+  {@const desyncSel = sel.filter((d) =>
+    offlineRows.some((o) => String(o.depotFile) === d && o.desync),
+  )}
   {@const co = offSel.length > 1 ? ` (${offSel.length} files)` : ""}
+  {@const dc = desyncSel.length > 1 ? ` (${desyncSel.length} files)` : ""}
   {@const many = sel.length > 1 ? ` (${sel.length} files)` : ""}
   <!-- Same grouping as the pending file menu: look at it, copy it, produce
        something from it, change it, destroy it — Revert was sitting directly
@@ -1794,11 +1801,11 @@
     items={[
       // Desync entries aren't local edits — offer the record repair (p4 flush).
       // First, like Resolve in the pending menu: it explains the row.
-      ...(f.desync
+      ...(desyncSel.length
         ? [
             {
-              label: "Repair sync record (file untouched)",
-              action: () => pending.repairDesync(f.depotFile),
+              label: `Repair sync record (file${desyncSel.length > 1 ? "s" : ""} untouched)${dc}`,
+              action: () => pending.repairDesync(desyncSel),
             },
             { label: "", sep: true },
           ]
