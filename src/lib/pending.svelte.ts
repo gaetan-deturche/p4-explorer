@@ -1615,13 +1615,17 @@ export const pending = {
   offlineDiff(file: string): Promise<string> {
     return p4.diffOffline(h!.conn(), file); // -f: diff an unopened (offline) file
   },
-  /** Repair a have/disk desync (`p4 flush #head` — record only, disk untouched),
-   *  then rescan so the ghost offline entry clears promptly. */
+  /** Repair a have/disk desync (`p4 flush #head` — record only, disk untouched).
+   *
+   *  The row goes on the click: repairing the record removes the only reason it
+   *  was listed, and waiting for the rescan left a fixed file sitting in Offline
+   *  for the length of a workspace-wide scan. `mutate` puts it back if p4
+   *  refuses, and the scan still follows to reconcile the guess. */
   async repairDesync(file: string) {
     await pending.mutate(
       () => p4.flush(h!.conn(), [file]),
       "Sync record repaired (have = head, file untouched).",
-      { refresh: false },
+      { refresh: false, optimistic: () => forgetFiles([file]) },
     );
     void pending.scanOffline();
   },
