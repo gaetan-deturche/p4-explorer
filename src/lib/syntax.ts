@@ -144,6 +144,40 @@ function stateIsLost(lang: string, state: unknown): boolean {
 
 // --- a tokenizer over one language ------------------------------------------
 
+/** The `]` of a lambda capture, as the grammar refuses to end one: not before a
+ *  `;`, `=`, `[` or `]`. A `)` belongs in that set too. */
+const LAMBDA_END = "[];=\\[]";
+const LAMBDA_END_FIXED = "[];=\\[)]";
+
+/** Stop the C++ grammar reading `MACRO(Type, Name, [N])` as a lambda.
+ *
+ *  It takes the `[N]` for a capture list and the NEXT line for that lambda's
+ *  parameters. A shader parameter struct is a run of them, and the grammar comes
+ *  out of it inside a lambda, where the next string literal pairs its quotes off
+ *  by one and opens a string that never closes — 498 lines of one colour in
+ *  DiaphragmDOF.cpp, 162 in SlcpLineSearch.cpp.
+ *
+ *  A real lambda's `]` is never followed directly by `)`: it needs `(params)`,
+ *  `{`, `mutable` or `->` first. Measured: no lambda form loses its capture
+ *  list, and 36 of 40 Renderer files tokenize byte-identically. */
+function unbreakCppLambdas(mod: unknown): unknown {
+  const grammars = (mod as { default?: unknown }).default ?? mod;
+  if (!Array.isArray(grammars)) return mod;
+  const cpp = (grammars as { scopeName?: string; repository?: Record<string, { begin?: string }> }[]).find(
+    (g) => g.scopeName === "source.cpp",
+  );
+  const lambdas = cpp?.repository?.lambdas;
+  if (!lambdas?.begin || lambdas.begin.includes(LAMBDA_END_FIXED)) return mod;
+  if (!lambdas.begin.includes(LAMBDA_END)) {
+    // Shiki reshaped the rule: leave it alone rather than guess, and keep
+    // highlighting — being wrong on those lines beats having no colour at all.
+    console.warn("cpp lambda rule has changed shape; the macro-array fix is not applied");
+    return mod;
+  }
+  lambdas.begin = lambdas.begin.replace(LAMBDA_END, LAMBDA_END_FIXED);
+  return mod;
+}
+
 /** Shiki as `TokenSession` needs it: state in, state out, runs for a stretch of
  *  lines. Both calls take the SAME options as the one-shot path did, plus the
  *  `grammarState` that lets tokenizing resume mid-file. */
@@ -151,7 +185,7 @@ export async function makeTokenizer(lang: string, dark: boolean): Promise<Tokeni
   try {
     const hl = await core();
     if (!loadedLangs.has(lang)) {
-      await hl.loadLanguage((await LANG_LOAD[lang]()) as never);
+      await hl.loadLanguage(unbreakCppLambdas(await LANG_LOAD[lang]()) as never);
       loadedLangs.add(lang);
     }
     const theme = dark ? "dark-plus" : "light-plus";
