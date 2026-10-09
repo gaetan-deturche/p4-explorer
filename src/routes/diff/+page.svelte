@@ -505,7 +505,7 @@
     // that is on screen now (edits included).
     if (ds) {
       const at = absoluteCaret();
-      rebuild(docText(ds.doc), at.line, at.col);
+      rebuild(docTextForDiff(), at.line, at.col);
     }
   }
   function setInvisibles(v: boolean) {
@@ -686,9 +686,18 @@ initSplit(leftText.trim() === "");
     // document changed, so the session in hand no longer describes it.
     if (!hasSelection(ds)) {
       const at = absoluteCaret();
-      rebuild(docText(ds.doc), at.line, at.col);
+      rebuild(docTextForDiff(), at.line, at.col);
     }
     scheduleRecolor(); // the edited lines have no tokens yet
+  }
+
+  /** The text the writer would put on disk: `docText` plus the file's own
+   *  terminator. The diff has to see THAT: `docText` alone has no terminator
+   *  while the left text does, so a trailing blank line restored into the
+   *  document was stripped again on the way back in and the block it came from
+   *  reappeared unchanged — a revert of the last line that could never stick. */
+  function docTextForDiff(): string {
+    return ds ? docText(ds.doc) + (diskText.endsWith("\n") ? "\n" : "") : "";
   }
 
   /** Where the caret is in the right file: its line counted from the top, and
@@ -1162,7 +1171,7 @@ initSplit(leftText.trim() === "");
       // what it does in any editor. (Reloading from disk is the other case and
       // does still clear it: there the content came from somewhere else, and
       // undoing into it would put this window's text back over theirs.)
-      rebuild(text, at.line, at.col);
+      rebuild(docTextForDiff(), at.line, at.col);
       // Blocks edited into agreement stop being changes, and the counter simply
       // follows: it is derived from where the view is, so there is nothing to
       // clamp and nothing to scroll. A save is not a navigation — the user is
