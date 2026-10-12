@@ -395,9 +395,20 @@ pub async fn p4_status(
     };
     let pid_slot = state.offline_pid.clone();
     let abort = state.offline_abort.clone();
+    let held = state.offline_writes.clone();
+    // A whole-client reconcile blocks interactive writes for most of its walk
+    // (measured: a `p4 edit` waited 45 s behind one), so none starts under one.
+    if held.load(Ordering::SeqCst) > 0 {
+        return Err(p4::SCAN_DEFERRED.to_string());
+    }
     abort.store(false, Ordering::SeqCst);
     tauri::async_runtime::spawn_blocking(move || {
-        let res = p4::run_killable(&conn, &["reconcile", "-n", "-e", "-d", "-m", &spec], &pid_slot);
+        let res = p4::run_killable(
+            &conn,
+            &["reconcile", "-n", "-e", "-d", "-m", &spec],
+            &pid_slot,
+            Some(&held),
+        );
         // If it was cancelled (killed by an interactive write), report an error
         // so the caller keeps the previous list instead of clearing it.
         if abort.swap(false, Ordering::SeqCst) {
@@ -440,7 +451,7 @@ pub async fn p4_new_files(
     let abort = state.offline_abort.clone();
     abort.store(false, Ordering::SeqCst);
     tauri::async_runtime::spawn_blocking(move || {
-        let res = p4::run_killable(&conn, &["reconcile", "-n", "-a", "-m", &spec], &pid_slot);
+        let res = p4::run_killable(&conn, &["reconcile", "-n", "-a", "-m", &spec], &pid_slot, None);
         if abort.swap(false, Ordering::SeqCst) {
             return Err("scan cancelled".to_string());
         }
@@ -1002,6 +1013,28 @@ pub async fn cancel_offline_scan(
 ) -> Result<(), String> {
     kill_offline_scan(&state);
     Ok(())
+}
+
+/// Keeps the offline scan from starting until dropped, and stops one already
+/// running. For a write the main window does not make: its own guard keeps the
+/// scan clear of ITS writes, and never hears of the resolve window's — whose
+/// save then sat 32 s behind a scan that window started 0.38 s after it.
+///
+/// Raised BEFORE the kill reads the pid, so a scan that slips past its own
+/// check sees the count when it publishes its pid (see `p4::run_killable`).
+pub(crate) fn hold_offline_scan(state: &crate::index::AppState) -> ScanHold {
+    use std::sync::atomic::Ordering;
+    state.offline_writes.fetch_add(1, Ordering::SeqCst);
+    kill_offline_scan(state);
+    ScanHold(state.offline_writes.clone())
+}
+
+/// Lets the offline scan run again when the write is over, however it ends.
+pub(crate) struct ScanHold(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+impl Drop for ScanHold {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 /// The kill itself, for the write paths that are not a frontend command.

@@ -578,8 +578,10 @@ export const pending = {
       let recs: P4Record[];
       try {
         recs = await p4.status(conn);
-      } catch {
-        return true; // cancelled (by an interactive write) or failed — keep the list
+      } catch (e) {
+        // Held off by a write this window never saw (the resolve window's): try
+        // again shortly. Cancelled or failed: keep the list, normal interval.
+        return !/deferred/.test(String(e));
       }
       // Something wrote the workspace while this was running — a sync, a revert,
       // an unshelve. What came back describes the workspace mid-write, so it is

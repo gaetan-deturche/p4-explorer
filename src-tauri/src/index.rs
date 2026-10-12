@@ -5,7 +5,7 @@
 //! copy). Search is a fuzzy subsequence scorer run over that in-memory list —
 //! no `p4` call per keystroke, and case-insensitive by construction.
 
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::{Arc, Mutex};
 
 use rusqlite::Connection;
@@ -34,6 +34,9 @@ pub struct AppState {
     pub offline_pid: Arc<Mutex<Option<u32>>>,
     /// Set when an offline scan is cancelled, so its result is discarded.
     pub offline_abort: Arc<AtomicBool>,
+    /// Writes in progress that no offline scan may start under (see
+    /// `commands::sync::hold_offline_scan`).
+    pub offline_writes: Arc<AtomicUsize>,
 }
 
 impl AppState {
@@ -46,6 +49,7 @@ impl AppState {
             sync_abort: Arc::new(AtomicBool::new(false)),
             offline_pid: Arc::new(Mutex::new(None)),
             offline_abort: Arc::new(AtomicBool::new(false)),
+            offline_writes: Arc::new(AtomicUsize::new(0)),
         }
     }
 }

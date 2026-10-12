@@ -646,11 +646,18 @@ fn tagged_output(conn: &P4Conn, args: &[&str]) -> Result<std::process::Output, S
 /// Returns the warnings as well as the records: p4 refuses some files with a
 /// warning and NO data record (a `+l` file another client holds), and a scan
 /// that keeps only records drops the one sentence explaining the absence.
+///
+/// `held`, when given, is the count of writes the scan must not run under. It is
+/// re-read under the pid lock once the pid is published, which is the lock the
+/// write's kill reads the pid under: a write that came in between the caller's
+/// own check and the spawn either finds this pid or is seen here.
 pub fn run_killable(
     conn: &P4Conn,
     args: &[&str],
     pid_slot: &std::sync::Arc<std::sync::Mutex<Option<u32>>>,
+    held: Option<&std::sync::atomic::AtomicUsize>,
 ) -> Result<(Vec<Record>, Vec<String>), String> {
+    let deferred = std::cell::Cell::new(false);
     // Shares the auth retry (run_output) while still publishing the child PID so
     // the scan can be killed mid-flight.
     let out = run_output(conn, args, |c| {
@@ -673,18 +680,33 @@ pub fn run_killable(
             const CREATE_NO_WINDOW: u32 = 0x0800_0000;
             cmd.creation_flags(CREATE_NO_WINDOW);
         }
-        let child = cmd.spawn()?;
+        let mut child = cmd.spawn()?;
         let id = child.id();
-        *pid_slot.lock().unwrap() = Some(id);
+        {
+            let mut slot = pid_slot.lock().unwrap();
+            *slot = Some(id);
+            if held.is_some_and(|h| h.load(std::sync::atomic::Ordering::SeqCst) > 0) {
+                deferred.set(true);
+                let _ = child.kill();
+            }
+        }
         let out = child.wait_with_output();
         let mut s = pid_slot.lock().unwrap();
         if *s == Some(id) {
             *s = None;
         }
         out
-    })?;
+    });
+    if deferred.get() {
+        return Err(SCAN_DEFERRED.to_string());
+    }
+    let out = out?;
     parse_tagged(&out.stdout, out.status.success(), &out.stderr, true)
 }
+
+/// What a scan held off by a write answers. The frontend matches on "deferred"
+/// to try again shortly instead of a whole interval later.
+pub const SCAN_DEFERRED: &str = "offline scan deferred: a write is in progress";
 
 /// Like `run`, but a failure record (severity >= E_FAILED) is ALWAYS surfaced as
 /// an `Err`, even when the command also emitted data records. `run` lets data

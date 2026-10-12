@@ -340,11 +340,10 @@ pub(crate) fn merge_save_inner(app: &AppHandle, id: &str, text: &str) -> Result<
     };
     write_result(&target, text, splice)?;
     if kind == "resolve" {
-        // A workspace-wide `reconcile` holds server locks that block this write,
-        // so the scan goes down first — the same reason the pending list kills it
-        // before its own mutations.
+        // A workspace-wide `reconcile` blocks this write for most of its walk:
+        // stop one that is running AND keep one from starting until it is done.
         use tauri::Manager;
-        super::sync::kill_offline_scan(&app.state::<crate::index::AppState>());
+        let _hold = super::sync::hold_offline_scan(&app.state::<crate::index::AppState>());
         p4::run(&conn, &["resolve", "-ay", &depot])
             .map_err(|e| format!("the merge was written but p4 resolve failed: {e}"))?;
     }
