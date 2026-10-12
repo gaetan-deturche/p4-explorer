@@ -604,8 +604,13 @@
     });
   });
   const total = $derived(rows.reduce((sum, r) => sum + r * LH, 0));
-  /** Which change the view is on: the last one at or above the top of it, or the
-   *  first when the view sits above them all.
+  /** Where `goTo` parks a change in the viewport: far enough down that the lines
+   *  leading into it are visible. `current` has to reach that far or the change
+   *  just jumped to is never the current one. */
+  const LEAD = 1 / 3;
+
+  /** Which change the view is on: the last one at or above the reading line, or
+   *  the first when the view sits above them all.
    *
    *  DERIVED from the scroll, never remembered. The counter has to follow the
    *  scroll, and prev/next have to step from where the reader is looking rather
@@ -615,9 +620,13 @@
    *  survive rows that are not rendered, and this cannot fall out of step. */
   const current = $derived.by(() => {
     if (!changes.length) return 0;
+    // At the end of the document the scroll cannot give the lead-in, so the
+    // whole viewport counts there — otherwise the last change is never current
+    // and `next` sticks on it.
+    const reach = viewTop >= total - viewH - 1 ? viewH : viewH * LEAD;
     let at = 0;
     for (let k = 0; k < changes.length; k++) {
-      if (tops[changes[k]] <= viewTop + LH) at = k;
+      if (tops[changes[k]] <= viewTop + reach + LH) at = k;
       else break;
     }
     return at;
@@ -934,7 +943,7 @@ initSplit(leftText.trim() === "");
     // the DOM, so scrollIntoView had nothing to scroll to and a jump to a
     // distant change did nothing at all. A third of the way down, as the find
     // bar places its hits — the change reads better with its lead-in visible.
-    scrollEl.scrollTop = Math.max(0, tops[changes[at]] - scrollEl.clientHeight / 3);
+    scrollEl.scrollTop = Math.max(0, tops[changes[at]] - scrollEl.clientHeight * LEAD);
   }
 
   /** Actions that only look: caret, selection, copy. A read-only pane keeps
