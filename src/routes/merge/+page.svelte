@@ -480,7 +480,7 @@
   ): { from: number; to: number; lines: string[] } | null {
     const r = regions[i];
     const out = ds?.doc.regions[i]?.lines;
-    if (!r || !out || r.kind !== "conflict") return null;
+    if (!r || !out || r.kind === "same") return null;
     const line = side(r, which)[k];
     if (line === undefined) return null;
     if (k < out.length) return { from: k, to: k + 1, lines: [line] };
@@ -557,6 +557,22 @@
     });
     ds = next;
     origin = org;
+    scheduleRecolor();
+  }
+
+  /** Change how a block the merge settled on its own was applied: between the
+   *  side that changed it and the base. The merge takes the only candidate
+   *  there is, which is right nearly always — and checkable only if it can be
+   *  said otherwise. */
+  function flipMerged(i: number) {
+    if (!ds) return;
+    const r = regions[i];
+    if (!r || r.kind === "same" || r.kind === "conflict") return;
+    const atBase = origin[i] === "base";
+    hist = push(hist, ds, false);
+    typing = false;
+    ds = applyRegionLines(ds, i, atBase ? r.lines : r.base);
+    origin = { ...origin, [i]: atBase ? r.kind : "base" };
     scheduleRecolor();
   }
 
@@ -849,7 +865,12 @@
       const which = unsettled.map((i) => conflicts.indexOf(i) + 1).join(", ");
       return `Conflict ${which} still to settle — nothing was written.`;
     }
-    const at = text.split("\n").findIndex((l) => /^(<{7}|={7}|>{7})/.test(l));
+    // Anchored: `=======` alone, or seven then a label. Unaccented, the `={7}`
+    // form also matched Unreal's 77-character header rule on line 5 of every
+    // engine file, so nothing could ever be saved.
+    const at = text
+      .split("\n")
+      .findIndex((l) => /^(<{7}(?=[ \t\r]|$)|={7}\r?$|>{7}(?=[ \t\r]|$))/.test(l));
     if (at >= 0) {
       return `Conflict markers on line ${at + 1} — remove them before saving.`;
     }
@@ -892,7 +913,7 @@
     if (!data || !ds || unsettled.length) return;
     const problem = saveProblem(docText(ds.doc));
     if (problem) {
-      error = problem;
+      say(problem, true); // `error` is the load-failure branch: it hides the merge
       return;
     }
     saving = true;
@@ -1357,7 +1378,17 @@
               style="top:{tops[i]}px; height:{rows[i] * LH + (r.kind === 'conflict' ? TOOLBAR : 0)}px"
             >
               {#if r.kind === "conflict"}<div class="strip"></div>{/if}
-              {#if flow.left}
+              {#if r.kind === "theirs" || r.kind === "both"}
+                <!-- The merge decided this one, so the arrow is how to say otherwise. -->
+                <button
+                  class="arrow flip"
+                  class:base={origin[i] === "base"}
+                  title={origin[i] === "base"
+                    ? "Dropped back to the base — click to take the depot change again"
+                    : "Taken from the depot — click to drop it back to the base"}
+                  onclick={() => flipMerged(i)}>{origin[i] === "base" ? "=" : "▶"}</button
+                >
+              {:else if flow.left}
                 <div
                   class="arrow"
                   class:instrip={r.kind === "conflict"}
@@ -1370,11 +1401,12 @@
                   ?
                 </div>
               {/if}
-              {#if r.kind === "conflict"}
-                {@const w = windowOf(tops[i] + TOOLBAR, rows[i])}
+              {#if r.kind !== "same"}
+                {@const strip = r.kind === "conflict" ? TOOLBAR : 0}
+                {@const w = windowOf(tops[i] + strip, rows[i])}
                 {#each Array.from({ length: Math.max(0, w.last - w.first + 1) }, (_, n) => w.first + n) as k (k)}
                   {#if lineTake(i, "theirs", k)}
-                    <div class="linewrap" style="top:{TOOLBAR + k * LH}px">
+                    <div class="linewrap" style="top:{strip + k * LH}px">
                       <button class="linetake" title="Take this one line from the depot" onclick={() => takeLine(i, "theirs", k)}>›</button>
                     </div>
                   {/if}
@@ -1412,7 +1444,17 @@
               style="top:{tops[i]}px; height:{rows[i] * LH + (r.kind === 'conflict' ? TOOLBAR : 0)}px"
             >
               {#if r.kind === "conflict"}<div class="strip"></div>{/if}
-              {#if flow.right}
+              {#if r.kind === "ours" || r.kind === "both"}
+                <!-- The merge decided this one, so the arrow is how to say otherwise. -->
+                <button
+                  class="arrow flip"
+                  class:base={origin[i] === "base"}
+                  title={origin[i] === "base"
+                    ? "Dropped back to the base — click to take the workspace change again"
+                    : "Taken from the workspace — click to drop it back to the base"}
+                  onclick={() => flipMerged(i)}>{origin[i] === "base" ? "=" : "◀"}</button
+                >
+              {:else if flow.right}
                 <div
                   class="arrow"
                   class:instrip={r.kind === "conflict"}
@@ -1425,11 +1467,12 @@
                   ?
                 </div>
               {/if}
-              {#if r.kind === "conflict"}
-                {@const w = windowOf(tops[i] + TOOLBAR, rows[i])}
+              {#if r.kind !== "same"}
+                {@const strip = r.kind === "conflict" ? TOOLBAR : 0}
+                {@const w = windowOf(tops[i] + strip, rows[i])}
                 {#each Array.from({ length: Math.max(0, w.last - w.first + 1) }, (_, n) => w.first + n) as k (k)}
                   {#if lineTake(i, "ours", k)}
-                    <div class="linewrap" style="top:{TOOLBAR + k * LH}px">
+                    <div class="linewrap" style="top:{strip + k * LH}px">
                       <button class="linetake" title="Take this one line from the workspace" onclick={() => takeLine(i, "ours", k)}>‹</button>
                     </div>
                   {/if}
@@ -1803,6 +1846,16 @@
   .arrow {
     color: #7cc47c;
     line-height: 1.45;
+  }
+  .arrow.flip {
+    background: none;
+    border: 0;
+    padding: 0;
+    font: inherit;
+    cursor: pointer;
+  }
+  .arrow.flip.base {
+    color: var(--text-dim, #999);
   }
   .arrow.open {
     color: #e0555a;
