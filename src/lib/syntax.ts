@@ -4,6 +4,7 @@
 
 import { createHighlighterCore, type HighlighterCore } from "shiki/core";
 import { TokenSession, type Tokenizer } from "./tokensession";
+import { findEmbedded, LayeredSession } from "./embedded";
 
 /** One colored run of a highlighted line (concat of a line's runs = the line). */
 export interface TokenRun {
@@ -142,6 +143,44 @@ function stateIsLost(lang: string, state: unknown): boolean {
   return scopes.some((s) => s.startsWith("string.") && !s.includes(".raw"));
 }
 
+// --- GLSL types inside C constructs ------------------------------------------
+
+/** GLSL's built-in types. The stock rule lacks ivec4, uvec4, dvec*, double and
+ *  every image type — the ones a compute shader is made of. */
+const GLSL_TYPES =
+  "\\b(void|bool|int|uint|float|double|[biud]?vec[234]|d?mat[234](?:x[234])?|struct" +
+  "|[iu]?sampler(?:[123]D|Cube|2DRect|[12]DArray|Buffer|2DMS|2DMSArray|CubeArray)" +
+  "|sampler(?:[12]D|2DRect|[12]DArray|Cube|CubeArray)Shadow" +
+  "|[iu]?image(?:[123]D|Cube|2DRect|[12]DArray|Buffer|2DMS|2DMSArray|CubeArray))\\b";
+
+/** Make GLSL's types types wherever they are written.
+ *
+ *  The GLSL grammar matches them at the top level and hands everything else to
+ *  the C grammar, which has never heard of `vec3`: a parameter type or a local
+ *  declaration came out plain, and a constructor came out as a function call,
+ *  while `int` and `float` — C types — were types everywhere. An injection
+ *  rooted at source.glsl reaches into every C construct, and only inside GLSL.
+ *  Applied to every module, since C++ bundles its own copy of the GLSL grammar
+ *  and whichever registers first is the one used. */
+function teachGlslTypes(mod: unknown): unknown {
+  const grammars = (mod as { default?: unknown }).default ?? mod;
+  if (!Array.isArray(grammars)) return mod;
+  const at = (grammars as { scopeName?: string }[]).findIndex((g) => g.scopeName === "source.glsl");
+  if (at < 0) return mod;
+  // A copy: Shiki's grammar objects are frozen, and adding a key to one threw —
+  // which makeTokenizer swallows, so GLSL simply stopped being coloured.
+  const copy = grammars.slice();
+  copy[at] = {
+    ...grammars[at],
+    injections: {
+      "L:source.glsl -comment -string": {
+        patterns: [{ name: "storage.type.glsl", match: GLSL_TYPES }],
+      },
+    },
+  };
+  return copy;
+}
+
 // --- a tokenizer over one language ------------------------------------------
 
 /** The `]` of a lambda capture, as the grammar refuses to end one: not before a
@@ -185,7 +224,7 @@ export async function makeTokenizer(lang: string, dark: boolean): Promise<Tokeni
   try {
     const hl = await core();
     if (!loadedLangs.has(lang)) {
-      await hl.loadLanguage(unbreakCppLambdas(await LANG_LOAD[lang]()) as never);
+      await hl.loadLanguage(teachGlslTypes(unbreakCppLambdas(await LANG_LOAD[lang]())) as never);
       loadedLangs.add(lang);
     }
     const theme = dark ? "dark-plus" : "light-plus";
@@ -209,6 +248,30 @@ export async function makeTokenizer(lang: string, dark: boolean): Promise<Tokeni
   } catch {
     return null; // unhighlighted is fine
   }
+}
+
+/** What a session answers, wherever it runs. */
+export interface WindowSession {
+  readonly lineCount: number;
+  window(from: number, count: number): TokenRun[][];
+}
+
+/** A session over `text`: its own grammar, plus the grammar of any other
+ *  language it carries in its strings — GLSL in a Python add-on's shader
+ *  sources, which is most of such a file and was all one string colour. */
+export async function makeSession(text: string, lang: string, dark: boolean): Promise<WindowSession | null> {
+  const tk = await makeTokenizer(lang, dark);
+  if (!tk) return null;
+  const host = new TokenSession(text, tk);
+  const found = findEmbedded(text, lang);
+  if (!found.length) return host;
+  const lines = text.replace(/\r/g, "").split("\n");
+  const parts: ConstructorParameters<typeof LayeredSession>[1] = [];
+  for (const at of found) {
+    const inner = await makeTokenizer(at.lang, dark);
+    if (inner) parts.push({ at, session: new TokenSession(lines.slice(at.from, at.to).join("\n"), inner) });
+  }
+  return parts.length ? new LayeredSession(host, parts) : host;
 }
 
 // --- off the main thread ----------------------------------------------------
@@ -287,9 +350,8 @@ export async function openSyntax(
   }
   // No worker: the same session, on this thread. Slower to open a big file, but
   // still only a window's worth of colouring per scroll.
-  const tk = await makeTokenizer(lang, dark);
-  if (!tk) return null;
-  const session = new TokenSession(text, tk);
+  const session = await makeSession(text, lang, dark);
+  if (!session) return null;
   return {
     lineCount: session.lineCount,
     window: (from, count) => Promise.resolve(session.window(from, count)),

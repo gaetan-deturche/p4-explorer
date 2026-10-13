@@ -10,8 +10,7 @@
 //! (69710 of them for HLSLMaterialTranslator.cpp, which is what the one-shot
 //! version had to clone back).
 
-import { makeTokenizer, type TokenRun } from "./syntax";
-import { TokenSession } from "./tokensession";
+import { makeSession, type TokenRun, type WindowSession } from "./syntax";
 
 interface Open {
   k: "open";
@@ -34,7 +33,7 @@ interface Close {
   id: number;
 }
 
-const sessions = new Map<number, TokenSession>();
+const sessions = new Map<number, WindowSession>();
 const post = (msg: { req: number; lines?: number; runs?: TokenRun[][] }) =>
   (self as unknown as Worker).postMessage(msg);
 
@@ -42,9 +41,8 @@ self.onmessage = async (e: MessageEvent<Open | Win | Close>) => {
   const m = e.data;
   try {
     if (m.k === "open") {
-      const tk = await makeTokenizer(m.lang, m.dark);
-      if (!tk) return post({ req: m.req, lines: -1 });
-      const session = new TokenSession(m.text, tk);
+      const session = await makeSession(m.text, m.lang, m.dark);
+      if (!session) return post({ req: m.req, lines: -1 });
       sessions.set(m.id, session);
       // Nothing is tokenized yet: the state is walked only as far as the first
       // window asked for, so opening a file costs nothing.
