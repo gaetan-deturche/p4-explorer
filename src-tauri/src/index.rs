@@ -1,22 +1,57 @@
 //! Local file index (SQLite) powering per-keystroke fuzzy search.
 //!
 //! On workspace open we snapshot every depot path under the stream root into a
-//! SQLite table, then load it into memory as `Entry` rows (path + lowercased
-//! copy). Search is a fuzzy subsequence scorer run over that in-memory list —
-//! no `p4` call per keystroke, and case-insensitive by construction.
+//! SQLite table, then load it into memory as one `Paths` buffer. Search is a
+//! case-insensitive substring + fuzzy subsequence pass over that buffer — no
+//! `p4` call per keystroke.
 
-use std::sync::atomic::{AtomicBool, AtomicUsize};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use rusqlite::Connection;
-use tauri::State;
+use tauri::{Manager, State};
 
 use crate::p4::{self, P4Conn};
 
-pub struct Entry {
-    pub path: String,
-    pub lower: String,
+/// Every path of one index in one buffer. A String per path, plus a lowercase
+/// copy, cost 5.4 GB for the 18.7M-path depot; this is the 2.2 GB of text plus
+/// one offset each. Matching folds ASCII case on the fly instead.
+pub struct Paths {
+    text: String,
+    ends: Vec<usize>,
 }
+
+impl Paths {
+    fn new(paths: Vec<String>) -> Self {
+        let mut text = String::with_capacity(paths.iter().map(String::len).sum());
+        let mut ends = Vec::with_capacity(paths.len());
+        for p in &paths {
+            text.push_str(p);
+            ends.push(text.len());
+        }
+        Paths { text, ends }
+    }
+    fn len(&self) -> usize {
+        self.ends.len()
+    }
+    fn get(&self, i: usize) -> &str {
+        let from = if i == 0 { 0 } else { self.ends[i - 1] };
+        &self.text[from..self.ends[i]]
+    }
+}
+
+/// One index held in memory, with when it was last searched (for eviction).
+struct Loaded {
+    key: String,
+    paths: Arc<Paths>,
+    used: u64,
+}
+
+/// Path text kept in memory across indexes. Workspace and Local stay resident
+/// together (~60 MB each); the depot alone is over it, so it evicts them and is
+/// evicted in turn when they come back.
+const MEM_BUDGET: usize = 1 << 30;
 
 pub struct AppState {
     /// The file index's connection — long scans and bulk inserts live here.
@@ -24,8 +59,14 @@ pub struct AppState {
     /// The cache table's own connection: cache reads back the ENTIRE UI at
     /// boot, so they must never queue behind an index scan on `db`.
     pub cache_db: Mutex<Connection>,
-    /// (client, entries) currently loaded in memory for searching.
-    pub mem: Mutex<Option<(String, Arc<Vec<Entry>>)>>,
+    /// The indexes loaded in memory for searching.
+    mem: Mutex<Vec<Loaded>>,
+    /// Held while an index loads from SQLite: searches typed meanwhile wait for
+    /// that one load instead of each running their own.
+    loading: Mutex<()>,
+    /// Bumped by every search; a scan that sees it move is abandoned, since the
+    /// panel only shows the newest keystroke's answer.
+    search_gen: AtomicU64,
     /// PIDs of the running `p4 sync` children (preview + real; for cancellation).
     pub sync_pids: Arc<Mutex<Vec<u32>>>,
     /// Set when the user cancels a sync, so the backend stops between phases.
@@ -44,7 +85,9 @@ impl AppState {
         AppState {
             db: Mutex::new(db),
             cache_db: Mutex::new(cache_db),
-            mem: Mutex::new(None),
+            mem: Mutex::new(Vec::new()),
+            loading: Mutex::new(()),
+            search_gen: AtomicU64::new(0),
             sync_pids: Arc::new(Mutex::new(Vec::new())),
             sync_abort: Arc::new(AtomicBool::new(false)),
             offline_pid: Arc::new(Mutex::new(None)),
@@ -173,31 +216,47 @@ pub async fn cache_del(
     Ok(())
 }
 
-fn to_entries(paths: Vec<String>) -> Arc<Vec<Entry>> {
-    Arc::new(
-        paths
-            .into_iter()
-            .map(|p| {
-                let lower = p.to_lowercase();
-                Entry { path: p, lower }
-            })
-            .collect(),
-    )
+/// The index for `key` if it is in memory, marked as just used.
+fn cached(state: &AppState, key: &str) -> Option<Arc<Paths>> {
+    static CLOCK: AtomicU64 = AtomicU64::new(0);
+    let mut mem = state.mem.lock().unwrap();
+    let l = mem.iter_mut().find(|l| l.key == key)?;
+    l.used = CLOCK.fetch_add(1, Ordering::Relaxed) + 1;
+    Some(l.paths.clone())
+}
+
+/// Keep `paths` in memory as `key`'s index, evicting the least recently used
+/// others while the total is over `MEM_BUDGET`.
+fn remember(state: &AppState, key: &str, paths: Arc<Paths>) {
+    let mut mem = state.mem.lock().unwrap();
+    mem.retain(|l| l.key != key);
+    mem.push(Loaded { key: key.to_string(), paths, used: u64::MAX });
+    mem.sort_by_key(|l| std::cmp::Reverse(l.used));
+    let mut total = 0;
+    mem.retain(|l| {
+        total += l.paths.text.len();
+        l.used == u64::MAX || total <= MEM_BUDGET
+    });
+    drop(mem);
+    cached(state, key); // a real timestamp in place of the MAX placeholder
 }
 
 /// Ensure the in-memory index for `client` is loaded (from SQLite if needed).
-/// Returns the entry list (empty if the client has never been indexed).
-fn ensure_loaded(state: &AppState, client: &str) -> Arc<Vec<Entry>> {
-    if let Some((c, e)) = state.mem.lock().unwrap().as_ref() {
-        if c == client {
-            return e.clone();
-        }
+/// Returns the paths (empty if the client has never been indexed).
+fn ensure_loaded(state: &AppState, client: &str) -> Arc<Paths> {
+    if let Some(p) = cached(state, client) {
+        return p;
     }
+    let _one = state.loading.lock().unwrap();
+    if let Some(p) = cached(state, client) {
+        return p; // loaded by the search this one queued behind
+    }
+    let t = Instant::now();
     let paths: Vec<String> = {
         let db = state.db.lock().unwrap();
         let mut stmt = match db.prepare("SELECT path FROM file_index WHERE client=?1") {
             Ok(s) => s,
-            Err(_) => return Arc::new(Vec::new()),
+            Err(_) => return Arc::new(Paths::new(Vec::new())),
         };
         let rows = stmt.query_map([client], |r| r.get::<_, String>(0));
         match rows {
@@ -205,9 +264,23 @@ fn ensure_loaded(state: &AppState, client: &str) -> Arc<Vec<Entry>> {
             Err(_) => Vec::new(),
         }
     };
-    let entries = to_entries(paths);
-    *state.mem.lock().unwrap() = Some((client.to_string(), entries.clone()));
-    entries
+    let paths = Arc::new(Paths::new(paths));
+    p4::log_note(&format!(
+        "index {client}: loaded {} paths ({} MB) in {} ms",
+        paths.len(),
+        paths.text.len() >> 20,
+        t.elapsed().as_millis()
+    ));
+    remember(state, client, paths.clone());
+    paths
+}
+
+/// Load `client`'s index into memory ahead of the first keystroke.
+#[tauri::command]
+pub async fn index_preload(app: tauri::AppHandle, client: String) -> Result<usize, String> {
+    tauri::async_runtime::spawn_blocking(move || ensure_loaded(&app.state::<AppState>(), &client).len())
+        .await
+        .map_err(|e| format!("index task failed: {e}"))
 }
 
 /// Number of indexed files for a client (0 = needs building). A COUNT query, so
@@ -242,6 +315,7 @@ fn server_files(conn: &P4Conn, pattern: &str) -> Result<Vec<String>, String> {
 /// Store `paths` under `key` (replacing any prior rows) and load into memory.
 fn store_paths(state: &AppState, key: &str, paths: Vec<String>) -> Result<usize, String> {
     let n = paths.len();
+    let t = Instant::now();
     {
         let mut db = state.db.lock().unwrap();
         let tx = db.transaction().map_err(|e| e.to_string())?;
@@ -262,12 +336,17 @@ fn store_paths(state: &AppState, key: &str, paths: Vec<String>) -> Result<usize,
         // let the WAL grow unbounded.
         checkpoint(&db);
     }
-    *state.mem.lock().unwrap() = Some((key.to_string(), to_entries(paths)));
+    p4::log_note(&format!("index {key}: stored {n} paths in {} ms", t.elapsed().as_millis()));
+    remember(state, key, Arc::new(Paths::new(paths)));
     Ok(n)
 }
 
+/// Build output: 3.0M of a UE workspace's 3.56M files on disk, and nothing a
+/// file search is for. Skipping them took the walk from ~3 min to 10 s.
+const BUILD_OUTPUT_DIRS: [&str; 6] = ["intermediate", "binaries", "saved", "deriveddatacache", ".vs", ".git"];
+
 /// Recursively collect every file under `dir`, as depot-form paths rooted at
-/// `base` (i.e. `base/<relative path with '/' separators>`).
+/// `base` (i.e. `base/<relative path with '/' separators>`), build output aside.
 fn walk_local(dir: &std::path::Path, base: &str, out: &mut Vec<String>) {
     let Ok(rd) = std::fs::read_dir(dir) else { return };
     for e in rd.flatten() {
@@ -275,6 +354,9 @@ fn walk_local(dir: &std::path::Path, base: &str, out: &mut Vec<String>) {
         let name = e.file_name().to_string_lossy().to_string();
         let child = format!("{base}/{name}");
         if ft.is_dir() {
+            if BUILD_OUTPUT_DIRS.iter().any(|d| name.eq_ignore_ascii_case(d)) {
+                continue;
+            }
             walk_local(&e.path(), &child, out);
         } else if ft.is_file() {
             out.push(child);
@@ -323,11 +405,14 @@ pub async fn index_build_local(
     root: String,
     root_path: String,
 ) -> Result<usize, String> {
+    let walked = key.clone();
     let paths = tauri::async_runtime::spawn_blocking(move || {
+        let t = Instant::now();
         let mut out = Vec::new();
         if !root.is_empty() {
             walk_local(std::path::Path::new(&root), root_path.trim_end_matches('/'), &mut out);
         }
+        p4::log_note(&format!("index {walked}: walked {} files in {} ms", out.len(), t.elapsed().as_millis()));
         out
     })
     .await
@@ -349,54 +434,119 @@ pub struct SearchHits {
 /// Search the client's index, case-insensitively. `max` caps each list.
 #[tauri::command]
 pub async fn index_search(
-    state: State<'_, AppState>,
+    app: tauri::AppHandle,
     client: String,
     query: String,
     max: usize,
 ) -> Result<SearchHits, String> {
-    let entries = ensure_loaded(&state, &client);
+    let gen = app.state::<AppState>().search_gen.fetch_add(1, Ordering::SeqCst) + 1;
+    tauri::async_runtime::spawn_blocking(move || search(&app.state::<AppState>(), gen, &client, &query, max))
+        .await
+        .map_err(|e| format!("index task failed: {e}"))
+}
+
+/// `contains` against an already-lowercased `q`, folding ASCII case in `hay`.
+fn contains_folded(hay: &[u8], q: &[u8]) -> bool {
+    if q.is_empty() || q.len() > hay.len() {
+        return q.is_empty();
+    }
+    let (lower, upper) = (q[0], q[0].to_ascii_uppercase());
+    let last = hay.len() - q.len();
+    let mut i = 0;
+    while i <= last {
+        match hay[i..=last].iter().position(|&b| b == lower || b == upper) {
+            Some(k) => i += k,
+            None => return false,
+        }
+        if hay[i + 1..i + q.len()].eq_ignore_ascii_case(&q[1..]) {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+/// The first `max` of `v` in `cmp` order, sorting only those.
+fn keep_first<T>(v: &mut Vec<T>, max: usize, cmp: impl Fn(&T, &T) -> std::cmp::Ordering) {
+    if max == 0 {
+        v.clear();
+        return;
+    }
+    if v.len() > max {
+        v.select_nth_unstable_by(max - 1, &cmp);
+        v.truncate(max);
+    }
+    v.sort_by(cmp);
+}
+
+/// The search behind `index_search`: empty when search `gen` has been
+/// superseded, which the panel discards unseen anyway.
+fn search(state: &AppState, gen: u64, client: &str, query: &str, max: usize) -> SearchHits {
+    let t = Instant::now();
+    let paths = ensure_loaded(state, client);
     let q = query.trim().to_lowercase();
-    if q.is_empty() || entries.is_empty() {
-        return Ok(SearchHits::default());
+    if q.is_empty() || paths.len() == 0 {
+        return SearchHits::default();
     }
     let qb = q.as_bytes();
+    let superseded = || state.search_gen.load(Ordering::SeqCst) != gen;
 
     let mut scored: Vec<(i32, usize)> = Vec::new();
     let mut contains: Vec<usize> = Vec::new();
-    for (i, e) in entries.iter().enumerate() {
-        if e.lower.contains(&q) {
+    for i in 0..paths.len() {
+        if i % 65536 == 0 && superseded() {
+            p4::log_note(&format!("index {client}: search \"{q}\" superseded after {} ms", t.elapsed().as_millis()));
+            return SearchHits::default();
+        }
+        let path = paths.get(i);
+        // ASCII case folds byte by byte; anything else takes the full lowercase.
+        let lowered;
+        let p = if path.is_ascii() {
+            path
+        } else {
+            lowered = path.to_lowercase();
+            lowered.as_str()
+        };
+        if contains_folded(p.as_bytes(), qb) {
             contains.push(i);
         }
         // Fuzzy suggestions score the FILE NAME, not the whole path: a query
         // scattered across a long path is meaningless as a "did you mean"
         // ("linefilter.ush" would otherwise match Definitions.BuildPatchServices.h
         // by picking letters out of the directories).
-        let name = match e.lower.rfind('/') {
-            Some(k) => &e.lower[k + 1..],
-            None => e.lower.as_str(),
+        let name = match p.rfind('/') {
+            Some(k) => &p[k + 1..],
+            None => p,
         };
         if let Some(s) = fuzzy_score(qb, name) {
             scored.push((s, i));
         }
     }
+    let found = (contains.len(), scored.len());
     // Highest score first; tie-break shorter path, then alphabetical.
-    scored.sort_by(|a, b| {
+    keep_first(&mut scored, max, |a, b| {
         b.0.cmp(&a.0)
-            .then_with(|| entries[a.1].path.len().cmp(&entries[b.1].path.len()))
-            .then_with(|| entries[a.1].path.cmp(&entries[b.1].path))
+            .then_with(|| paths.get(a.1).len().cmp(&paths.get(b.1).len()))
+            .then_with(|| paths.get(a.1).cmp(paths.get(b.1)))
     });
-    scored.truncate(max);
     // Substring hits stay in index order (alphabetical by path) — a filtered
     // view of the tree, not a ranking.
-    contains.sort_by(|&a, &b| entries[a].path.cmp(&entries[b].path));
-    contains.truncate(max);
-    Ok(SearchHits {
-        contains: contains.into_iter().map(|i| entries[i].path.clone()).collect(),
-        fuzzy: scored.into_iter().map(|(_, i)| entries[i].path.clone()).collect(),
-    })
+    keep_first(&mut contains, max, |&a, &b| paths.get(a).cmp(paths.get(b)));
+    p4::log_note(&format!(
+        "index {client}: search \"{q}\" {} ms ({} contains, {} fuzzy of {})",
+        t.elapsed().as_millis(),
+        found.0,
+        found.1,
+        paths.len()
+    ));
+    SearchHits {
+        contains: contains.into_iter().map(|i| paths.get(i).to_string()).collect(),
+        fuzzy: scored.into_iter().map(|(_, i)| paths.get(i).to_string()).collect(),
+    }
 }
 
-/// fzf-style subsequence scorer. `None` if `q` is not a subsequence of `path`.
+/// fzf-style subsequence scorer, folding ASCII case in `path` against a
+/// lowercase `q`. `None` if `q` is not a subsequence of `path`.
 /// Rewards contiguous runs and matches at word boundaries (after / _ - . space
 /// or a digit→alpha change), and gently prefers shorter paths.
 fn fuzzy_score(q: &[u8], path: &str) -> Option<i32> {
@@ -409,7 +559,7 @@ fn fuzzy_score(q: &[u8], path: &str) -> Option<i32> {
         if qi >= q.len() {
             break;
         }
-        if c == q[qi] {
+        if c.to_ascii_lowercase() == q[qi] {
             let mut s = 1;
             if i as i32 == last + 1 {
                 streak += 1;

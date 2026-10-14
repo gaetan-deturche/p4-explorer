@@ -96,6 +96,7 @@ let source = $state<BrowseSource>(loadBrowseSource()); // Files pane data source
 let showDeleted = $state(loadShowDeleted());
 let refreshing = $state(false);
 let indexing = $state(false);
+let wsBuilding = false; // a workspace index build is running (first build or refresh)
 let indexCount = $state(0);
 // Streams are DERIVED from the store (scope `p4:streams`, key = port) — the same
 // single-path rule as the pending list. `loadStreams()` only writes the store;
@@ -262,6 +263,13 @@ function depotKey(): string {
 }
 function srcKey(): string {
   return source === "depot" ? depotKey() : source === "local" ? localKey() : wsKey();
+}
+
+/** Load the current source's index into memory, so the first keystroke does
+ *  not pay for it (15 s for a cold 3.5M-path Local index). */
+function preloadIndex() {
+  if (!h || (source === "depot" ? !h.conn().port : !h.conn().client)) return;
+  void idx.preload(srcKey()).catch(() => {});
 }
 
 // --- the derived tree ---------------------------------------------------------
@@ -537,6 +545,7 @@ export const browse = {
     source = s;
     saveBrowseSource(s); // persist across workspace switch + restart
     if (s === "local") void browse.refreshLocalIndexIfStale();
+    preloadIndex();
     selectedTreePath = "";
     const rootP = rootPathForSource();
     // The History tab describes what the Files pane has selected, so a source
@@ -658,14 +667,18 @@ export const browse = {
   // local = local:<client>, depot = depot:<port> (shared per server).
   // Build (or rebuild) the workspace (server-stream) index.
   async buildIndex() {
-    if (!h || !h.connected() || !h.conn().client || !rootPath || indexing) return;
-    indexing = true;
+    if (!h || !h.connected() || !h.conn().client || !rootPath || wsBuilding) return;
+    wsBuilding = true;
+    // "Building index…" only when there is none yet: a rebuild searches the old one.
+    indexing = indexCount === 0;
     try {
       indexCount = await idx.build(h.conn(), wsKey(), rootPath);
+      cacheSet("nav", `idxwsbuilt:${wsKey()}`, String(Date.now()));
     } catch {
       /* leave count as-is */
     } finally {
       indexing = false;
+      wsBuilding = false;
     }
   },
   // Rebuild the on-disk (Local) index in the background — disk state can change.
@@ -707,8 +720,12 @@ export const browse = {
     } catch {
       indexCount = 0;
     }
-    if (indexCount === 0) browse.buildIndex();
+    // The workspace index was only built when missing, so it never saw a file
+    // added since; rebuild it on the same half-hour rule as Local.
+    const builtAt = Number((await cacheGet("nav", `idxwsbuilt:${wsKey()}`)) ?? 0);
+    if (indexCount === 0 || Date.now() - builtAt > 30 * 60 * 1000) void browse.buildIndex();
     void browse.refreshLocalIndexIfStale(); // NOT unconditional — see the method
+    preloadIndex();
   },
   // Ensure the whole-depot index exists (build once per server, eager on connect).
   async ensureDepotIndex() {
@@ -731,6 +748,35 @@ export const browse = {
     selectedTreePath = depotFile;
     h?.setTab("history"); // explicit user navigation → show History
     history.selectFile(depotFile);
+  },
+  /** A folder picked in the search results: its changelists, as a tree click. */
+  openFolderResult(path: string) {
+    selectedTreePath = path;
+    h?.setTab("history");
+    history.loadFolder(path);
+  },
+  /** Open every folder above `path`, so the tree can show it among its
+   *  neighbours — where leaving a search lands. */
+  async reveal(path: string) {
+    const rootP = rootPathForSource();
+    if (!h || !path || !rootP || !path.startsWith(rootP)) return;
+    const segs = path.slice(rootP.length).split("/").filter(Boolean);
+    const dirs = [rootP];
+    let acc = rootP === "//" ? "/" : rootP;
+    for (const s of segs.slice(0, -1)) dirs.push((acc += "/" + s));
+    const exp = expandedSet();
+    const shut = dirs.filter((d) => !exp.has(d));
+    // Every level loads while still closed, then all open in ONE re-derive:
+    // opening each as it arrived played the descent out row by row.
+    await Promise.all(
+      shut.map(async (d) => {
+        await openFolder(d);
+        // Local returns before reading the disk; the open needs the listing.
+        if (source === "local" && !readFolder(d)) await ensureFolder(d);
+      }),
+    );
+    for (const d of shut) exp.add(d);
+    treeVer++;
   },
 
   // --- Streams tab -----------------------------------------------------------

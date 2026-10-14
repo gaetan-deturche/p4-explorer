@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tick } from "svelte";
   import type { SearchHits } from "$lib/p4";
   import type { TreeNode } from "$lib/tree";
 
@@ -11,6 +12,8 @@
     onExpand,
     onSearch,
     onOpenResult,
+    onOpenFolder,
+    onReveal,
     onContext,
   }: {
     root: TreeNode | null;
@@ -24,13 +27,18 @@
     // Index search: literal matches filter the view, fuzzy ones are suggestions.
     onSearch?: (term: string) => Promise<SearchHits>;
     onOpenResult?: (depotFile: string) => void; // click a search result
+    onOpenFolder?: (path: string) => void; // click a folder in the search results
+    /** Open the tree down to `path`; resolves once its folders are loaded. */
+    onReveal?: (path: string) => Promise<void>;
     // right-click a row → (target, event, the selection it belongs to). Only the
     // path and kind are needed, which lets search results use it too — they are
-    // not tree nodes and have no expansion or fstat state to invent.
+    // not tree nodes and have no expansion or fstat state to invent. A result
+    // also hands over how to show it in the tree.
     onContext?: (
       target: { path: string; isDir: boolean },
       e: MouseEvent,
       selection: { path: string; isDir: boolean }[],
+      showInTree?: () => void,
     ) => void;
   } = $props();
 
@@ -91,7 +99,14 @@
     if (!onContext) return;
     e.preventDefault();
     const target = { path: c.path, isDir: c.isDir };
-    onContext(target, e, [target]);
+    onContext(target, e, [target], () => showInTree(c));
+  }
+
+  /** Leave the search with `c` selected, shown among its neighbours. */
+  function showInTree(c: { path: string; isDir: boolean }) {
+    if (c.isDir) onOpenFolder?.(c.path);
+    else onOpenResult?.(c.path);
+    clearSearch(c.path);
   }
 
   let query = $state("");
@@ -142,7 +157,12 @@
   async function runSearch(term: string) {
     if (!onSearch) return;
     const mine = ++seq;
-    const r = await onSearch(term);
+    let r: SearchHits;
+    try {
+      r = await onSearch(term);
+    } catch {
+      r = { contains: [], fuzzy: [] }; // never leave "Searching…" up for good
+    }
     if (mine !== seq) return; // superseded by a newer keystroke / cleared
     hits = r;
     suggestOpen = true;
@@ -185,13 +205,23 @@
     }
   }
 
-  function clearSearch() {
+  /** Back to the tree, opened down to `reveal` (the selection by default) and
+   *  scrolled to it: the search is how you got there, not where you meant to stay. */
+  function clearSearch(reveal = selectedPath) {
     seq++; // drop any in-flight search
     query = "";
     hits = null;
     suggestOpen = false;
     searching = false;
     collapsed = {};
+    if (reveal && onReveal) void onReveal(reveal).then(() => scrollToRow(reveal));
+  }
+
+  let body: HTMLDivElement | undefined = $state();
+  async function scrollToRow(path: string) {
+    await tick();
+    const row = body?.querySelector(`.row[data-path="${CSS.escape(path)}"]`);
+    row?.scrollIntoView({ block: "center" });
   }
 
   // Build a folder hierarchy from the flat search-result paths, rooted at the
@@ -282,7 +312,7 @@
         spellcheck="false"
       />
       {#if query}
-        <button class="clear" title="Clear" onclick={clearSearch}>✕</button>
+        <button class="clear" title="Clear" onclick={() => clearSearch()}>✕</button>
       {/if}
       <!-- Fuzzy suggestions: near-misses the literal filter below won't show
            (↑/↓ to pick, Enter to open, Esc to dismiss). -->
@@ -307,7 +337,7 @@
     </div>
   {/if}
 
-  <div class="scroll body">
+  <div class="scroll body" bind:this={body}>
     {#if hits !== null || query.trim()}
       <!-- Search mode: the view lists LITERAL (case-insensitive substring)
            matches, so what you typed is what you see; fuzzy near-misses are
@@ -343,14 +373,16 @@
 {#snippet resultNodes(node: RNode, depth: number)}
   {#each node.children as c (c.path)}
     {@const open = !collapsed[c.path]}
-    <div class="row" class:selected={!c.isDir && c.path === selectedPath} style="padding-left:{depth * 14 + 4}px">
+    <div class="row" class:selected={c.path === selectedPath} style="padding-left:{depth * 14 + 4}px">
       {#if c.isDir}
         <button class="tw" title="Expand / collapse" onclick={() => toggleCollapse(c.path)}>
           {open ? "▾" : "▸"}
         </button>
         <button
           class="main mono"
-          onclick={() => toggleCollapse(c.path)}
+          title={c.path}
+          onclick={() => (onOpenFolder ? onOpenFolder(c.path) : toggleCollapse(c.path))}
+          ondblclick={() => toggleCollapse(c.path)}
           oncontextmenu={(e) => rowContext(c, e)}
         >
           <span class="ic">📁</span><span class="name">{c.name}</span>
@@ -376,6 +408,7 @@
 {#snippet nodeRow(node: TreeNode, depth: number)}
   <div
     class="row"
+    data-path={node.path}
     class:selected={node.path === selectedPath}
     class:multisel={selected.size > 1 && selected.has(node.path)}
     style="padding-left:{depth * 14 + 4}px"

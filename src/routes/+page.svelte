@@ -99,6 +99,7 @@
     path: string;
     isDir: boolean;
     targets: SyncTarget[]; // the tree selection the actions apply to
+    showInTree?: () => void; // set for a search result
   } | null>(null);
 
   // In-app confirm dialog (replaces window.confirm).
@@ -1013,9 +1014,15 @@
   }
 
   // --- depot tree: right-click to sync / reconcile just this path ------------
-  function onTreeContext(path: string, isDir: boolean, e: MouseEvent, targets: SyncTarget[]) {
+  function onTreeContext(
+    path: string,
+    isDir: boolean,
+    e: MouseEvent,
+    targets: SyncTarget[],
+    showInTree?: () => void,
+  ) {
     if (!connection.connected || !conn.client) return;
-    treeCtx = { x: e.clientX, y: e.clientY, path, isDir, targets };
+    treeCtx = { x: e.clientX, y: e.clientY, path, isDir, targets, showInTree };
   }
 
   // --- Streams tab: switching reconfigures the current workspace --------------
@@ -1321,12 +1328,15 @@
           onExpand={(n) => browse.expandNode(n)}
           onSearch={(t) => browse.searchDepot(t)}
           onOpenResult={(f) => browse.openResult(f)}
-          onContext={(n, e, sel) =>
+          onOpenFolder={(p) => browse.openFolderResult(p)}
+          onReveal={(p) => browse.reveal(p)}
+          onContext={(n, e, sel, showInTree) =>
             onTreeContext(
               n.path,
               n.isDir,
               e,
               sel.map((x) => ({ path: x.path, isDir: x.isDir })),
+              showInTree,
             )}
         />
       </section>
@@ -1680,6 +1690,9 @@
     x={treeCtx.x}
     y={treeCtx.y}
     items={[
+      ...(treeCtx.showInTree
+        ? [{ label: "Show in tree", action: treeCtx.showInTree }, { label: "", sep: true }]
+        : []),
       // A folder is the only place a `-a` reconcile is affordable, so that is
       // where the "anything here p4 has not got?" question is asked from.
       ...(dir

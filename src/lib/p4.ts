@@ -38,6 +38,8 @@ export const idx = {
    *  the file view filters on), `fuzzy` = ranked subsequence matches (suggestions). */
   search: (client: string, query: string, max = 200) =>
     invoke<SearchHits>("index_search", { client, query, max }),
+  /** Load an index into memory ahead of the first keystroke. */
+  preload: (client: string) => invoke<number>("index_preload", { client }),
 };
 
 export interface LocalDir {
