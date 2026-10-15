@@ -356,7 +356,7 @@ pub struct UnshelveMapping {
 
 /// The stream a depot path belongs to, from a list of known streams: the longest
 /// one that prefixes it.
-fn stream_of(path: &str, streams: &[String]) -> Option<String> {
+pub(crate) fn stream_of(path: &str, streams: &[String]) -> Option<String> {
     streams
         .iter()
         .filter(|s| path.starts_with(&format!("{s}/")))

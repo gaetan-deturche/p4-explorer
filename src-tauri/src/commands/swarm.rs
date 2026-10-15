@@ -891,6 +891,62 @@ fn client_path(conn: &P4Conn, depot: &str) -> String {
         .unwrap_or_default()
 }
 
+/// Where the server would put each file of a shelf in this workspace: the
+/// depot paths `p4 unshelve -n` reports (it writes and opens nothing). For a
+/// shelf from another stream p4d maps the files onto this one itself — measured
+/// on 2025.1, where the generated-view form (`-S`/`-P`) answered "No such
+/// file(s)" for the same shelf.
+fn unshelve_targets(conn: &P4Conn, change: &str) -> Vec<String> {
+    p4::run_notes(conn, &["unshelve", "-n", "-s", change])
+        .map(|(recs, _notes)| {
+            recs.iter()
+                .filter_map(|r| r.get("depotFile").and_then(|v| v.as_str()).map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The one target that is `source` placed elsewhere: the longest shared tail of
+/// path segments, the file name at least. The preview does not say which shelved
+/// file each target came from; two equally good candidates mean no answer.
+fn placed_as(source: &str, targets: &[String]) -> Option<String> {
+    let tail = |t: &String| t.rsplit('/').zip(source.rsplit('/')).take_while(|(a, b)| a == b).count();
+    let best = targets.iter().map(tail).max().filter(|&n| n > 0)?;
+    let mut hits = targets.iter().filter(|t| tail(t) == best);
+    let hit = hits.next()?;
+    hits.next().is_none().then(|| hit.clone())
+}
+
+/// Fallback for a file the unshelve preview has no answer for (it refuses what
+/// it could not open here, which an offline copy never opens): the same path
+/// relative to this workspace's stream. `streams` caches (this workspace's
+/// stream, every stream); `None` when this is no stream workspace or the file is
+/// in no known stream.
+fn cross_stream_path(
+    conn: &P4Conn,
+    depot: &str,
+    streams: &mut Option<(String, Vec<String>)>,
+) -> Option<(String, String)> {
+    let (into, all) = streams.get_or_insert_with(|| {
+        let into = p4::run(conn, &["info"])
+            .ok()
+            .and_then(|recs| recs.first().and_then(|r| r.get("clientStream")?.as_str().map(String::from)))
+            .unwrap_or_default();
+        let all = p4::run(conn, &["streams"])
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|r| r.get("Stream").and_then(|v| v.as_str()).map(String::from))
+            .collect();
+        (into, all)
+    });
+    let from = crate::commands::pending::stream_of(depot, all)?;
+    if into.is_empty() || from == *into {
+        return None;
+    }
+    let local = client_path(conn, &format!("{into}{}", &depot[from.len()..]));
+    (!local.is_empty()).then_some((local, from))
+}
+
 /// Copy files from a review's shelf verbatim, for the ones a unified diff cannot
 /// carry: binaries, and adds that have no base to diff against.
 ///
@@ -923,9 +979,27 @@ pub async fn review_copy_files(
 
         let wanted: Vec<String> = files;
         let mut out: Vec<CopyResult> = Vec::new();
+        let mut streams = None;
+        let mut targets: Option<Vec<String>> = None; // the unshelve preview, asked once
         for depot in wanted {
             let action = action_of.get(&depot).cloned().unwrap_or_default();
-            let local = client_path(&conn, &depot);
+            let mut local = client_path(&conn, &depot);
+            // A shelf from another stream: its paths are not in this view, so
+            // place each file where an unshelve would.
+            let mut placed = String::new();
+            if local.is_empty() && mode == "offline" {
+                let targets = targets.get_or_insert_with(|| unshelve_targets(&conn, &change));
+                if let Some(target) = placed_as(&depot, targets) {
+                    local = client_path(&conn, &target);
+                    placed = format!("as {target}");
+                }
+                if local.is_empty() {
+                    if let Some((path, from)) = cross_stream_path(&conn, &depot, &mut streams) {
+                        local = path;
+                        placed = format!("from {from}");
+                    }
+                }
+            }
             let mut rep = CopyResult {
                 depot: depot.clone(),
                 local: local.clone(),
@@ -982,6 +1056,9 @@ pub async fn review_copy_files(
             match p4::run_strict(&conn, &["print", "-o", &local, &spec]) {
                 Ok(_) => {
                     rep.status = "copied".into();
+                    if !placed.is_empty() {
+                        rep.message = placed.clone();
+                    }
                 }
                 Err(e) => {
                     rep.message = format!("p4 print failed: {e}");
@@ -1011,6 +1088,23 @@ mod tests {
     use super::*;
 
     const DESCRIBE: &str = "Change 196985 by swarm@swarm-abc on 2026/08/05 08:29:08 *pending*\n\n\tTouchball improvements:\n\t- Less code\n\nShelved files ...\n\n... //d/a.cpp#79 edit\n... //d/b.uasset#3 edit\n\nDifferences ...\n\n==== //d/a.cpp#79 (text) ====\n\n@@ -42,2 +42,2 @@\n ctx\n-old\n+new\n==== //d/b.uasset#3 (binary) ====\n\n==== //d/c.h#1 (text+w) ====\n\n@@ -1,1 +1,2 @@\n one\n+two\n";
+
+    #[test]
+    fn a_shelved_file_is_matched_to_where_the_unshelve_puts_it() {
+        let targets = vec![
+            "//R/Dev/Main/Source/Gauntlet/Profiler.cpp".to_string(),
+            "//R/Dev/Main/Source/Other/Profiler.cpp".to_string(),
+            "//R/Dev/Main/Config/Game.ini".to_string(),
+        ];
+        assert_eq!(
+            placed_as("//R/Stab/X/Source/Gauntlet/Profiler.cpp", &targets).as_deref(),
+            Some("//R/Dev/Main/Source/Gauntlet/Profiler.cpp")
+        );
+        assert_eq!(placed_as("//R/Stab/X/Config/Game.ini", &targets).as_deref(), Some("//R/Dev/Main/Config/Game.ini"));
+        // Same name, nothing else to tell them apart: no guess.
+        assert_eq!(placed_as("//R/Stab/X/Elsewhere/Profiler.cpp", &targets), None);
+        assert_eq!(placed_as("//R/Stab/X/Missing.h", &targets), None);
+    }
 
     #[test]
     fn rewrites_p4_headers_into_a_unified_diff() {
