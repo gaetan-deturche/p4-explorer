@@ -40,7 +40,15 @@ export const idx = {
     invoke<SearchHits>("index_search", { client, query, max }),
   /** Load an index into memory ahead of the first keystroke. */
   preload: (client: string) => invoke<number>("index_preload", { client }),
+  /** The offline scan's pieces of at most `target` files, from the workspace index. */
+  scanPlan: (client: string, target: number) => invoke<ScanPiece[]>("index_scan_plan", { client, target }),
 };
+
+/** One piece of the offline scan: depot patterns (or exact files) for `p4 -x`. */
+export interface ScanPiece {
+  patterns: string[];
+  files: number;
+}
 
 export interface LocalDir {
   dirs: string[];
@@ -586,7 +594,8 @@ export const p4 = {
   clean: (conn: P4Conn, files: string[]) => call("p4_clean", { conn, files }),
   /** Repair have/disk desyncs: update the have record to #head, disk untouched. */
   flush: (conn: P4Conn, files: string[]) => call("p4_flush", { conn, files }),
-  status: (conn: P4Conn) => call("p4_status", { conn }),
+  /** Offline scan: one piece of the workspace (`patterns`), or all of it. */
+  status: (conn: P4Conn, patterns?: string[]) => call("p4_status", { conn, patterns }),
   /** Files p4 has never heard of under one folder (a scoped `reconcile -a`). */
   newFiles: (conn: P4Conn, path: string) => call("p4_new_files", { conn, path }),
   cancelOfflineScan: () => g<void>("cancel_offline_scan"),

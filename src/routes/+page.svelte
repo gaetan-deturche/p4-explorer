@@ -851,6 +851,16 @@
       setError("No Swarm server is configured (P4.Swarm.URL is unset).");
       return;
     }
+    // Swarm builds a review from shelved files: with neither a shelf nor a
+    // review yet, whoever opens the link finds nothing to review.
+    if (!pending.hasShelf(change) && !pending.reviews[change]?.id) {
+      const ok = await askConfirm(
+        `@${change} has no shelved files, so its review has nothing to show yet. Shelve the files first, or copy the link anyway?`,
+        "No files to review",
+        "Copy anyway",
+      );
+      if (!ok) return;
+    }
     copied(url, "review link");
   }
 

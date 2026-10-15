@@ -582,3 +582,162 @@ fn fuzzy_score(q: &[u8], path: &str) -> Option<i32> {
         None
     }
 }
+
+/// One piece of the offline scan: depot paths for `p4 -x` (folder patterns, or
+/// exact files when a single folder holds too many itself), and how many
+/// indexed files they cover.
+#[derive(serde::Serialize, Debug, PartialEq)]
+pub struct ScanPiece {
+    pub patterns: Vec<String>,
+    pub files: usize,
+}
+
+/// Cut the workspace's files into pieces of at most `target` files, balanced by
+/// count rather than by folder: a quarter of the stream sits in one folder
+/// (`__ExternalActors__`, 143k files). A folder that fits is one `dir/...`; a
+/// bigger one is its own files (`dir/*`) plus each subfolder, cut the same way;
+/// neighbouring small parts are then packed together, in path order.
+///
+/// Why: p4d keeps running a killed reconcile until its current stretch of work
+/// is done — 153 s after a whole-workspace scan was killed 122 s in, against
+/// 0.5 s for a 15k-file piece. Pieces of this size took 0.2–3.2 s each.
+pub fn plan_scan(paths: &[&str], target: usize) -> Vec<ScanPiece> {
+    let target = target.max(1);
+    let mut sorted = paths.to_vec();
+    // Sorted, every folder's files are one contiguous run (shared prefix).
+    sorted.sort_unstable();
+    let (Some(first), Some(last)) = (sorted.first(), sorted.last()) else {
+        return Vec::new();
+    };
+    let common = first.bytes().zip(last.bytes()).take_while(|(a, b)| a == b).count();
+    let root = &first[..first[..common].rfind('/').map_or(0, |k| k + 1)];
+    let mut parts = Vec::new();
+    split_folder(&sorted, root, target, &mut parts);
+
+    let mut pieces: Vec<ScanPiece> = Vec::new();
+    for (patterns, files) in parts {
+        match pieces.last_mut() {
+            Some(p) if p.files + files <= target => {
+                p.patterns.extend(patterns);
+                p.files += files;
+            }
+            _ => pieces.push(ScanPiece { patterns, files }),
+        }
+    }
+    pieces
+}
+
+/// The parts covering `files`, all under folder `prefix` (which ends in '/').
+fn split_folder(files: &[&str], prefix: &str, target: usize, out: &mut Vec<(Vec<String>, usize)>) {
+    if files.len() <= target {
+        out.push((vec![format!("{prefix}...")], files.len()));
+        return;
+    }
+    let direct: Vec<&str> = files.iter().copied().filter(|f| !f[prefix.len()..].contains('/')).collect();
+    if direct.len() > target {
+        for chunk in direct.chunks(target) {
+            out.push((chunk.iter().map(|f| f.to_string()).collect(), chunk.len()));
+        }
+    } else if !direct.is_empty() {
+        out.push((vec![format!("{prefix}*")], direct.len()));
+    }
+    let mut i = 0;
+    while i < files.len() {
+        let Some(slash) = files[i][prefix.len()..].find('/') else {
+            i += 1;
+            continue;
+        };
+        let child = &files[i][..prefix.len() + slash + 1];
+        let end = i + files[i..].iter().take_while(|f| f.starts_with(child)).count();
+        split_folder(&files[i..end], child, target, out);
+        i = end;
+    }
+}
+
+/// The offline scan's pieces for `client`, from its workspace index. Empty when
+/// there is no index (the caller then scans the workspace in one go).
+#[tauri::command]
+pub async fn index_scan_plan(app: tauri::AppHandle, client: String, target: usize) -> Result<Vec<ScanPiece>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let paths = ensure_loaded(&app.state::<AppState>(), &client);
+        let t = Instant::now();
+        let all: Vec<&str> = (0..paths.len()).map(|i| paths.get(i)).collect();
+        let plan = plan_scan(&all, target);
+        p4::log_note(&format!(
+            "offline scan {client}: {} pieces of <= {target} files planned in {} ms",
+            plan.len(),
+            t.elapsed().as_millis()
+        ));
+        plan
+    })
+    .await
+    .map_err(|e| format!("plan task failed: {e}"))
+}
+
+#[cfg(test)]
+mod plan_tests {
+    use super::*;
+
+    fn plan(paths: &[&str], target: usize) -> Vec<(Vec<&'static str>, usize)> {
+        plan_scan(paths, target)
+            .into_iter()
+            .map(|p| (p.patterns.into_iter().map(|s| &*s.leak()).collect(), p.files))
+            .collect()
+    }
+
+    #[test]
+    fn a_workspace_that_fits_is_one_piece() {
+        assert_eq!(plan(&["//s/m/a.txt", "//s/m/b/c.txt"], 5), vec![(vec!["//s/m/..."], 2)]);
+    }
+
+    #[test]
+    fn a_big_folder_is_cut_and_small_neighbours_are_packed() {
+        let files = [
+            "//s/m/Big/x/1", "//s/m/Big/x/2", "//s/m/Big/y/1", "//s/m/Big/y/2", "//s/m/Big/top",
+            "//s/m/Small/1", "//s/m/Tiny/1", "//s/m/root.ini",
+        ];
+        assert_eq!(
+            plan(&files, 3),
+            vec![
+                (vec!["//s/m/*", "//s/m/Big/*"], 2),
+                (vec!["//s/m/Big/x/..."], 2),
+                (vec!["//s/m/Big/y/...", "//s/m/Small/..."], 3),
+                (vec!["//s/m/Tiny/..."], 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_folder_too_full_by_itself_is_listed_file_by_file() {
+        let files = ["//s/m/d/1", "//s/m/d/2", "//s/m/d/3", "//s/m/e/1"];
+        assert_eq!(
+            plan(&files, 2),
+            vec![
+                (vec!["//s/m/d/1", "//s/m/d/2"], 2),
+                (vec!["//s/m/d/3", "//s/m/e/..."], 2),
+            ]
+        );
+    }
+
+    #[test]
+    fn every_file_is_covered_exactly_once() {
+        let files: Vec<String> = (0..500).map(|i| format!("//s/m/{}/{}/f{i}", i % 7, i % 3)).collect();
+        let refs: Vec<&str> = files.iter().map(String::as_str).collect();
+        let pieces = plan_scan(&refs, 40);
+        let covers = |p: &str, f: &str| {
+            if let Some(pre) = p.strip_suffix("...") {
+                f.starts_with(pre)
+            } else if let Some(pre) = p.strip_suffix('*') {
+                f.starts_with(pre) && !f[pre.len()..].contains('/')
+            } else {
+                p == f
+            }
+        };
+        for f in &refs {
+            let n: usize = pieces.iter().flat_map(|p| &p.patterns).filter(|p| covers(p, f)).count();
+            assert_eq!(n, 1, "{f}");
+        }
+        assert!(pieces.iter().all(|p| p.files <= 40));
+        assert_eq!(pieces.iter().map(|p| p.files).sum::<usize>(), 500);
+    }
+}

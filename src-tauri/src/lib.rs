@@ -238,6 +238,7 @@ pub fn run() {
             index::index_build_local,
             index::index_search,
             index::index_preload,
+            index::index_scan_plan,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

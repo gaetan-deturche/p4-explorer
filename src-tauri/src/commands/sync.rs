@@ -382,17 +382,32 @@ pub async fn p4_clean(conn: P4Conn, files: Vec<String>) -> Res {
 /// slow. The cost is disk-stat-bound and can't be parallelized meaningfully, so
 /// callers scan on a low-rate background timer. Each record carries `action`
 /// (edit/delete) plus depotFile/clientFile.
+///
+/// `patterns` scans one piece of the workspace (see `index::plan_scan`), handed
+/// to p4 through an argument file; empty scans the whole workspace at once.
 #[tauri::command]
 pub async fn p4_status(
     state: tauri::State<'_, crate::index::AppState>,
     conn: P4Conn,
+    patterns: Option<Vec<String>>,
 ) -> Res {
-    use std::sync::atomic::Ordering;
+    use std::sync::atomic::{AtomicU64, Ordering};
     let spec = if conn.client.is_empty() {
         "...".to_string()
     } else {
         format!("//{}/...", conn.client)
     };
+    let patterns = patterns.unwrap_or_default();
+    // One file per scan: each workspace window runs its own.
+    static ARGFILES: AtomicU64 = AtomicU64::new(0);
+    let argfile = std::env::temp_dir().join(format!(
+        "auger-scan-{}-{}.txt",
+        std::process::id(),
+        ARGFILES.fetch_add(1, Ordering::Relaxed)
+    ));
+    if !patterns.is_empty() {
+        std::fs::write(&argfile, patterns.join("\n")).map_err(|e| format!("scan argument file: {e}"))?;
+    }
     let pid_slot = state.offline_pid.clone();
     let abort = state.offline_abort.clone();
     let held = state.offline_writes.clone();
@@ -403,18 +418,35 @@ pub async fn p4_status(
     }
     abort.store(false, Ordering::SeqCst);
     tauri::async_runtime::spawn_blocking(move || {
-        let res = p4::run_killable(
-            &conn,
-            &["reconcile", "-n", "-e", "-d", "-m", &spec],
-            &pid_slot,
-            Some(&held),
-        );
+        let file = argfile.to_string_lossy().to_string();
+        let args: Vec<&str> = if patterns.is_empty() {
+            vec!["reconcile", "-n", "-e", "-d", "-m", &spec]
+        } else {
+            vec!["-x", &file, "reconcile", "-n", "-e", "-d", "-m"]
+        };
+        let res = p4::run_killable(&conn, &args, &pid_slot, Some(&held));
+        let _ = std::fs::remove_file(&argfile);
         // If it was cancelled (killed by an interactive write), report an error
         // so the caller keeps the previous list instead of clearing it.
         if abort.swap(false, Ordering::SeqCst) {
             return Err("offline scan cancelled".to_string());
         }
-        let (mut recs, notes) = res?;
+        // Warnings and no record come back as an error, and a piece with nothing
+        // changed in it answers exactly that: an empty piece, not a failed one.
+        const QUIET: [&str; 5] = [
+            "no file(s) to reconcile",
+            "not in client view",
+            "no such file(s)",
+            "not on client",
+            "exclusive file already opened",
+        ];
+        let (mut recs, notes) = match res {
+            Err(e) if e.lines().all(|l| {
+                let l = l.to_ascii_lowercase();
+                l.trim().is_empty() || QUIET.iter().any(|q| l.contains(q))
+            }) => (Vec::new(), e.lines().map(str::to_string).collect()),
+            r => r?,
+        };
         recs.extend(locked_offline(&conn, &notes));
         mark_desyncs(&conn, &mut recs);
         Ok(recs)
@@ -1003,10 +1035,12 @@ pub async fn p4_sync_blockers(conn: P4Conn, files: Vec<String>) -> Result<Vec<Sy
 }
 
 /// Kill the in-flight offline-changes scan, called before an interactive write.
-/// Killing the client is sufficient: p4d abandons its own `reconcile` about a
-/// second later (watched in `p4 monitor show`). Asking the server directly, with
-/// `p4 monitor terminate`, is refused for our own process here even though the
-/// help offers it to the owner of the process id. No-op if none is running.
+/// p4d drops its own `reconcile` once it finishes the stretch of work it is in:
+/// 0.5 s for one scan piece, but 153 s for a whole-workspace scan killed 122 s
+/// in (watched in `p4 monitor show`) — which is why the scan runs in pieces.
+/// Asking the server directly, with `p4 monitor terminate`, is refused for our
+/// own process here even though the help offers it to the owner of the process
+/// id. No-op if none is running.
 #[tauri::command]
 pub async fn cancel_offline_scan(
     state: tauri::State<'_, crate::index::AppState>,

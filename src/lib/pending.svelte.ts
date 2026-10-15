@@ -5,8 +5,11 @@
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   p4,
+  appLog,
+  idx,
   type P4Conn,
   type P4Record,
+  type ScanPiece,
   type ReviewInfo,
   type UnshelveMapping,
   type UndoResult,
@@ -170,6 +173,42 @@ const OFFLINE_MS_BG = 1_800_000; // 30 min in the background
 // (that is the revert's own work — restoring .uasset files from the depot).
 const OFFLINE_MS_FIRST = 20_000; // grace period after a workspace opens
 const OFFLINE_QUIET_MS = 30_000; // quiet after a write: a burst of them stays cheap
+
+/** The offline scan pass in progress, run piece by piece (see `plan_scan` in
+ *  index.rs): a write waits for one piece at most, not a whole-workspace scan,
+ *  and the pass resumes at `next` afterwards instead of starting over. */
+let scanPass: { client: string; pieces: ScanPiece[]; next: number; files: number; secs: number } | null = null;
+/** Files per piece, re-aimed after every pass at PIECE_SECS a piece. */
+let scanTarget = 20_000;
+const PIECE_SECS = 2;
+
+/** Is `depotFile` one of the files `piece` scanned? */
+function pieceCovers(piece: ScanPiece, depotFile: string): boolean {
+  return piece.patterns.some((p) =>
+    p.endsWith("/...")
+      ? depotFile.startsWith(p.slice(0, -3))
+      : p.endsWith("/*")
+        ? depotFile.startsWith(p.slice(0, -1)) && !depotFile.slice(p.length - 1).includes("/")
+        : depotFile === p,
+  );
+}
+
+/** Fold one piece's findings into the workspace's offline list: what it found
+ *  replaces what was listed under it; the rest stays until its piece comes up. */
+function mergePiece(client: string, piece: ScanPiece | null, found: P4Record[]): P4Record[] {
+  let old: P4Record[] = [];
+  try {
+    old = JSON.parse(storeGet("p4:offline", client) ?? "[]") as P4Record[];
+  } catch {
+    /* unreadable: start over */
+  }
+  const kept = piece ? old.filter((r) => !pieceCovers(piece, String(r.depotFile ?? ""))) : [];
+  const next = kept.concat(found);
+  next.sort((a, b) => String(a.depotFile ?? "").localeCompare(String(b.depotFile ?? "")));
+  saveOfflineCache(client, next);
+  offlineVer++;
+  return next;
+}
 
 // Persist the last offline result per workspace (store scope `p4:offline`) so
 // switching back shows it instantly; a fresh scan then refreshes it. Durable in
@@ -558,44 +597,66 @@ export const pending = {
       offlineVer++;
       return true;
     }
-    // Never scan while a sync is writing files: mid-write they look modified and
-    // not-yet-written ones look deleted, so the scan would cache a list of
-    // phantom "offline changes" that stays until the next scan. Returning false
-    // makes the scan loop retry shortly (see runOfflineLoop).
-    if (h.syncing()) return false;
-    // And not in the seconds after an interactive write. Reverting or checking out
-    // a handful of files is a burst, not one event: without this the scan starts
-    // again between two of them and the next one pays the lock wait.
-    if (Date.now() - lastWriteAt < OFFLINE_QUIET_MS) return false;
     const w = window as unknown as { __p4guiOfflineBusy?: boolean };
     if (w.__p4guiOfflineBusy) return false; // a scan is already running — skipped
     w.__p4guiOfflineBusy = true;
     offlineScanning = true;
     const conn = h.conn();
     const client = conn.client; // snapshot: the workspace THIS scan is for
-    const gen = workspaceGen; // and the state of it this scan describes
     try {
-      let recs: P4Record[];
-      try {
-        recs = await p4.status(conn);
-      } catch (e) {
-        // Held off by a write this window never saw (the resolve window's): try
-        // again shortly. Cancelled or failed: keep the list, normal interval.
-        return !/deferred/.test(String(e));
+      if (!scanPass || scanPass.client !== client) {
+        // No index (or none yet): one whole-workspace piece, as before.
+        const pieces = await idx.scanPlan(client, scanTarget).catch(() => [] as ScanPiece[]);
+        scanPass = { client, pieces, next: 0, files: 0, secs: 0 };
       }
-      // Something wrote the workspace while this was running — a sync, a revert,
-      // an unshelve. What came back describes the workspace mid-write, so it is
-      // dropped rather than cached; `false` has the loop try again shortly.
-      if (gen !== workspaceGen) return false;
-      // Keep only real change entries (an action + a file).
-      const result = recs.filter((r) => (r.action ?? r.status) && (r.clientFile || r.depotFile));
-      saveOfflineCache(client, result); // store write, keyed by the scanned workspace
-      // No "still on that workspace?" guard needed: the getter reads the CURRENT
-      // client's store entry, so a stale scan writing another client's key can't
-      // leak into the view — it just populates that workspace's cache for later.
-      offlineVer++;
+      const pass = scanPass;
+      const whole = pass.pieces.length === 0;
+      while (whole ? pass.next === 0 : pass.next < pass.pieces.length) {
+        if (offlineStopped || h.conn().client !== client) return false;
+        // Never scan while a sync is writing files: mid-write they look modified
+        // and not-yet-written ones look deleted, so the scan would cache phantom
+        // "offline changes". Nor in the seconds after an interactive write: a
+        // revert of a handful of files is a burst, not one event. Either way the
+        // pass pauses here and the loop resumes it shortly (see runOfflineLoop).
+        if (h.syncing() || Date.now() - lastWriteAt < OFFLINE_QUIET_MS) return false;
+        const piece = whole ? null : pass.pieces[pass.next];
+        const gen = workspaceGen; // the state of the workspace this piece describes
+        const t0 = performance.now();
+        let recs: P4Record[];
+        try {
+          recs = await p4.status(conn, piece?.patterns);
+        } catch (e) {
+          // Killed by a write, or held off by one this window never saw (the
+          // resolve window's): run this piece again shortly. Failed: give up
+          // the pass and keep the list, normal interval.
+          if (/deferred|cancelled/.test(String(e))) return false;
+          scanPass = null;
+          return true;
+        }
+        // Something wrote the workspace while this piece ran — a sync, a revert,
+        // an unshelve. What came back describes it mid-write: run it again.
+        if (gen !== workspaceGen) return false;
+        pass.secs += (performance.now() - t0) / 1000;
+        pass.files += piece?.files ?? 0;
+        // Keep only real change entries (an action + a file).
+        mergePiece(client, piece, recs.filter((r) => (r.action ?? r.status) && (r.clientFile || r.depotFile)));
+        pass.next++;
+      }
+      scanPass = null;
+      if (pass.files > 0 && pass.secs > 0) {
+        scanTarget = Math.round(Math.min(200_000, Math.max(2_000, (pass.files / pass.secs) * PIECE_SECS)));
+      }
+      appLog(
+        `offline scan ${client}: ${whole ? "whole workspace" : `${pass.pieces.length} pieces`} in ${pass.secs.toFixed(1)} s; next pieces <= ${scanTarget} files`,
+      );
       if (h && h.conn().client === client) offlineScannedAt = Date.now(); // freshness stamp
-      void pending.loadCaseTwins(result.map((r) => String(r.depotFile)).filter(Boolean));
+      let listed: P4Record[] = [];
+      try {
+        listed = JSON.parse(storeGet("p4:offline", client) ?? "[]") as P4Record[];
+      } catch {
+        /* nothing to look twins up for */
+      }
+      void pending.loadCaseTwins(listed.map((r) => String(r.depotFile)).filter(Boolean));
       return true;
     } finally {
       offlineScanning = false;
@@ -892,10 +953,10 @@ export const pending = {
     await enqueue(opts?.label ?? "the command", async () => {
       lastWriteAt = Date.now();
       try {
-        // Killing the scan's client is enough: p4d drops its own reconcile ~1s
-        // later (measured via `p4 monitor show`). `p4 monitor terminate` would be
-        // the direct route but is refused for our own process on this server,
-        // despite the help offering it to "the owner of the process id".
+        // Killing the scan's client is enough: p4d drops a scan piece's reconcile
+        // ~0.5 s later (measured via `p4 monitor show`). `p4 monitor terminate`
+        // would be the direct route but is refused for our own process on this
+        // server, despite the help offering it to "the owner of the process id".
         await p4.cancelOfflineScan().catch(() => {});
         await runFn();
         h!.setNotice(typeof okNotice === "string" ? okNotice : okNotice());
@@ -930,52 +991,68 @@ export const pending = {
   async submit(change: string) {
     if (!h || !h.connected()) return;
     const what = change === "default" ? "the default changelist" : `changelist @${change}`;
+    // p4 refuses to submit a changelist with a shelf. Known here, so asked here,
+    // rather than after a submit that could only fail.
+    const shelved = change !== "default" && pending.hasShelf(change);
     const go = await h.askConfirm(
-      `Submit ${what}?\nThis commits the files to the depot and cannot be undone.`,
+      shelved
+        ? `Submit ${what}?
+Its shelved files block a submit, so the shelf is deleted first.
+This commits the files to the depot and cannot be undone.`
+        : `Submit ${what}?
+This commits the files to the depot and cannot be undone.`,
       "Submit changelist",
-      "Submit",
+      shelved ? "Delete shelf & submit" : "Submit",
     );
-    if (go) await pending.doSubmit(change);
+    if (go) await pending.doSubmit(change, shelved);
   },
   /** Submit, reporting the result of the SUBMIT command itself — a later refresh
-   *  failure must not look like a failed submit (#3). If the submit is blocked by
-   *  shelved files, offer to delete the shelf and submit (#1). */
-  async doSubmit(change: string) {
+   *  failure must not look like a failed submit (#3). `dropShelf` deletes the
+   *  shelf first; a shelf the list did not know of still gets offered (#1). */
+  async doSubmit(change: string, dropShelf = false) {
     if (!h) return;
     const label = change === "default" ? "The default changelist" : `Changelist @${change}`;
-    h.setSyncing(true);
-    try {
-      await p4.cancelOfflineScan().catch(() => {}); // p4d follows the client down (see mutate)
+    const name = change === "default" ? "the default changelist" : `@${change}`;
+    await enqueue(`the submit of ${name}`, async () => {
+      lastWriteAt = Date.now(); // keep the offline scan off the server while we write
+      // Until p4 answers: a submit can wait on the server, and nothing else says so.
+      h!.setNotice(`Submitting ${name}…`, 0);
       try {
-        await p4.submit(h.conn(), change);
+        await p4.cancelOfflineScan().catch(() => {}); // p4d follows the client down (see mutate)
+        if (dropShelf) await p4.shelveDelete(h!.conn(), change);
+        try {
+          await p4.submit(h!.conn(), change);
+        } catch (e) {
+          if (!/shelved/i.test(String(e))) throw e;
+          // Blocked by a shelf the list did not show — offer to remove it.
+          h!.setNotice("", 1);
+          const yes = await h!.askConfirm(
+            `${label} has shelved files that block the submit.
+Remove the shelf and submit?`,
+            "Shelved files",
+            "Remove shelf & submit",
+          );
+          if (!yes) return;
+          h!.setNotice(`Submitting ${name}…`, 0);
+          await p4.shelveDelete(h!.conn(), change);
+          await p4.submit(h!.conn(), change); // may still throw → outer catch
+        }
+        h!.setNotice("Changelist submitted.");
+        // Refresh separately: the submit already succeeded, so a refresh error is
+        // not a submit error (don't surface it as one).
+        try {
+          await h!.refresh();
+        } catch {
+          /* submit succeeded regardless */
+        }
       } catch (e) {
-        if (!/shelved/i.test(String(e))) throw e;
-        // Blocked by shelved files — offer to remove the shelf and submit.
-        h.setSyncing(false);
-        const yes = await h.askConfirm(
-          `${label} has shelved files that block the submit.\nRemove the shelf and submit?`,
-          "Shelved files",
-          "Remove shelf & submit",
-        );
-        if (!yes) return;
-        h.setSyncing(true);
-        await p4.shelveDelete(h.conn(), change);
-        await p4.submit(h.conn(), change); // may still throw → outer catch
+        h!.setNotice("", 1);
+        h!.setError(String(e));
+      } finally {
+        lastWriteAt = Date.now(); // and for a while after
+        pending.load();
       }
-      h.setNotice("Changelist submitted.");
-      // Refresh separately: the submit already succeeded, so a refresh error is
-      // not a submit error (don't surface it as one).
-      try {
-        await h.refresh();
-      } catch {
-        /* submit succeeded regardless */
-      }
-    } catch (e) {
-      h.setError(String(e));
-    } finally {
-      pending.load();
-      h.setSyncing(false);
-    }
+    });
   },
   requestReview(change: string) {
     pending.action(
