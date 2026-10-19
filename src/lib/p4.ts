@@ -804,6 +804,8 @@ export const p4 = {
     partial: boolean,
   ) => g<PatchFileReport[]>("apply_patch", { conn, patchPath, mode, change, partial }),
   openDiffLocal: (conn: P4Conn, depotFile: string) => g<void>("open_diff_local", { conn, depotFile }),
+  openDiffLocalShelf: (conn: P4Conn, depotFile: string, change: string) =>
+    g<void>("open_diff_local_shelf", { conn, depotFile, change }),
   /** p4 print a revision spec to a temp file; returns the temp path. */
   printToTemp: (conn: P4Conn, spec: string) => g<string>("print_to_temp", { conn, spec }),
   // Materialize the two sides of a diff for the in-app diff window.
@@ -812,6 +814,8 @@ export const p4 = {
   diffPairShelved: (conn: P4Conn, depotFile: string, rev: number, change: string) =>
     g<DiffPair>("diff_pair_shelved", { conn, depotFile, rev, change }),
   diffPairLocal: (conn: P4Conn, depotFile: string) => g<DiffPair>("diff_pair_local", { conn, depotFile }),
+  diffPairLocalShelf: (conn: P4Conn, depotFile: string, change: string) =>
+    g<DiffPair>("diff_pair_local_shelf", { conn, depotFile, change }),
   /** Diff two UE asset files in Unreal: in a RUNNING editor when one is up
    *  (remote-exec DiffAssets), else a fresh `UnrealEditor -diff` instance.
    *  Resolves to "remote" or "launched". `name` = the asset's object name. */

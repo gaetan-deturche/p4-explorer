@@ -636,6 +636,30 @@ pub async fn open_diff_local(conn: P4Conn, depot_file: String) -> Result<(), Str
     .map_err(|e| format!("diff task failed: {e}"))?
 }
 
+/// Open an opened file's shelved copy vs the live workspace file in the
+/// external tool (shelf on the left, workspace on the right).
+#[tauri::command]
+pub async fn open_diff_local_shelf(conn: P4Conn, depot_file: String, change: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let recs = p4::run(&conn, &["fstat", "-T", "clientFile", &depot_file])?;
+        let local = recs
+            .first()
+            .and_then(|r| r.get("clientFile"))
+            .and_then(|v| v.as_str())
+            .ok_or("file is not in this workspace")?
+            .to_string();
+        let name = depot_file.rsplit('/').next().unwrap_or("file");
+        let tmp = std::env::temp_dir().join(format!("p4gui_shelf{change}_{name}"));
+        let tmp_s = tmp.to_str().ok_or("bad temp path")?;
+        p4::run_raw(&conn, &["print", "-q", "-o", tmp_s, &format!("{depot_file}@={change}")])?;
+        let cmdline = p4diff_cmd(&conn)
+            .ok_or("No external diff tool configured. Set P4DIFF (e.g. `p4 set P4DIFF=...`).")?;
+        launch_diff(&cmdline, tmp_s, &local)
+    })
+    .await
+    .map_err(|e| format!("diff task failed: {e}"))?
+}
+
 /// Unified diff of a shelved file vs its base revision: the pending change's
 /// contribution. `rev` is the base revision from the shelved file list.
 #[tauri::command]

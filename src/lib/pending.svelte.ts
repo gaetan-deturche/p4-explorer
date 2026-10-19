@@ -1798,4 +1798,24 @@ Remove the shelf and submit?`,
   openShelvedDiff(file: string, rev: number, change: string) {
     return openDiff(h!.conn(), { kind: "shelved", file, rev, change }, h!.setNotice);
   },
+  /** The workspace file against its shelved copy: what changed since the shelve. */
+  openLocalShelfDiff(file: string, change: string) {
+    return openDiff(h!.conn(), { kind: "localShelf", file, change }, h!.setNotice);
+  },
+  /** Is `file` in the shelf of `change`, from the cached shelf list? `undefined`
+   *  when that list was never fetched. */
+  isShelved(change: string, file: string): boolean | undefined {
+    if (!h || change === "default") return false;
+    const json = cacheGetSync(`p4:clshelved:${h.conn().client}`, change);
+    if (json === null) return undefined;
+    try {
+      return (JSON.parse(json) as P4Record[]).some((r) => String(r.depotFile) === file);
+    } catch {
+      return undefined;
+    }
+  },
+  /** Is `file` open in `change` here, from the cached file list? */
+  isOpenIn(change: string, file: string): boolean {
+    return !!h && !!loadClFilesCache(h.conn().client, change)?.some((r) => String(r.depotFile) === file);
+  },
 };

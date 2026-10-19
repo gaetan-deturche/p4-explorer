@@ -629,6 +629,10 @@
           ]
         : []),
       { label: "View diff", accel: "diff", action: () => pending.openLocalDiff(file.depotFile) },
+      // What changed since the shelve (the review is behind by exactly this).
+      ...(pending.hasShelf(change) && pending.isShelved(change, file.depotFile) !== false
+        ? [{ label: "Diff against shelf", action: () => void pending.openLocalShelfDiff(file.depotFile, change) }]
+        : []),
       { ...historyMenu(file.depotFile), accel: "fileHistory" },
       holdersMenu(file.depotFile),
       blameMenu(file.depotFile),
@@ -1762,6 +1766,9 @@
     items={[
       // The shelved content lives on the server — download @=change and open.
       { label: `${openInLabel} (shelved)`, action: () => openSpecInEditor(`${f.depotFile}@=${ch}`) },
+      ...(pending.isOpenIn(ch, String(f.depotFile))
+        ? [{ label: "Diff against workspace", action: () => void pending.openLocalShelfDiff(String(f.depotFile), ch) }]
+        : []),
       historyMenu(f.depotFile),
       holdersMenu(f.depotFile),
       blameMenu(f.depotFile),

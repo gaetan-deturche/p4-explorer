@@ -17,11 +17,13 @@ import { editor, isUnrealAsset, unrealAssetName } from "$lib/editor.svelte";
 
 /** Which two sides to diff — `rev`: a submitted revision vs its predecessor
  *  (empty left side when it was added); `shelved`: the shelf vs its base
- *  revision; `local`: the live workspace file vs the synced (#have) revision. */
+ *  revision; `local`: the live workspace file vs the synced (#have) revision;
+ *  `localShelf`: the live workspace file vs its shelved copy. */
 export type DiffSource =
   | { kind: "rev"; file: string; rev: number }
   | { kind: "shelved"; file: string; rev: number; change: string }
   | { kind: "local"; file: string }
+  | { kind: "localShelf"; file: string; change: string }
   | {
       kind: "versions";
       file: string;
@@ -45,6 +47,8 @@ function diffPair(conn: P4Conn, src: DiffSource): Promise<DiffPair> {
       return p4.diffPairShelved(conn, src.file, src.rev, src.change);
     case "local":
       return p4.diffPairLocal(conn, src.file);
+    case "localShelf":
+      return p4.diffPairLocalShelf(conn, src.file, src.change);
     case "versions":
       return p4.diffPairVersions(conn, src.file, src.a, src.b);
   }
@@ -59,6 +63,8 @@ async function openExternal(conn: P4Conn, src: DiffSource): Promise<void> {
       return p4.openDiffShelved(conn, src.file, src.rev, src.change);
     case "local":
       return p4.openDiffLocal(conn, src.file);
+    case "localShelf":
+      return p4.openDiffLocalShelf(conn, src.file, src.change);
     case "versions":
       // No p4 command compares two arbitrary shelves, so there is nothing to
       // hand an external tool: the in-app window is the only path for this one.

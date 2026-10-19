@@ -269,6 +269,34 @@ pub async fn diff_pair_local(conn: P4Conn, depot_file: String) -> Result<DiffPai
     .map_err(|e| format!("diff task failed: {e}"))?
 }
 
+/// An opened file's SHELVED copy vs the live workspace file: what changed since
+/// it was shelved, which is what the review does not have yet.
+#[tauri::command]
+pub async fn diff_pair_local_shelf(conn: P4Conn, depot_file: String, change: String) -> Result<DiffPair, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let recs = p4::run(&conn, &["fstat", "-T", "clientFile", &depot_file])?;
+        let local = recs
+            .first()
+            .and_then(|r| r.get("clientFile"))
+            .and_then(|v| v.as_str())
+            .ok_or("file is not in this workspace")?
+            .to_string();
+        let name = base_name(&depot_file).to_string();
+        let left = print_side(&conn, &format!("{depot_file}@={change}"), &side_tag(&name, &format!("shelf-{change}")))?;
+        Ok(DiffPair {
+            left,
+            right: local,
+            left_label: format!("{name} (shelved @{change})"),
+            right_label: format!("{name} (workspace)"),
+            title: format!("{name}  workspace vs shelf @{change}"),
+            right_editable: true,
+            unresolved_note: String::new(),
+        })
+    })
+    .await
+    .map_err(|e| format!("diff task failed: {e}"))?
+}
+
 /// Read a text file for the diff window (lossy UTF-8; size-capped so a huge or
 /// binary file can't hang the renderer).
 #[tauri::command]
