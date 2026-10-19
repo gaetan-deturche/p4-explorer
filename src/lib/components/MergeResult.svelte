@@ -509,6 +509,8 @@
   }) as seg}<span
       style:color={seg.color}
       class:ghost={seg.ghost}
+      class:sp={seg.ghost === "space"}
+      class:tb={seg.ghost === "tab"}
       class:hot={seg.hot}
       class:found={seg.found}
       class:current={seg.current}
@@ -779,6 +781,24 @@
   .ghost {
     color: var(--dim, #8a8a8a);
     opacity: 0.55;
+  }
+  /* The marks are drawn, never written: the text keeps its real spaces and
+     tabs, so a double click stops at a space and a copy carries no mark. Each
+     one is its own span, and its mark is the font's glyph laid over it. */
+  .ghost.sp,
+  .ghost.tb {
+    position: relative;
+  }
+  .ghost.sp::before,
+  .ghost.tb::before {
+    position: absolute;
+    left: 0;
+  }
+  .ghost.sp::before {
+    content: "\00b7";
+  }
+  .ghost.tb::before {
+    content: "\2192";
   }
   /* An added caret is the same caret, a little dimmer, so the one the view
      follows is still findable in a column of them. */

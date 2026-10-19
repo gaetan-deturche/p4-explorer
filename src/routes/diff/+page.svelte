@@ -1412,6 +1412,8 @@ initSplit(leftText.trim() === "");
           }) as seg}<span
             style:color={seg.color}
             class:ghost={seg.ghost}
+            class:sp={seg.ghost === "space"}
+            class:tb={seg.ghost === "tab"}
             class:hot={seg.hot}
             class:found={seg.found}
             class:current={seg.current}>{seg.text}</span
@@ -1866,6 +1868,24 @@ initSplit(leftText.trim() === "");
   .src :global(.ghost) {
     color: var(--dim, #8a8a8a);
     opacity: 0.55;
+  }
+  /* The marks are drawn, never written: the text keeps its real spaces and
+     tabs, so a double click stops at a space and a copy carries no mark. Each
+     one is its own span, and its mark is the font's glyph laid over it. */
+  .src :global(.ghost.sp),
+  .src :global(.ghost.tb) {
+    position: relative;
+  }
+  .src :global(.ghost.sp)::before,
+  .src :global(.ghost.tb)::before {
+    position: absolute;
+    left: 0;
+  }
+  .src :global(.ghost.sp)::before {
+    content: "\00b7";
+  }
+  .src :global(.ghost.tb)::before {
+    content: "\2192";
   }
   .legend {
     display: flex;

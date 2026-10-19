@@ -1,19 +1,18 @@
 //! Showing the characters you cannot see: spaces, tabs, and where a line really
 //! ends.
 //!
-//! Widths are preserved exactly, which is the constraint everything else follows
-//! from. The panes measure text with a probe span to place the caret and to map a
-//! click back to a column, so a marker that took more or less room than the
-//! character it stands for would put the caret in the wrong place. A middle dot
-//! replaces a space one-for-one, and a tab becomes an arrow followed by spaces up
-//! to its tab stop — in a monospace font that is the same advance the tab had.
+//! The text stays the text: each whitespace character keeps its real character
+//! in a segment of its own, and CSS draws its mark (the font's `·` or `→`). Writing `·` and `→` into the text made a double click take
+//! `public·AVolume` as one word, and copying put the marks on the clipboard.
+//! Widths are therefore exactly the source's, which the caret placement needs.
 
-/** One run of a rendered line: `ghost` runs are the whitespace markers, `hot` is
- *  the part of the line the diff actually changed. */
+/** One run of a rendered line: a `ghost` run is ONE whitespace character to draw
+ *  its mark on ("space" a dot, "tab" an arrow), `hot` is the part of the line the
+ *  diff actually changed. */
 export interface Seg {
   text: string;
   color?: string;
-  ghost?: boolean;
+  ghost?: Ghost;
   hot?: boolean;
   /** Inside a search match. */
   found?: boolean;
@@ -30,8 +29,7 @@ export interface Seg {
 // the headless suite run it with plain `node`.
 const TAB_WIDTH = 4;
 
-export const SPACE_MARK = "\u00b7"; // ·
-export const TAB_MARK = "\u2192"; // →
+export type Ghost = "space" | "tab";
 
 /** The line, cut at the highlighter's run boundaries.
  *
@@ -60,10 +58,8 @@ export function colorParts(
  *  the highlighter's colours, the whitespace marks, and the range the diff
  *  changed.
  *
- *  They have to be composed in one pass rather than layered, because the marks
- *  change LENGTHS (a tab becomes an arrow plus padding) while `hot` is a range of
- *  SOURCE characters. Walking the line once, carrying both the source index and
- *  the visual column, is the only way the range lands on the right glyphs. */
+ *  One walk over the source characters splits a segment wherever any of them
+ *  changes, so every range lands on exactly the characters it names. */
 export function renderLine(
   line: string,
   runs: { content: string; color?: string }[] | undefined,
@@ -92,17 +88,17 @@ export function renderLine(
     return parts.map((r) => ({ text: r.content, color: r.color }));
   }
   const out: Seg[] = [];
-  let col = 0; // visual column, so a tab lands on a real stop
   let src = 0; // source character index, so the ranges mean what they say
   const within = (rs: readonly (readonly [number, number])[], i: number) =>
     rs.some((r) => i >= r[0] && i < r[1]);
   /** What is true of one character. A segment runs while all of it holds. */
   type Marks = { hot: boolean; found: boolean; current: boolean; occur: boolean };
-  const push = (text: string, color: string | undefined, ghost: boolean, m: Marks) => {
+  const push = (text: string, color: string | undefined, ghost: Ghost | undefined, m: Marks) => {
     const last = out[out.length - 1];
     if (
       last &&
-      last.ghost === ghost &&
+      !ghost &&
+      !last.ghost &&
       last.color === color &&
       last.hot === m.hot &&
       last.found === m.found &&
@@ -125,17 +121,7 @@ export function renderLine(
         // looking for, and the selection is usually the same text anyway.
         occur: within(occurs, src) && !within(finds, src) && !isCurrent,
       };
-      if (marks && ch === " ") {
-        push(SPACE_MARK, run.color, true, m);
-        col++;
-      } else if (marks && ch === "\t") {
-        const width = tab - (col % tab);
-        push(TAB_MARK + " ".repeat(width - 1), run.color, true, m);
-        col += width;
-      } else {
-        push(ch, run.color, false, m);
-        col += ch === "\t" ? tab - (col % tab) : 1;
-      }
+      push(ch, run.color, marks && ch === " " ? "space" : marks && ch === "\t" ? "tab" : undefined, m);
       src++;
     }
   }
