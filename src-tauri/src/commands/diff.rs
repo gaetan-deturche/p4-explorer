@@ -636,6 +636,28 @@ pub async fn open_diff_local(conn: P4Conn, depot_file: String) -> Result<(), Str
     .map_err(|e| format!("diff task failed: {e}"))?
 }
 
+/// Open any two file revisions, by spec, in the external tool.
+#[tauri::command]
+pub async fn open_diff_specs(conn: P4Conn, left: String, right: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let tmp = std::env::temp_dir();
+        let name = |spec: &str| {
+            spec.rsplit('/').next().unwrap_or("file").replace(|c: char| !c.is_alphanumeric() && c != '.', "_")
+        };
+        let a = tmp.join(format!("p4gui_l_{}", name(&left)));
+        let b = tmp.join(format!("p4gui_r_{}", name(&right)));
+        let a_s = a.to_str().ok_or("bad temp path")?;
+        let b_s = b.to_str().ok_or("bad temp path")?;
+        p4::run_raw(&conn, &["print", "-q", "-o", a_s, &left])?;
+        p4::run_raw(&conn, &["print", "-q", "-o", b_s, &right])?;
+        let cmdline = p4diff_cmd(&conn)
+            .ok_or("No external diff tool configured. Set P4DIFF (e.g. `p4 set P4DIFF=...`).")?;
+        launch_diff(&cmdline, a_s, b_s)
+    })
+    .await
+    .map_err(|e| format!("diff task failed: {e}"))?
+}
+
 /// Open an opened file's shelved copy vs the live workspace file in the
 /// external tool (shelf on the left, workspace on the right).
 #[tauri::command]

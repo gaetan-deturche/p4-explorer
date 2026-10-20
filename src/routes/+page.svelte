@@ -10,6 +10,7 @@
     setClipboard,
     openFileHistoryWindow,
     openBlameWindow,
+    openRevGraphWindow,
     openReviewWindow,
     openWorkspaceWindow,
     noteWorkspaceWindow,
@@ -636,6 +637,7 @@
       { ...historyMenu(file.depotFile), accel: "fileHistory" },
       holdersMenu(file.depotFile),
       blameMenu(file.depotFile),
+      revGraphMenu(file.depotFile),
       { label: openInLabel, action: () => openLocalInEditor(file.depotFile) },
       {
         label: "Show in File Explorer",
@@ -992,6 +994,14 @@
       label: "Blame…",
       accel: "blame",
       action: () => void openBlameWindow(conn, depotFile).catch((e) => setError(String(e))),
+    };
+  }
+
+  /** The "Revision graph" entry: every path the file lived at, and how it moved. */
+  function revGraphMenu(depotFile: string) {
+    return {
+      label: "Revision graph…",
+      action: () => void openRevGraphWindow(conn, depotFile).catch((e) => setError(String(e))),
     };
   }
 
@@ -1726,6 +1736,7 @@
             historyMenu(p),
             holdersMenu(p),
             blameMenu(p),
+            revGraphMenu(p),
             { label: "", sep: true },
           ]),
       copyMenu(p),
@@ -1772,6 +1783,7 @@
       historyMenu(f.depotFile),
       holdersMenu(f.depotFile),
       blameMenu(f.depotFile),
+      revGraphMenu(f.depotFile),
       copyMenu(f.depotFile),
       { label: "", sep: true },
       {
@@ -1852,7 +1864,7 @@
         label: "Show in File Explorer",
         action: () => void revealLocal(String(f.depotFile ?? ""), f.clientFile),
       },
-      ...(f.depotFile ? [historyMenu(f.depotFile), holdersMenu(f.depotFile), blameMenu(f.depotFile)] : []),
+      ...(f.depotFile ? [historyMenu(f.depotFile), holdersMenu(f.depotFile), blameMenu(f.depotFile), revGraphMenu(f.depotFile)] : []),
       { label: "", sep: true },
       copyMenu(f.depotFile ?? f.clientFile ?? "", f.clientFile),
       { label: "", sep: true },
@@ -1881,6 +1893,7 @@
       historyMenu(f.depotFile),
       holdersMenu(f.depotFile),
       blameMenu(f.depotFile),
+      revGraphMenu(f.depotFile),
       copyMenu(f.depotFile),
       { label: "", sep: true },
       // Undo just this file out of the changelist — the one case the whole-CL

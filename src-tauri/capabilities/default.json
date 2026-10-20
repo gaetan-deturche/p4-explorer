@@ -1,8 +1,8 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability for the main and per-workspace windows, and the in-app diff / resolve / file-history windows",
-  "windows": ["main", "work-*", "diff-*", "merge-*", "filehist-*", "blame-*", "review-*"],
+  "description": "Capability for the main and per-workspace windows, and the in-app diff / resolve / file-history / revision-graph windows",
+  "windows": ["main", "work-*", "diff-*", "merge-*", "filehist-*", "blame-*", "revgraph-*", "review-*"],
   "permissions": [
     "core:default",
     "core:window:allow-close",

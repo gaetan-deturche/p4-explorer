@@ -24,6 +24,8 @@ export type DiffSource =
   | { kind: "shelved"; file: string; rev: number; change: string }
   | { kind: "local"; file: string }
   | { kind: "localShelf"; file: string; change: string }
+  /** Two revisions by spec, possibly of two paths; `file` names the asset. */
+  | { kind: "specs"; file: string; left: string; right: string }
   | {
       kind: "versions";
       file: string;
@@ -49,6 +51,8 @@ function diffPair(conn: P4Conn, src: DiffSource): Promise<DiffPair> {
       return p4.diffPairLocal(conn, src.file);
     case "localShelf":
       return p4.diffPairLocalShelf(conn, src.file, src.change);
+    case "specs":
+      return p4.diffPairSpecs(conn, src.left, src.right);
     case "versions":
       return p4.diffPairVersions(conn, src.file, src.a, src.b);
   }
@@ -65,6 +69,8 @@ async function openExternal(conn: P4Conn, src: DiffSource): Promise<void> {
       return p4.openDiffLocal(conn, src.file);
     case "localShelf":
       return p4.openDiffLocalShelf(conn, src.file, src.change);
+    case "specs":
+      return p4.openDiffSpecs(conn, src.left, src.right);
     case "versions":
       // No p4 command compares two arbitrary shelves, so there is nothing to
       // hand an external tool: the in-app window is the only path for this one.

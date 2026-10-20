@@ -459,6 +459,44 @@ export function openBlameWindow(conn: P4Conn, depotFile: string, revSpec = ""): 
   return invoke<void>("open_blame_window", { conn, depotFile, revSpec });
 }
 
+/** Open the revision-graph window for a depot file (one window per file). */
+export function openRevGraphWindow(conn: P4Conn, depotFile: string): Promise<void> {
+  return invoke<void>("open_revgraph_window", { conn, depotFile });
+}
+
+/** One revision in the revision graph. `time` is in seconds since the epoch. */
+export interface GraphRev {
+  rev: number;
+  change: string;
+  action: string;
+  time: number;
+  user: string;
+  desc: string;
+}
+/** One depot path the file lived at; `related` = outside its own ancestry. */
+export interface GraphLane {
+  file: string;
+  revs: GraphRev[];
+  related: boolean;
+}
+/** An integration, oriented the way the content went: `fromStart`..`fromRev`
+ *  of `fromFile` produced `toFile#toRev`. */
+export interface GraphEdge {
+  fromFile: string;
+  fromRev: number;
+  fromStart: number;
+  toFile: string;
+  toRev: number;
+  how: string;
+}
+export interface RevGraph {
+  focus: string;
+  lanes: GraphLane[];
+  edges: GraphEdge[];
+  /** Files it was branched into that are left out unless asked for. */
+  hiddenInto: number;
+}
+
 /** Open the file-history window for a depot file (one window per file). */
 export function openFileHistoryWindow(conn: P4Conn, depotFile: string): Promise<void> {
   return invoke<void>("open_file_history_window", { conn, depotFile });
@@ -816,6 +854,11 @@ export const p4 = {
   diffPairLocal: (conn: P4Conn, depotFile: string) => g<DiffPair>("diff_pair_local", { conn, depotFile }),
   diffPairLocalShelf: (conn: P4Conn, depotFile: string, change: string) =>
     g<DiffPair>("diff_pair_local_shelf", { conn, depotFile, change }),
+  /** Any two file revisions by spec, e.g. across the paths of a revision graph. */
+  diffPairSpecs: (conn: P4Conn, left: string, right: string) => g<DiffPair>("diff_pair_specs", { conn, left, right }),
+  openDiffSpecs: (conn: P4Conn, left: string, right: string) => g<void>("open_diff_specs", { conn, left, right }),
+  revisionGraph: (conn: P4Conn, depotFile: string, includeInto: boolean) =>
+    g<RevGraph>("revision_graph", { conn, depotFile, includeInto }),
   /** Diff two UE asset files in Unreal: in a RUNNING editor when one is up
    *  (remote-exec DiffAssets), else a fresh `UnrealEditor -diff` instance.
    *  Resolves to "remote" or "launched". `name` = the asset's object name. */

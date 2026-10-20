@@ -269,6 +269,35 @@ pub async fn diff_pair_local(conn: P4Conn, depot_file: String) -> Result<DiffPai
     .map_err(|e| format!("diff task failed: {e}"))?
 }
 
+/// Any two file revisions, by spec (`//a/f.cpp#3`, `//b/f.cpp#1`): the revision
+/// graph compares revisions across paths, which no other pair can name.
+#[tauri::command]
+pub async fn diff_pair_specs(conn: P4Conn, left: String, right: String) -> Result<DiffPair, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let label = |spec: &str| spec.rsplit('/').next().unwrap_or(spec).to_string();
+        let tag = |spec: &str| {
+            let l = label(spec);
+            match l.split_once('#') {
+                Some((name, rev)) => side_tag(name, rev),
+                None => sane(&l),
+            }
+        };
+        let l = print_side(&conn, &left, &tag(&left))?;
+        let r = print_side(&conn, &right, &tag(&right))?;
+        Ok(DiffPair {
+            left: l,
+            right: r,
+            left_label: left.clone(),
+            right_label: right.clone(),
+            title: format!("{}  vs  {}", label(&left), label(&right)),
+            right_editable: false,
+            unresolved_note: String::new(),
+        })
+    })
+    .await
+    .map_err(|e| format!("diff task failed: {e}"))?
+}
+
 /// An opened file's SHELVED copy vs the live workspace file: what changed since
 /// it was shelved, which is what the review does not have yet.
 #[tauri::command]

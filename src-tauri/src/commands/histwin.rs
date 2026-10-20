@@ -108,6 +108,32 @@ pub async fn open_blame_window(
     Ok(())
 }
 
+/// Open (or re-focus) the revision-graph window for a file: one per file.
+#[tauri::command]
+pub async fn open_revgraph_window(app: AppHandle, conn: P4Conn, depot_file: String) -> Result<(), String> {
+    let name = depot_file.rsplit('/').next().unwrap_or(&depot_file).to_string();
+    let id = format!("g{}", slug(&depot_file));
+    let label = format!("revgraph-{id}");
+    registry().lock().unwrap().insert(
+        id.clone(),
+        HistJob { conn, depot_file: depot_file.clone(), rev_spec: String::new() },
+    );
+    if let Some(win) = app.get_webview_window(&label) {
+        let _ = win.unminimize();
+        let _ = win.set_focus();
+        return Ok(());
+    }
+    let win = WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(format!("revgraph?id={id}").into()))
+        .title(format!("Revision graph — {name}"))
+        .inner_size(1300.0, 520.0)
+        .min_inner_size(600.0, 250.0)
+        .visible(false) // shown by wingeom::apply, already at its remembered spot
+        .build()
+        .map_err(|e| format!("failed to open the revision graph window: {e}"))?;
+    crate::wingeom::apply(&win, "revgraph");
+    Ok(())
+}
+
 /// The job a history window was opened with.
 #[tauri::command]
 pub async fn file_history_job(id: String) -> Result<HistJob, String> {
