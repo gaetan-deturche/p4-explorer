@@ -656,7 +656,8 @@ export const p4 = {
     g<void>("open_diff_shelved", { conn, depotFile, rev, change }),
   streams: (conn: P4Conn) => call("p4_streams", { conn }),
   depots: (conn: P4Conn) => call("p4_depots", { conn }),
-  switch: (conn: P4Conn, stream: string) => call("p4_switch", { conn, stream }),
+  /** `unrelated` crosses into another stream hierarchy (`--allow-unrelated`). */
+  switch: (conn: P4Conn, stream: string, unrelated = false) => call("p4_switch", { conn, stream, unrelated }),
   submit: (conn: P4Conn, change: string) => call("p4_submit", { conn, change }),
   /** Remove shelved files: the whole shelf, or just `files`. */
   shelveDelete: (conn: P4Conn, change: string, files: string[] = []) =>

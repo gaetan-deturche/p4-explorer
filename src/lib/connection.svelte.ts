@@ -665,7 +665,24 @@ export const connection = {
     h.setSyncing(true);
     h.setConnError("");
     try {
-      await p4.switch(conn, stream); // throws (surfaced below) if p4 refuses
+      try {
+        await p4.switch(conn, stream); // throws (surfaced below) if p4 refuses
+      } catch (e) {
+        // A stream from another hierarchy: p4 asks for --allow-unrelated, and
+        // that is a choice worth asking about, not one to make silently.
+        if (!/allow-unrelated/.test(String(e))) throw e;
+        h.setSyncing(false);
+        const from = clients.find((c) => c.client === conn.client)?.Stream ?? "the current stream";
+        const yes = await h.askConfirm(
+          `${stream} is not in the stream hierarchy of ${from}. p4 relates streams only through ` +
+            `their Parent field, not through merges between them.\n\nSwitch the workspace across hierarchies anyway?`,
+          "Unrelated stream",
+          "Switch anyway",
+        );
+        if (!yes) return;
+        h.setSyncing(true);
+        await p4.switch(conn, stream, true);
+      }
       clients = await p4.clients(conn); // pick up the client's new Stream
       await connection.selectClient();
       h.setNotice(`Switched workspace to ${stream}.`);

@@ -285,9 +285,17 @@ pub async fn p4_streams(conn: P4Conn) -> Res {
 
 /// Switch the connection's client to a different stream (`p4 switch <stream>`).
 /// A workspace write; p4 refuses if files are open (surfaced as an error).
+/// `unrelated` crosses into another stream hierarchy (`--allow-unrelated`),
+/// which p4 refuses otherwise: two mainlines are unrelated to it even when one
+/// is fed from the other by merges, as Weekly is from Main.
 #[tauri::command]
-pub async fn p4_switch(conn: P4Conn, stream: String) -> Res {
-    run(conn, v(&["switch", &stream])).await
+pub async fn p4_switch(conn: P4Conn, stream: String, unrelated: Option<bool>) -> Res {
+    let mut args = vec!["switch"];
+    if unrelated.unwrap_or(false) {
+        args.push("--allow-unrelated");
+    }
+    args.push(&stream);
+    run(conn, v(&args)).await
 }
 
 /// The configured P4PORT (`p4 set P4PORT`), stripped of its ` (origin)` tag —
