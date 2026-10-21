@@ -167,7 +167,8 @@ pub(crate) fn prepare_resolve_merge(conn: &P4Conn, depot_file: &str) -> Result<S
 
     let name = depot_file.rsplit('/').next().unwrap_or("file").to_string();
     let base = print_lines(conn, &format!("{bf}#{br}"), &format!("base_{name}"))?;
-    let theirs = print_lines(conn, &format!("{ff}#{fr}"), &format!("theirs_{name}"))?;
+    let (theirs_spec, theirs_label) = resolve_source(&ff, &fr);
+    let theirs = print_lines(conn, &theirs_spec, &format!("theirs_{name}"))?;
     let ours = read_lines(&client)?;
 
     Ok(register(MergeJob {
@@ -177,7 +178,7 @@ pub(crate) fn prepare_resolve_merge(conn: &P4Conn, depot_file: &str) -> Result<S
         target: client,
         name,
         base_label: format!("base #{br}"),
-        theirs_label: format!("depot #{fr}"),
+        theirs_label,
         yours_label: "workspace".into(),
         base,
         ours,
@@ -186,6 +187,20 @@ pub(crate) fn prepare_resolve_merge(conn: &P4Conn, depot_file: &str) -> Result<S
         rej: None,
         patch_src: None,
     }))
+}
+
+/// The printable spec of a resolve's source, and how to label it. After an
+/// unshelve across streams p4 names the SHELF as the source, in the form
+/// `//216948/CuriosityP4/Dev/Main/…` — which `p4 print` rejects ("must refer to
+/// client … or a depot"); its content is `//CuriosityP4/Dev/Main/…@=216948`.
+/// A purely numeric first segment cannot be a depot: p4 forbids numeric names.
+fn resolve_source(file: &str, rev: &str) -> (String, String) {
+    if let Some((num, path)) = file.strip_prefix("//").and_then(|rest| rest.split_once('/')) {
+        if !num.is_empty() && num.bytes().all(|b| b.is_ascii_digit()) {
+            return (format!("//{path}@={num}"), format!("shelf @{num}"));
+        }
+    }
+    (format!("{file}#{rev}"), format!("depot #{rev}"))
 }
 
 /// Write the settled text back. For a resolve that also marks the file resolved
@@ -458,6 +473,7 @@ fn p4_set_var(conn: &P4Conn, key: &str) -> Option<String> {
 
 #[cfg(test)]
 mod resolve_tests {
+    use super::resolve_source;
     use crate::p4::explode_indexed;
 
     /// A REAL `p4 -ztag fstat -Ru -Or` record for a file that needs a content
@@ -485,6 +501,17 @@ mod resolve_tests {
             .iter()
             .map(|(k, v)| (k.to_string(), serde_json::Value::String(v.to_string())))
             .collect()
+    }
+
+    #[test]
+    fn a_shelf_as_the_resolve_source_is_printed_from_the_shelf() {
+        // What fstat -Ru reported after unshelving @216948 from Main into Weekly.
+        let (spec, label) = resolve_source("//216948/CuriosityP4/Dev/Main/Games/Curiosity/Shaders/LineFilter.ush", "4");
+        assert_eq!(spec, "//CuriosityP4/Dev/Main/Games/Curiosity/Shaders/LineFilter.ush@=216948");
+        assert_eq!(label, "shelf @216948");
+        let (spec, label) = resolve_source("//d/AI/CYAISubsystem.cpp", "31");
+        assert_eq!(spec, "//d/AI/CYAISubsystem.cpp#31");
+        assert_eq!(label, "depot #31");
     }
 
     #[test]

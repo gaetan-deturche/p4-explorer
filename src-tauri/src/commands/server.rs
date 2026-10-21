@@ -290,12 +290,22 @@ pub async fn p4_streams(conn: P4Conn) -> Res {
 /// is fed from the other by merges, as Weekly is from Main.
 #[tauri::command]
 pub async fn p4_switch(conn: P4Conn, stream: String, unrelated: Option<bool>) -> Res {
-    let mut args = vec!["switch"];
-    if unrelated.unwrap_or(false) {
-        args.push("--allow-unrelated");
-    }
-    args.push(&stream);
-    run(conn, v(&args)).await
+    tauri::async_runtime::spawn_blocking(move || {
+        // `-Rn`: no reconcile first. Without it switch runs `reconcile -Raed` —
+        // the new-file walk alone is ~40 min here — and opens and shelves what
+        // it finds. `--no-sync`: the caller syncs afterwards, with progress; a
+        // switch that synced took 943 s here with nothing to show for it.
+        let mut args = vec!["switch", "-Rn", "--no-sync"];
+        if unrelated.unwrap_or(false) {
+            args.push("--allow-unrelated");
+        }
+        args.push(&stream);
+        // Strict: a switch that printed records AND failed (files it could not
+        // replace) must not read as a success, which plain `run` let it.
+        p4::run_strict(&conn, &args)
+    })
+    .await
+    .map_err(|e| format!("switch task failed: {e}"))?
 }
 
 /// The configured P4PORT (`p4 set P4PORT`), stripped of its ` (origin)` tag —

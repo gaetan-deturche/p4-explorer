@@ -381,7 +381,7 @@ fn apply_one(conn: &P4Conn, pf: &PatchFile, opts: Option<&ApplyOpts>) -> FileRep
             args.push("-c");
             args.push(&opts.change);
         }
-        args.push(&pf.depot);
+        args.push(&local);
         if let Err(e) = p4::run(conn, &args) {
             rep.status = "conflict".into();
             rep.message = format!("p4 edit failed: {e}");
@@ -447,15 +447,7 @@ fn apply_binary(conn: &P4Conn, pf: &PatchFile, bin: &BinaryPatch, opts: Option<&
 
     // Unlike a text hunk, a binary target may legitimately NOT exist yet (the
     // patch carries an added file), so mapping matters more than existence.
-    let mapped = p4::run(conn, &["where", &pf.depot]).ok().and_then(|recs| {
-        recs.first().and_then(|r| {
-            r.get("path")
-                .or_else(|| r.get("clientFile"))
-                .and_then(|v| v.as_str())
-                .map(String::from)
-        })
-    });
-    let local = match mapped {
+    let local = match map_local(conn, &pf.depot) {
         Some(p) => p,
         None if std::path::Path::new(&pf.local_hint).is_file() => pf.local_hint.clone(),
         None => {
@@ -488,7 +480,7 @@ fn apply_binary(conn: &P4Conn, pf: &PatchFile, bin: &BinaryPatch, opts: Option<&
             args.push("-c");
             args.push(&opts.change);
         }
-        args.push(&pf.depot);
+        args.push(&local);
         if let Err(e) = p4::run_strict(conn, &args) {
             rep.status = "conflict".into();
             rep.message = format!("p4 edit failed: {e}");
@@ -542,15 +534,7 @@ fn apply_delete(conn: &P4Conn, pf: &PatchFile, opts: Option<&ApplyOpts>) -> File
         message: "will be deleted".into(),
         rej_path: String::new(),
     };
-    let mapped = p4::run(conn, &["where", &pf.depot]).ok().and_then(|recs| {
-        recs.first().and_then(|r| {
-            r.get("path")
-                .or_else(|| r.get("clientFile"))
-                .and_then(|v| v.as_str())
-                .map(String::from)
-        })
-    });
-    let local = match mapped {
+    let local = match map_local(conn, &pf.depot) {
         Some(p) => p,
         None if !pf.local_hint.is_empty() => pf.local_hint.clone(),
         None => {
@@ -576,7 +560,7 @@ fn apply_delete(conn: &P4Conn, pf: &PatchFile, opts: Option<&ApplyOpts>) -> File
         args.push("-c");
         args.push(&opts.change);
     }
-    args.push(&pf.depot);
+    args.push(&local);
     match p4::run_strict(conn, &args) {
         Ok(_) => {
             rep.status = "deleted".into();
@@ -637,19 +621,21 @@ fn apply_rename(
         edit.push("-c");
         edit.push(&opts.change);
     }
-    edit.push(from);
+    // By local path: both ends may be another stream's, placed here by map_local.
+    edit.push(&src);
     if let Err(e) = p4::run_strict(conn, &edit) {
         rep.status = "conflict".into();
         rep.message = format!("p4 edit of {from} failed: {e}");
         return rep;
     }
+    let to = map_local(conn, &pf.depot).unwrap_or_else(|| pf.depot.clone());
     let mut mv: Vec<&str> = vec!["move"];
     if !opts.change.is_empty() {
         mv.push("-c");
         mv.push(&opts.change);
     }
-    mv.push(from);
-    mv.push(&pf.depot);
+    mv.push(&src);
+    mv.push(&to);
     match p4::run_strict(conn, &mv) {
         Ok(_) => {
             rep.status = "renamed".into();
@@ -748,20 +734,27 @@ fn matches_at(lines: &[String], want: &[String], at: usize, loose: bool) -> bool
     })
 }
 
-/// The local path to patch: `p4 where` for this client, else the patch's own
-/// `+++` path when it happens to exist on this machine.
-pub(crate) fn resolve_target(conn: &P4Conn, depot: &str, hint: &str) -> Option<String> {
-    if let Ok(recs) = p4::run(conn, &["where", depot]) {
-        let mapped = recs.first().and_then(|r| {
+/// Where `depot` lands in this workspace, existing or not: `p4 where`, or for a
+/// path from ANOTHER stream (a review shelved there) the same path relative to
+/// this workspace's stream — which `p4 where` cannot answer.
+pub(crate) fn map_local(conn: &P4Conn, depot: &str) -> Option<String> {
+    let mapped = p4::run(conn, &["where", depot]).ok().and_then(|recs| {
+        recs.first().and_then(|r| {
             r.get("path")
                 .or_else(|| r.get("clientFile"))
                 .and_then(|v| v.as_str())
                 .map(String::from)
-        });
-        if let Some(p) = mapped {
-            if std::path::Path::new(&p).is_file() {
-                return Some(p);
-            }
+        })
+    });
+    mapped.or_else(|| crate::commands::swarm::cross_stream_local(conn, depot))
+}
+
+/// The local path to patch: `map_local`, else the patch's own `+++` path when
+/// it happens to exist on this machine.
+pub(crate) fn resolve_target(conn: &P4Conn, depot: &str, hint: &str) -> Option<String> {
+    if let Some(p) = map_local(conn, depot) {
+        if std::path::Path::new(&p).is_file() {
+            return Some(p);
         }
     }
     if !hint.is_empty() && std::path::Path::new(hint).is_file() {

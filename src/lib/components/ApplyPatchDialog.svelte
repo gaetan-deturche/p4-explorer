@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { PatchFileReport } from "$lib/p4";
+  import type { ApplyMode } from "$lib/patch.svelte";
 
   let {
     path,
@@ -8,6 +9,7 @@
     busy,
     subject = "",
     skipped = [],
+    newClName = "",
     onApply,
     onResolveHunk,
     onClose,
@@ -20,12 +22,18 @@
     subject?: string;
     /** Files the source carried that a patch cannot express (binaries, adds). */
     skipped?: string[];
-    onApply: (mode: "edit" | "offline", partial: boolean) => void;
+    /** A review's description: offers a new changelist of that name. */
+    newClName?: string;
+    onApply: (mode: ApplyMode, partial: boolean) => void;
     onResolveHunk: (depot: string, hunkIndex: number) => void;
     onClose: () => void;
   } = $props();
 
-  let mode = $state<"edit" | "offline">("offline");
+  let mode = $state<ApplyMode>("offline");
+  const newClTitle = $derived.by(() => {
+    const first = newClName.split("\n")[0].trim();
+    return first.length > 48 ? first.slice(0, 47) + "…" : first;
+  });
   let partial = $state(false);
 
   const name = $derived(path.split(/[\\/]/).pop() || path);
@@ -149,6 +157,12 @@
             <input type="radio" value="edit" bind:group={mode} />
             opened for edit in the default changelist
           </label>
+          {#if newClName}
+            <label title={newClName}>
+              <input type="radio" value="newcl" bind:group={mode} />
+              opened for edit in a new changelist “{newClTitle}”
+            </label>
+          {/if}
         </div>
         {#if conflicted > 0}
           <label class="orow warnish">

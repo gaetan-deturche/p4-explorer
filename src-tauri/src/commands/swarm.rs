@@ -792,8 +792,10 @@ pub async fn review_patch(conn: P4Conn, change: String) -> Result<ReviewPatch, S
             return Err(format!("@{change} has no files to apply."));
         }
         // A review on another depot maps nowhere here; say that once, with the
-        // depot, instead of reporting every single file as "not found".
-        if !shelf.iter().any(|(f, _)| !client_path(&conn, f).is_empty()) {
+        // depot, instead of reporting every single file as "not found". One from
+        // another STREAM does map: onto this one, at the same relative path.
+        let maps = |f: &str| !client_path(&conn, f).is_empty() || cross_stream_local(&conn, f).is_some();
+        if !shelf.iter().any(|(f, _)| maps(f)) {
             let depot = shelf[0]
                 .0
                 .split('/')
@@ -947,6 +949,25 @@ fn cross_stream_path(
     (!local.is_empty()).then_some((local, from))
 }
 
+/// `cross_stream_path` for callers without a cache of their own (one file at a
+/// time, as patch apply works): the stream list is kept for a minute per client.
+pub(crate) fn cross_stream_local(conn: &P4Conn, depot: &str) -> Option<String> {
+    use std::sync::{Mutex, OnceLock};
+    use std::time::{Duration, Instant};
+    static CACHE: OnceLock<Mutex<Option<(String, Instant, Option<(String, Vec<String>)>)>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(None));
+    let mut streams = {
+        let c = cache.lock().unwrap();
+        match c.as_ref() {
+            Some((client, at, s)) if *client == conn.client && at.elapsed() < Duration::from_secs(60) => s.clone(),
+            _ => None,
+        }
+    };
+    let found = cross_stream_path(conn, depot, &mut streams);
+    *cache.lock().unwrap() = Some((conn.client.clone(), Instant::now(), streams));
+    found.map(|(local, _)| local)
+}
+
 /// Copy files from a review's shelf verbatim, for the ones a unified diff cannot
 /// carry: binaries, and adds that have no base to diff against.
 ///
@@ -958,12 +979,18 @@ fn cross_stream_path(
 /// Deletes are deliberately only honoured in "edit" mode, where `p4 delete`
 /// records the intent and the file can be reverted. In "offline" mode there
 /// would be nothing to undo, so the file is left alone and reported.
+///
+/// `into` opens the files in that changelist instead of the default one: how a
+/// parked changelist comes along into an UNRELATED stream, where `p4 unshelve`
+/// finds nothing to map ("No such file(s)", Main into Weekly). The content is
+/// the shelf's, as shelved: the target stream's own version is overwritten.
 #[tauri::command]
 pub async fn review_copy_files(
     conn: P4Conn,
     change: String,
     files: Vec<String>,
     mode: String,
+    into: Option<String>,
 ) -> Result<Vec<CopyResult>, String> {
     tauri::async_runtime::spawn_blocking(move || {
         if change.trim().is_empty() || files.is_empty() {
@@ -987,7 +1014,7 @@ pub async fn review_copy_files(
             // A shelf from another stream: its paths are not in this view, so
             // place each file where an unshelve would.
             let mut placed = String::new();
-            if local.is_empty() && mode == "offline" {
+            if local.is_empty() {
                 let targets = targets.get_or_insert_with(|| unshelve_targets(&conn, &change));
                 if let Some(target) = placed_as(&depot, targets) {
                     local = client_path(&conn, &target);
@@ -1014,9 +1041,19 @@ pub async fn review_copy_files(
                 continue;
             }
 
+            // The changelist to open in, and what to name the file by: a file
+            // placed from another stream is only known here by its local path.
+            let mut opts: Vec<&str> = Vec::new();
+            if let Some(c) = into.as_deref() {
+                opts.extend(["-c", c]);
+            }
+            let name: &str = if placed.is_empty() { &depot } else { &local };
             if action == "delete" {
                 if mode == "edit" {
-                    match p4::run_strict(&conn, &["delete", &depot]) {
+                    let mut args = vec!["delete"];
+                    args.extend(&opts);
+                    args.push(name);
+                    match p4::run_strict(&conn, &args) {
                         Ok(_) => {
                             rep.status = "opened".into();
                             rep.message = "opened for delete".into();
@@ -1035,9 +1072,20 @@ pub async fn review_copy_files(
             // read-only flag, and a later write would otherwise be clobbered.
             // An `add` from a SUBMITTED change is already in the depot, so it is
             // opened for edit like any other file — only a shelved add is new here.
-            let adding = action == "add" && shelved;
+            let mut adding = action == "add" && shelved;
+            // Placed from another stream: whether it is new HERE is this
+            // stream's answer, not the shelf's.
+            if !placed.is_empty() {
+                adding = !p4::run(&conn, &["fstat", "-T", "haveRev", &local])
+                    .unwrap_or_default()
+                    .iter()
+                    .any(|r| r.contains_key("haveRev"));
+            }
             if mode == "edit" && !adding {
-                if let Err(e) = p4::run_strict(&conn, &["edit", &depot]) {
+                let mut args = vec!["edit"];
+                args.extend(&opts);
+                args.push(name);
+                if let Err(e) = p4::run_strict(&conn, &args) {
                     rep.message = format!("p4 edit failed: {e}");
                     out.push(rep);
                     continue;
@@ -1067,7 +1115,10 @@ pub async fn review_copy_files(
                 }
             }
             if mode == "edit" && adding {
-                match p4::run_strict(&conn, &["add", &local]) {
+                let mut args = vec!["add"];
+                args.extend(&opts);
+                args.push(&local);
+                match p4::run_strict(&conn, &args) {
                     Ok(_) => {
                         rep.status = "opened".into();
                         rep.message = "opened for add".into();

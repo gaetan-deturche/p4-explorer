@@ -3,7 +3,7 @@
 //! and the keep-alive/health-check poll. The `conn` object itself stays in the
 //! page (it is two-way bound by dialogs); this store drives everything around it.
 
-import { p4, pickFolder as pickFolderCmd, type P4Conn, type P4Record } from "$lib/p4";
+import { p4, pickFolder as pickFolderCmd, type P4Conn, type P4Record, type ParkedChange } from "$lib/p4";
 import { loadServers, loadServersAsync, saveServers, withServer, withoutServer } from "$lib/servers";
 import {
   loadClientFor,
@@ -21,6 +21,23 @@ import {
 import { browse } from "$lib/browse.svelte";
 import { history } from "$lib/history.svelte";
 import { pending } from "$lib/pending.svelte";
+import { cacheGet, cacheSet } from "$lib/store.svelte";
+import { sync } from "$lib/sync.svelte";
+
+/** A changelist parked (shelved, files reverted) for a stream switch, and the
+ *  stream it was parked from. */
+type ParkedCl = { change: string; from: string };
+const parkedKey = (conn: P4Conn) => `parked:${conn.port}:${conn.client}`;
+async function loadParked(conn: P4Conn): Promise<ParkedCl[]> {
+  try {
+    return JSON.parse((await cacheGet("nav", parkedKey(conn))) ?? "[]") as ParkedCl[];
+  } catch {
+    return [];
+  }
+}
+function saveParked(conn: P4Conn, list: ParkedCl[]): void {
+  cacheSet("nav", parkedKey(conn), JSON.stringify(list));
+}
 
 type Tab = "history" | "pending" | "reviews" | "stashes" | "streams" | "log" | "notes";
 type Hooks = {
@@ -36,6 +53,14 @@ type Hooks = {
   getSyncing: () => boolean;
   setSyncing: (v: boolean) => void;
   askConfirm: (msg: string, title?: string, ok?: string) => Promise<boolean>;
+  // A confirmation with a tick-box per item; `picks` says which were ticked.
+  askChoices: (
+    msg: string,
+    title: string,
+    ok: string,
+    choices: { label: string; detail?: string; checked: boolean }[],
+    footer?: string,
+  ) => Promise<{ ok: boolean; picks: boolean[] }>;
   // Reload what the open tabs show (the Refresh button). Needed after a login
   // that happened AFTER the views were painted — see connect().
   refreshViews: () => void;
@@ -653,18 +678,72 @@ export const connection = {
   async switchStream(stream: string) {
     if (!h || !connected || h.getSyncing()) return;
     const conn = h.conn();
-    if (
-      !(await h.askConfirm(
-        `${stream}\n\nThis reconfigures the workspace and syncs to that stream. Open files will block the switch — shelve or submit them first.`,
+    const from = clients.find((c) => c.client === conn.client)?.Stream ?? "";
+    // p4 refuses to switch while a NUMBERED changelist has open files. Those are
+    // parked instead: shelved, then reverted, to come back by unshelving.
+    const numbered = pending.rows
+      .map((r) => String(r.change))
+      .filter((c) => c !== "default" && (pending.openCount(c) ?? 0) > 0);
+    let plan: ParkedChange[] = [];
+    if (numbered.length) {
+      h.setNotice("Checking the open changelists…", 0);
+      try {
+        plan = await p4.parkChangelists(conn, numbered, true);
+      } catch (e) {
+        h.setNotice("", 1);
+        h.setConnError(String(e));
+        return;
+      }
+      h.setNotice("", 1);
+    }
+    // The row ellipsizes whatever does not fit; the dialog sets the width.
+    const descOf = (c: string) =>
+      String(pending.rows.find((r) => String(r.change) === c)?.desc ?? "").split("\n")[0].trim();
+    const choices = plan.map((p) => ({
+      label: `@${p.change} ${descOf(p.change)}`,
+      detail:
+        `${p.files} file${p.files === 1 ? "" : "s"}` +
+        (!p.shelves ? " · shelf up to date" : p.hadShelf ? " · shelf replaced (review updates)" : ""),
+      checked: false,
+    }));
+    const offline = pending.offline.length;
+    const short = stream.split("/").pop() ?? stream;
+    const home = from.split("/").pop() || "this stream";
+    const footer = [
+      (pending.openCount("default") ?? 0) > 0 ? "The default changelist is shelved by p4 and restored on return." : "",
+      offline ? `${offline} offline file${offline === 1 ? "" : "s"} may not update.` : "",
+    ]
+      .filter(Boolean)
+      .join("\n");
+    let bringAlong: string[] = [];
+    if (plan.length) {
+      const a = await h.askChoices(
+        `Switch to ${stream}?\n\nThese changelists are shelved, then reverted. Tick the ones to unshelve into ${short}; ` +
+          `the others come back when you return to ${home}.`,
         "Switch workspace stream",
-        "Switch",
-      ))
-    ) {
+        "Park & switch",
+        choices,
+        footer,
+      );
+      if (!a.ok) return;
+      bringAlong = plan.filter((_, i) => a.picks[i]).map((p) => p.change);
+    } else if (!(await h.askConfirm(`Switch to ${stream}?${footer ? "\n\n" + footer : ""}`, "Switch workspace stream", "Switch"))) {
       return;
     }
     h.setSyncing(true);
     h.setConnError("");
+    let parkedNow: string[] = [];
+    let switched = false;
     try {
+      if (plan.length) {
+        h.setNotice(`Parking ${plan.length} changelist${plan.length === 1 ? "" : "s"}…`, 0);
+        const done = await p4.parkChangelists(conn, plan.map((p) => p.change), false);
+        parkedNow = done.map((p) => p.change);
+        const kept = (await loadParked(conn)).filter((p) => !parkedNow.includes(p.change));
+        saveParked(conn, [...kept, ...parkedNow.map((change) => ({ change, from }))]);
+        h.setNotice("", 1);
+      }
+      h.setNotice(`Switching to ${short}…`, 0);
       try {
         await p4.switch(conn, stream); // throws (surfaced below) if p4 refuses
       } catch (e) {
@@ -681,15 +760,85 @@ export const connection = {
         );
         if (!yes) return;
         h.setSyncing(true);
+        h.setNotice(`Switching to ${short}…`, 0);
         await p4.switch(conn, stream, true);
       }
+      switched = true;
+      h.setNotice("", 1);
+      // The switch only re-pointed the view (--no-sync); the sync is the app's
+      // own, with its progress dialog and its report of what it could not write.
+      await sync.run(`Sync to ${short}`);
       clients = await p4.clients(conn); // pick up the client's new Stream
       await connection.selectClient();
-      h.setNotice(`Switched workspace to ${stream}.`);
     } catch (e) {
+      h.setNotice("", 1);
       h.setConnError(String(e));
     } finally {
       h.setSyncing(false);
     }
+    // Still where it was, with changelists just parked: put them straight back.
+    if (!switched && parkedNow.length) {
+      await connection.unpark(parkedNow, `The switch did not happen. Unshelve the parked changelists back?`);
+      return;
+    }
+    if (!switched) return;
+    const parked = await loadParked(conn);
+    const back = parked.filter((p) => p.from === stream).map((p) => p.change);
+    if (back.length) {
+      await connection.unpark(back, `These changelists were parked when the workspace left ${stream}:`);
+    }
+    // B, ticked per changelist in the switch dialog: bring those along.
+    const along = parkedNow.filter((c) => bringAlong.includes(c));
+    if (along.length) await connection.unpark(along, "", "", false);
+  },
+
+  /** Unshelve parked changelists into their own changelists, after asking
+   *  (unless `ask` is false: the switch dialog already did). */
+  async unpark(changes: string[], question: string, ok = "Unshelve", ask = true) {
+    if (!h || !changes.length) return;
+    const conn = h.conn();
+    const list = changes.map((c) => `  @${c}`).join("\n");
+    if (ask && !(await h.askConfirm(`${question}\n${list}`, "Parked changelists", ok))) return;
+    h.setSyncing(true);
+    const failed: string[] = [];
+    let resolve = false;
+    let copied = false;
+    try {
+      for (const change of changes) {
+        h.setNotice(`Unshelving @${change}…`, 0);
+        try {
+          const r = await p4.unshelve(conn, change, []);
+          resolve ||= r.needsResolve;
+        } catch (e) {
+          // An unrelated stream: p4 has no mapping and finds nothing. Copy the
+          // shelved files to the same paths here and open them in the changelist.
+          if (!/no such file|not in client view|not under client/i.test(String(e))) {
+            failed.push(`@${change}: ${String(e)}`);
+            continue;
+          }
+          const files = (await pending.shelvedFiles(change)).map((f) => String(f.depotFile));
+          const res = await p4.reviewCopyFiles(conn, change, files, "edit", change).catch((err) => {
+            failed.push(`@${change}: ${String(err)}`);
+            return null;
+          });
+          const bad = res?.filter((r) => r.status === "failed" || r.status === "skipped") ?? [];
+          if (bad.length) failed.push(`@${change}: ${bad.length} file(s) not brought over — ${bad[0].message}`);
+          copied ||= !!res;
+        }
+      }
+    } finally {
+      h.setSyncing(false);
+      h.setNotice("", 1);
+    }
+    const done = changes.filter((c) => !failed.some((f) => f.startsWith(`@${c}:`)));
+    saveParked(conn, (await loadParked(conn)).filter((p) => !done.includes(p.change)));
+    pending.load();
+    if (failed.length) h.setConnError(`Some parked changelists could not be unshelved:\n${failed.join("\n")}`);
+    else
+      h.setNotice(
+        `Unshelved ${done.length} changelist${done.length === 1 ? "" : "s"}` +
+          (copied ? " (copied from an unrelated stream, as shelved)" : "") +
+          (resolve ? " — some files need a resolve." : "."),
+      );
   },
 };

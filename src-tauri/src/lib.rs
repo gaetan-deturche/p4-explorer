@@ -230,6 +230,7 @@ pub fn run() {
             commands::p4_streams,
             commands::p4_depots,
             commands::p4_switch,
+            commands::p4_park_changelists,
             commands::list_local_dir,
             commands::is_release_build,
             commands::p4_env_port,

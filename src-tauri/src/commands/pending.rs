@@ -504,6 +504,135 @@ pub async fn p4_shelve(
     run(conn, args).await
 }
 
+/// What parking does (or, on a dry run, would do) to one changelist.
+#[derive(serde::Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct Parked {
+    pub change: String,
+    pub files: usize,
+    /// It had a shelf before.
+    pub had_shelf: bool,
+    /// Its shelf is (to be) written: there was none, or it no longer matches the
+    /// files on disk. Replacing a `#review` changelist's shelf updates its review.
+    pub shelves: bool,
+}
+
+/// Does the shelf of `change` hold exactly `opened`, with the same content as
+/// on disk? `p4 diff -sa <file>@=<change>` names every file that differs.
+fn shelf_matches(conn: &P4Conn, change: &str, opened: &[String]) -> bool {
+    let shelved: std::collections::BTreeSet<String> = p4::run(conn, &["describe", "-S", "-s", change])
+        .unwrap_or_default()
+        .iter()
+        .flat_map(|r| p4::explode_indexed(r, "depotFile"))
+        .filter_map(|r| r.get("depotFile").and_then(|v| v.as_str()).map(String::from))
+        .collect();
+    if shelved.len() != opened.len() || opened.iter().any(|f| !shelved.contains(f)) {
+        return false;
+    }
+    // `diff -sa` cannot compare a file with no synced revision (an add, a
+    // branch, a move's new name): it answers "file(s) not on client". Those are
+    // compared byte for byte against the printed shelf instead.
+    let mut unsynced: Vec<String> = Vec::new();
+    for chunk in opened.chunks(100) {
+        let specs: Vec<String> = chunk.iter().map(|f| format!("{f}@={change}")).collect();
+        let mut args: Vec<&str> = vec!["diff", "-sa"];
+        args.extend(specs.iter().map(String::as_str));
+        let notes = match p4::run_notes(conn, &args) {
+            Ok((recs, _)) if !recs.is_empty() => return false, // a file differs
+            Ok((_, notes)) => notes,
+            Err(e) => e.lines().map(str::to_string).collect(),
+        };
+        for n in notes.iter().filter(|n| !n.trim().is_empty()) {
+            match n.split_once(&format!("@={change} - ")) {
+                Some((file, why)) if why.contains("not on client") => unsynced.push(file.trim().to_string()),
+                _ => return false,
+            }
+        }
+    }
+    let local = local_paths(conn, &unsynced);
+    unsynced.iter().enumerate().all(|(i, f)| {
+        let Some(path) = local.get(f) else { return false };
+        let tmp = std::env::temp_dir().join(format!("auger-park-{}-{change}-{i}", std::process::id()));
+        let tmp_s = tmp.to_string_lossy().to_string();
+        let same = p4::run_raw(conn, &["print", "-q", "-o", &tmp_s, &format!("{f}@={change}")]).is_ok()
+            && matches!((std::fs::read(&tmp), std::fs::read(path)), (Ok(a), Ok(b)) if a == b);
+        // `print -o` leaves it read-only, which Windows will not delete.
+        if let Ok(md) = std::fs::metadata(&tmp) {
+            let mut perm = md.permissions();
+            #[allow(clippy::permissions_set_readonly_false)]
+            perm.set_readonly(false);
+            let _ = std::fs::set_permissions(&tmp, perm);
+        }
+        let _ = std::fs::remove_file(&tmp);
+        same
+    })
+}
+
+/// Park numbered changelists before a stream switch, which `p4 switch` refuses
+/// while any has open files: each one's files go to its shelf, then are
+/// reverted (`-w`: an added file is in the shelf, so it leaves the disk too).
+/// The changelists stay pending with their shelves, to come back by unshelving.
+///
+/// Nothing is reverted until EVERY shelf is known to hold its files, so a
+/// shelve that fails (a file missing on disk) stops it with the workspace as it
+/// was. A shelf that already matches the disk is left alone: re-shelving a
+/// `#review` changelist would update its Swarm review for nothing. `dry_run`
+/// reports what would happen and changes nothing.
+#[tauri::command]
+pub async fn p4_park_changelists(conn: P4Conn, changes: Vec<String>, dry_run: bool) -> Result<Vec<Parked>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let opened_in = |change: &str| -> Result<Vec<String>, String> {
+            Ok(p4::run(&conn, &["opened", "-c", change])?
+                .iter()
+                .filter_map(|r| r.get("depotFile").and_then(|v| v.as_str()).map(String::from))
+                .collect())
+        };
+        let mut plan = Vec::new();
+        let mut files_of = Vec::new();
+        for change in &changes {
+            let opened = opened_in(change)?;
+            if opened.is_empty() {
+                continue;
+            }
+            let had_shelf = !p4::run(&conn, &["describe", "-S", "-s", change])
+                .unwrap_or_default()
+                .iter()
+                .flat_map(|r| p4::explode_indexed(r, "depotFile"))
+                .collect::<Vec<_>>()
+                .is_empty();
+            let shelves = !had_shelf || !shelf_matches(&conn, change, &opened);
+            plan.push(Parked { change: change.clone(), files: opened.len(), had_shelf, shelves });
+            files_of.push(opened);
+        }
+        if dry_run {
+            return Ok(plan);
+        }
+        for (p, opened) in plan.iter().zip(&files_of) {
+            if p.shelves {
+                let flag = if p.had_shelf { "-r" } else { "-f" };
+                p4::run_strict(&conn, &["shelve", flag, "-c", &p.change])
+                    .map_err(|e| format!("@{} could not be shelved, so nothing was reverted: {e}", p.change))?;
+            }
+            if !shelf_matches(&conn, &p.change, opened) {
+                return Err(format!(
+                    "The shelf of @{} does not hold all of its open files, so nothing was reverted.",
+                    p.change
+                ));
+            }
+        }
+        for (p, opened) in plan.iter().zip(&files_of) {
+            for chunk in opened.chunks(100) {
+                let mut args: Vec<&str> = vec!["revert", "-w", "-c", &p.change];
+                args.extend(chunk.iter().map(String::as_str));
+                p4::run_strict(&conn, &args).map_err(|e| format!("@{} is shelved, but its revert failed: {e}", p.change))?;
+            }
+        }
+        Ok(plan)
+    })
+    .await
+    .map_err(|e| format!("park task failed: {e}"))?
+}
+
 /// Request a Swarm review: ensure `#review` is in the changelist description,
 /// then shelve. Swarm's trigger creates the review from the shelf.
 #[tauri::command]

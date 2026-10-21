@@ -83,6 +83,7 @@ export const P4_COMMANDS: P4Cmd[] = [
   { key: "merge_save", label: "resolve (save merge)", read: false },
   { key: "merge_external", label: "resolve (P4MERGE)", read: false },
   { key: "p4_switch", label: "switch", read: false },
+  { key: "p4_park_changelists", label: "switch", read: false },
   { key: "p4_submit", label: "submit", read: false },
   { key: "p4_shelve", label: "shelve", read: false },
   { key: "p4_shelve_delete", label: "shelve -d", read: false },

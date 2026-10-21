@@ -459,6 +459,15 @@ export function openBlameWindow(conn: P4Conn, depotFile: string, revSpec = ""): 
   return invoke<void>("open_blame_window", { conn, depotFile, revSpec });
 }
 
+/** What parking does to one changelist before a stream switch. `shelves`: its
+ *  shelf is written (none yet, or it no longer matches the disk). */
+export interface ParkedChange {
+  change: string;
+  files: number;
+  hadShelf: boolean;
+  shelves: boolean;
+}
+
 /** Open the revision-graph window for a depot file (one window per file). */
 export function openRevGraphWindow(conn: P4Conn, depotFile: string): Promise<void> {
   return invoke<void>("open_revgraph_window", { conn, depotFile });
@@ -668,6 +677,10 @@ export const p4 = {
    *  of the shelf. */
   shelveUpdate: (conn: P4Conn, change: string, files: string[] = [], replace = false) =>
     call("p4_shelve", { conn, change, files, replace }),
+  /** Shelve numbered changelists and revert their files, for a stream switch
+   *  (which refuses while any has open files). `dryRun` only reports. */
+  parkChangelists: (conn: P4Conn, changes: string[], dryRun: boolean) =>
+    g<ParkedChange[]>("p4_park_changelists", { conn, changes, dryRun }),
   /** Restore a changelist's shelved files into the workspace; the shelf stays.
    *  `stream`/`parent` add the generated branch view a shelf from another stream
    *  needs — see `unshelveMapping`, which is what says they would work. */
@@ -729,9 +742,10 @@ export const p4 = {
     g<DiffPair>("diff_pair_versions", { conn, depotFile, a, b }),
   /** Write a review's shelf out as a patch so the apply pipeline can take it. */
   reviewPatch: (conn: P4Conn, change: string) => g<ReviewPatch>("review_patch", { conn, change }),
-  /** Copy a review's binary/added files verbatim (p4 print of the shelved rev). */
-  reviewCopyFiles: (conn: P4Conn, change: string, files: string[], mode: "edit" | "offline") =>
-    g<CopyResult[]>("review_copy_files", { conn, change, files, mode }),
+  /** Copy a review's binary/added files verbatim (p4 print of the shelved rev).
+   *  `into` opens the copied files in that changelist (edit mode). */
+  reviewCopyFiles: (conn: P4Conn, change: string, files: string[], mode: "edit" | "offline", into?: string) =>
+    g<CopyResult[]>("review_copy_files", { conn, change, files, mode, into }),
   /** Shelved changelists under a stream that no review covers (empty path = the
    *  whole depot). `scan` bounds the `p4 changes` window, not the result. */
   shelvedNoReview: (conn: P4Conn, streamPath: string, scan: number) =>

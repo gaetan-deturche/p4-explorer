@@ -110,7 +110,9 @@
     okLabel: string;
     optionLabel: string;
     optionChecked: boolean;
-    resolve: (v: { ok: boolean; option: boolean }) => void;
+    choices?: { label: string; detail?: string; checked: boolean }[];
+    footer?: string;
+    resolve: (v: { ok: boolean; option: boolean; picks?: boolean[] }) => void;
   } | null>(null);
   function askConfirm(message: string, title = "Confirm", okLabel = "OK"): Promise<boolean> {
     return new Promise((resolve) => {
@@ -138,8 +140,29 @@
       confirmState = { title, message, okLabel, optionLabel, optionChecked, resolve };
     });
   }
-  function resolveConfirm(ok: boolean, option = false) {
-    confirmState?.resolve({ ok, option });
+  /** As askConfirm, with a tick-box per item; `picks` says which were ticked. */
+  function askChoices(
+    message: string,
+    title: string,
+    okLabel: string,
+    choices: { label: string; detail?: string; checked: boolean }[],
+    footer = "",
+  ): Promise<{ ok: boolean; picks: boolean[] }> {
+    return new Promise((resolve) => {
+      confirmState = {
+        title,
+        message,
+        okLabel,
+        optionLabel: "",
+        optionChecked: false,
+        choices,
+        footer,
+        resolve: (v) => resolve({ ok: v.ok, picks: v.picks ?? choices.map(() => false) }),
+      };
+    });
+  }
+  function resolveConfirm(ok: boolean, option = false, picks?: boolean[]) {
+    confirmState?.resolve({ ok, option, picks });
     confirmState = null;
   }
 
@@ -697,6 +720,9 @@
     // Never steal a keystroke from a text box, and never fight a dialog: a modal
     // owns the keyboard while it is up.
     if (typingInto(e.target)) return;
+    // Text selected on the page (an error message, a description): Ctrl+C copies
+    // THAT, not the selected file's path.
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "c" && window.getSelection()?.toString().trim()) return;
     if (confirmState || loginState || optionsOpen || renameCl || newClFiles || newClFor) return;
     const id = shortcuts.match(e, scopes);
     if (!id) return;
@@ -1111,6 +1137,7 @@
       getSyncing: () => syncing,
       setSyncing,
       askConfirm,
+      askChoices,
       promptLogin,
       refreshViews: refreshAll,
     });
@@ -1296,6 +1323,7 @@
       {#if error}
         <div class="error mono">
           <span class="etext">{error}</span>
+          <button class="x" title="Copy the message" onclick={() => void setClipboard(error)}>Copy</button>
           <button class="x" title="Dismiss" onclick={() => (error = "")}>✕</button>
         </div>
       {/if}
@@ -1643,7 +1671,9 @@
     okLabel={confirmState.okLabel}
     optionLabel={confirmState.optionLabel}
     optionChecked={confirmState.optionChecked}
-    onOk={(option) => resolveConfirm(true, option)}
+    choices={confirmState.choices}
+    footer={confirmState.footer}
+    onOk={(option, picks) => resolveConfirm(true, option, picks)}
     onCancel={() => resolveConfirm(false)}
   />
 {/if}
@@ -2030,6 +2060,7 @@
     busy={patches.busy}
     subject={patches.subject}
     skipped={patches.skipped}
+    newClName={patches.reviewDesc}
     onApply={(mode, partial) => patches.apply(mode, partial)}
     onResolveHunk={(depot, hunk) => merges.resolvePatchHunk(patches.path, depot, hunk)}
     onClose={() => patches.close()}

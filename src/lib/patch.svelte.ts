@@ -30,6 +30,11 @@ let open = $state(false);
 let subject = $state("");
 let skipped = $state<string[]>([]);
 let reviewChange = ""; // set when the source is a review; drives the verbatim copy
+/** The review's description, for applying it into a changelist of the same
+ *  name. `#review` is dropped: shelving that changelist must not open a second
+ *  review of the same work. */
+let reviewDesc = $state("");
+export type ApplyMode = "edit" | "offline" | "newcl";
 
 export const patches = {
   init(hooks: Hooks) {
@@ -56,6 +61,9 @@ export const patches = {
   get skipped() {
     return skipped;
   },
+  get reviewDesc() {
+    return reviewDesc;
+  },
   close() {
     open = false;
     files = [];
@@ -64,6 +72,7 @@ export const patches = {
     subject = "";
     skipped = [];
     reviewChange = "";
+    reviewDesc = "";
   },
 
   /** Prompt for a .patch, dry-run it, and open the dialog with the outcome. */
@@ -126,6 +135,8 @@ export const patches = {
       subject = label;
       skipped = rp.skipped;
       reviewChange = change;
+      const desc = String((await p4.describe(h.conn(), change).catch(() => []))[0]?.desc ?? "");
+      reviewDesc = desc.replace(/#review(-\d+)?\b/g, "").replace(/\s+$/, "").trim();
       phase = "preview";
       open = true;
     } catch (e) {
@@ -141,12 +152,15 @@ export const patches = {
    * leaves the files to the Offline section. `partial` lets a file take the
    * hunks that fit, rejecting the rest to a `.rej`.
    */
-  async apply(mode: "edit" | "offline", partial: boolean) {
+  async apply(choice: ApplyMode, partial: boolean) {
     if (!h || !path) return;
     busy = true;
     phase = "applying";
+    const mode = choice === "offline" ? "offline" : "edit";
     try {
-      const rep = await p4.applyPatch(h.conn(), path, mode, "", partial);
+      // "newcl": a changelist named like the review, opened before anything is.
+      const into = choice === "newcl" && reviewDesc ? await p4.newChangelist(h.conn(), reviewDesc) : "";
+      const rep = await p4.applyPatch(h.conn(), path, mode, into, partial);
       files = rep;
       phase = "done";
       const ok = rep.filter((f) => f.applied > 0).length;
@@ -158,7 +172,7 @@ export const patches = {
       let copyFailed: string[] = [];
       if (reviewChange && skipped.length) {
         const res = await p4
-          .reviewCopyFiles(h.conn(), reviewChange, skipped, mode)
+          .reviewCopyFiles(h.conn(), reviewChange, skipped, mode, into || undefined)
           .catch(() => [] as CopyResult[]);
         copied = res.filter((r) => r.status === "copied" || r.status === "opened").length;
         copyFailed = res
@@ -169,7 +183,7 @@ export const patches = {
       const parts = [`${ok} patched`];
       if (copied) parts.push(`${copied} copied`);
       if (bad) parts.push(`${bad} with conflicts`);
-      h.setNotice(`${subject || "Patch"}: ${parts.join(", ")}.`, 8000);
+      h.setNotice(`${subject || "Patch"}: ${parts.join(", ")}${into ? ` in @${into}` : ""}.`, 8000);
       // Reflect the new state: opened files show up in pending, disk-only edits
       // in the Offline section.
       if (ok > 0 || copied > 0) {

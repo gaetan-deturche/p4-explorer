@@ -1166,12 +1166,14 @@ Remove the shelf and submit?`,
       // asked inside the attempt (it is part of handling this command) and the
       // offer comes after, when the queue slot is free.
       let mapping: UnshelveMapping | null = null;
+      let refused = false;
       await pending.mutate(
         async () => {
           try {
             lastUnshelve = await p4.unshelve(h!.conn(), change, only);
           } catch (e) {
             if (/not in client view|not under client|no such file/i.test(String(e))) {
+              refused = true;
               mapping = await p4.unshelveMapping(h!.conn(), change).catch(() => null);
             }
             throw e;
@@ -1186,6 +1188,7 @@ Remove the shelf and submit?`,
             : `Unshelved @${change}.`,
       );
       if (mapping) await pending.offerMapped(change, only, mapping);
+      else if (refused) await pending.offerCarry(change, only);
       return;
     }
 
@@ -1207,6 +1210,34 @@ Remove the shelf and submit?`,
       () =>
         `Wrote ${copied} file${copied === 1 ? "" : "s"} from the shelf of @${change} to disk` +
         (failed.length ? `, ${failed.length} skipped: ${failed[0]}` : " — nothing is checked out."),
+    );
+  },
+
+  /** The shelf comes from an UNRELATED stream: p4 has no mapping, so unshelve
+   *  finds nothing (Main into Weekly). Offer to copy the shelved files to the
+   *  same paths here and open them in the changelist — the content as shelved. */
+  async offerCarry(change: string, only: string[]) {
+    if (!h) return;
+    const ok = await h.askConfirm(
+      `p4 cannot place the shelf of @${change} here: it comes from an unrelated stream.\n\n` +
+        `Copy its files to the same paths in this stream and open them in @${change}? ` +
+        `The shelved content replaces this stream's version of each file.`,
+      "Unshelve from an unrelated stream",
+      "Copy & open",
+    );
+    if (!ok) return;
+    const files = only.length ? only : (await pending.shelvedFiles(change)).map((f) => String(f.depotFile));
+    let opened = 0;
+    let failed: string[] = [];
+    await pending.mutate(
+      async () => {
+        const res = await p4.reviewCopyFiles(h!.conn(), change, files, "edit", change);
+        opened = res.filter((r) => r.status === "opened" || r.status === "copied").length;
+        failed = res.filter((r) => r.status === "failed" || r.status === "skipped").map((r) => r.message);
+      },
+      () =>
+        `Opened ${opened} file${opened === 1 ? "" : "s"} of @${change} in this stream` +
+        (failed.length ? `, ${failed.length} not: ${failed[0]}` : "."),
     );
   },
 
