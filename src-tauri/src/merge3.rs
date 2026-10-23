@@ -220,10 +220,9 @@ fn intern(a: &[String], b: &[String]) -> (Vec<u32>, Vec<u32>) {
     (ia, ib)
 }
 
-/// Myers' greedy diff: the shortest edit script between `a` and `b`.
-///
-/// A port of the front-end's `linediff.ts`, so the resolve window and the diff
-/// window locate a change in the same place.
+/// Myers' greedy diff: the shortest edit script between `a` and `b`. The
+/// fallback inside `histogram`, ported from the front-end's `linediff.ts` like
+/// it, so the resolve window and the diff window locate a change in one place.
 fn myers(a: &[u32], b: &[u32]) -> Vec<Op> {
     let (n, m) = (a.len(), b.len());
     if n == 0 && m == 0 {
@@ -312,6 +311,114 @@ fn myers(a: &[u32], b: &[u32]) -> Vec<Op> {
     ops
 }
 
+/// Lines repeated more often than this in a region are never anchors (git's
+/// max_chain_length).
+const MAX_CHAIN: usize = 64;
+/// Nesting allowed before a left-hand region is handed to Myers instead.
+const MAX_DEPTH: usize = 500;
+
+/// Histogram diff, as git's xhistogram.c and the front-end's `linediff.ts`:
+/// anchor on the RAREST line common to both sides, grow the match both ways,
+/// recurse left and right of it; Myers where every common line is too frequent.
+/// Myers alone lets a common line (`{`, a `for` header) pull the alignment
+/// anywhere an equally short script exists, splitting one moved block apart.
+fn histogram(a: &[u32], b: &[u32]) -> Vec<Op> {
+    fn push(ops: &mut Vec<Op>, op: Op) {
+        match (ops.last_mut(), op) {
+            (_, Op::Same(0) | Op::Del(0) | Op::Add(0)) => {}
+            (Some(Op::Same(c)), Op::Same(n)) => *c += n,
+            (Some(Op::Del(c)), Op::Del(n)) => *c += n,
+            (Some(Op::Add(c)), Op::Add(n)) => *c += n,
+            _ => ops.push(op),
+        }
+    }
+    fn via_myers(ops: &mut Vec<Op>, a: &[u32], b: &[u32]) {
+        for op in myers(a, b) {
+            push(ops, op);
+        }
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn region(ops: &mut Vec<Op>, a: &[u32], b: &[u32], mut a0: usize, a1: usize, mut b0: usize, b1: usize, depth: usize) {
+        // The right-hand part is a loop, not a call: only the left side nests.
+        loop {
+            if a0 >= a1 || b0 >= b1 {
+                push(ops, Op::Del(a1.saturating_sub(a0)));
+                push(ops, Op::Add(b1.saturating_sub(b0)));
+                return;
+            }
+            let mut where_: std::collections::HashMap<u32, Vec<usize>> = std::collections::HashMap::new();
+            for (i, &line) in a.iter().enumerate().take(a1).skip(a0) {
+                where_.entry(line).or_default().push(i);
+            }
+            let count = |i: usize| where_[&a[i]].len();
+            let mut best: Option<(usize, usize, usize)> = None; // (as, ae, bs)
+            let mut best_cnt = MAX_CHAIN + 1;
+            let mut common = false;
+            let mut bi = b0;
+            while bi < b1 {
+                let mut next = bi + 1;
+                if let Some(p) = where_.get(&b[bi]) {
+                    common = true;
+                    if p.len() <= best_cnt {
+                        let mut k = 0;
+                        while k < p.len() {
+                            let (mut as_, mut bs, mut ae, mut be) = (p[k], bi, p[k], bi);
+                            let mut rc = p.len();
+                            while as_ > a0 && bs > b0 && a[as_ - 1] == b[bs - 1] {
+                                as_ -= 1;
+                                bs -= 1;
+                                if rc > 1 {
+                                    rc = rc.min(count(as_));
+                                }
+                            }
+                            while ae + 1 < a1 && be + 1 < b1 && a[ae + 1] == b[be + 1] {
+                                ae += 1;
+                                be += 1;
+                                if rc > 1 {
+                                    rc = rc.min(count(ae));
+                                }
+                            }
+                            next = next.max(be + 1);
+                            // Rarer wins; at the same rarity, longer wins.
+                            let longer = best.map_or(true, |(s, e, _)| e - s < ae - as_);
+                            if longer || rc < best_cnt {
+                                best = Some((as_, ae, bs));
+                                best_cnt = rc;
+                            }
+                            k += 1;
+                            while k < p.len() && p[k] <= ae {
+                                k += 1; // inside the match just taken
+                            }
+                        }
+                    }
+                }
+                bi = next;
+            }
+            let Some((as_, ae, bs)) = best else {
+                if common {
+                    via_myers(ops, &a[a0..a1], &b[b0..b1]); // every common line too frequent
+                } else {
+                    push(ops, Op::Del(a1 - a0));
+                    push(ops, Op::Add(b1 - b0));
+                }
+                return;
+            };
+            if depth < MAX_DEPTH {
+                region(ops, a, b, a0, as_, b0, bs, depth + 1);
+            } else {
+                via_myers(ops, &a[a0..as_], &b[b0..bs]);
+            }
+            let len = ae - as_ + 1;
+            push(ops, Op::Same(len));
+            a0 = ae + 1;
+            b0 = bs + len;
+        }
+    }
+    let mut ops = Vec::new();
+    region(&mut ops, a, b, 0, a.len(), 0, b.len(), 0);
+    ops
+}
+
 /// `other` expressed as replacements of ranges of `base`.
 fn diff_chunks(base: &[String], other: &[String]) -> Vec<Chunk> {
     // Trim the common ends; only the middle needs the real comparison.
@@ -334,7 +441,7 @@ fn diff_chunks(base: &[String], other: &[String]) -> Vec<Chunk> {
     let mut chunks: Vec<Chunk> = Vec::new();
     let (mut x, mut y) = (0usize, 0usize);
     let mut pend: Option<Chunk> = None;
-    for op in myers(&ib, &io) {
+    for op in histogram(&ib, &io) {
         match op {
             Op::Same(count) => {
                 if let Some(c) = pend.take() {
@@ -374,6 +481,24 @@ mod tests {
     /// The merged text when every conflict keeps the workspace side.
     fn flat(rs: &[Region]) -> Vec<String> {
         rs.iter().flat_map(|r| r.resolved().to_vec()).collect()
+    }
+
+    #[test]
+    fn a_block_inserted_before_a_loop_with_the_same_header_stays_whole() {
+        // TranslucentLighting.cpp: a new loop added in front of the original one.
+        // Myers matched the original `for`/`{` to the NEW loop's, splitting the
+        // change in two; anchoring on the rare comment keeps the original intact.
+        let base = v(&["// Inject", "for (i)", "{", "    a();", "    b();", "}", "end"]);
+        let other = v(&[
+            "// New", "for (i)", "{", "    n();", "}",
+            "// Inject", "for (i)", "{", "    a();", "}", "END",
+        ]);
+        let (ib, io) = intern(&base, &other);
+        let edits = |ops: &[Op]| ops.iter().filter(|o| !matches!(o, Op::Same(_))).count();
+        assert!(edits(&myers(&ib, &io)) > 2, "Myers no longer splits it: the test proves nothing");
+        let chunks = diff_chunks(&base, &other);
+        assert_eq!(chunks.len(), 3, "{chunks:?}"); // the new loop, `b();`, `end`
+        assert_eq!((chunks[0].start, chunks[0].end, chunks[0].lines.len()), (0, 0, 5));
     }
 
     #[test]

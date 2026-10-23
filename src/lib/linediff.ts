@@ -1,6 +1,7 @@
-//! Line diff for the in-app side-by-side viewer: Myers O(ND) on interned lines
-//! (common prefix/suffix trimmed first), del/add runs paired into "mod" rows,
-//! and an intra-line changed range per mod row. Pure — no reactive state.
+//! Line diff for the in-app side-by-side viewer: histogram diff on interned
+//! lines (common prefix/suffix trimmed first, Myers where no line is rare
+//! enough to anchor on), del/add runs paired into "mod" rows, and an intra-line
+//! changed range per mod row. Pure — no reactive state.
 
 export interface DiffSide {
   no: number; // 1-based line number in its file
@@ -146,6 +147,99 @@ function myers(ia: Int32Array, ib: Int32Array): Op[] {
     else merged.push({ ...op });
   }
   return merged;
+}
+
+/** Lines repeated more often than this in a region are never anchors (git's
+ *  max_chain_length). */
+const MAX_CHAIN = 64;
+/** Nesting allowed before a left-hand region is handed to Myers instead. */
+const MAX_DEPTH = 500;
+
+/** Histogram diff, as git's xhistogram.c: anchor on the RAREST line common to
+ *  both sides, grow the match both ways, recurse left and right of it.
+ *
+ *  Myers only minimises the number of changed lines, so a common line (`{`, a
+ *  `for` header) can pull the alignment anywhere an equally short script exists.
+ *  On TranslucentLighting.cpp that split one moved block into 8 change blocks
+ *  where git --histogram shows 3, for the same 83 added / 25 removed lines. */
+function histogram(ia: Int32Array, ib: Int32Array): Op[] {
+  const ops: Op[] = [];
+  const push = (type: Op["type"], count: number) => {
+    if (count <= 0) return;
+    const last = ops[ops.length - 1];
+    if (last && last.type === type) last.count += count;
+    else ops.push({ type, count });
+  };
+  const viaMyers = (a0: number, a1: number, b0: number, b1: number) => {
+    for (const op of myers(ia.subarray(a0, a1), ib.subarray(b0, b1))) push(op.type, op.count);
+  };
+  const region = (a0: number, a1: number, b0: number, b1: number, depth: number): void => {
+    // The right-hand part is a loop, not a call: only the left side nests.
+    for (;;) {
+      if (a0 >= a1 || b0 >= b1) {
+        push("del", a1 - a0);
+        push("add", b1 - b0);
+        return;
+      }
+      const where = new Map<number, number[]>(); // line → its positions in a
+      for (let i = a0; i < a1; i++) {
+        const p = where.get(ia[i]);
+        if (p) p.push(i);
+        else where.set(ia[i], [i]);
+      }
+      const count = (i: number) => where.get(ia[i])!.length;
+      let as0 = 0, ae0 = -1, bs0 = 0;
+      let bestCnt = MAX_CHAIN + 1;
+      let common = false;
+      for (let b = b0; b < b1; ) {
+        let next = b + 1;
+        const p = where.get(ib[b]);
+        if (p) common = true;
+        if (p && p.length <= bestCnt) {
+          for (let k = 0; k < p.length; ) {
+            let as = p[k], bs = b, ae = as, be = b;
+            let rc = p.length;
+            while (as > a0 && bs > b0 && ia[as - 1] === ib[bs - 1]) {
+              as--;
+              bs--;
+              if (rc > 1) rc = Math.min(rc, count(as));
+            }
+            while (ae + 1 < a1 && be + 1 < b1 && ia[ae + 1] === ib[be + 1]) {
+              ae++;
+              be++;
+              if (rc > 1) rc = Math.min(rc, count(ae));
+            }
+            if (next <= be) next = be + 1;
+            // Rarer wins; at the same rarity, longer wins.
+            if (ae0 - as0 < ae - as || rc < bestCnt) {
+              as0 = as;
+              ae0 = ae;
+              bs0 = bs;
+              bestCnt = rc;
+            }
+            k++;
+            while (k < p.length && p[k] <= ae) k++; // inside the match just taken
+          }
+        }
+        b = next;
+      }
+      if (ae0 < as0) {
+        if (!common) {
+          push("del", a1 - a0);
+          push("add", b1 - b0);
+        } else viaMyers(a0, a1, b0, b1); // every common line too frequent to anchor on
+        return;
+      }
+      if (depth < MAX_DEPTH) region(a0, as0, b0, bs0, depth + 1);
+      else viaMyers(a0, as0, b0, bs0);
+      const len = ae0 - as0 + 1;
+      push("same", len);
+      a0 = ae0 + 1;
+      b0 = bs0 + len;
+    }
+  };
+  region(0, ia.length, 0, ib.length, 0);
+  return ops;
 }
 
 /** Intra-line changed range: common prefix/suffix trimmed, middle highlighted. */
@@ -452,7 +546,7 @@ export function diffLines(leftText: string, rightText: string, opts?: DiffOption
   const b = splitLines(rightText);
   const same = (x: string, y: string) => x === y;
 
-  // Trim common prefix/suffix before Myers — the dominant cost saver.
+  // Trim common prefix/suffix before diffing — the dominant cost saver.
   let pre = 0;
   const maxPre = Math.min(a.length, b.length);
   while (pre < maxPre && same(a[pre], b[pre])) pre++;
@@ -466,7 +560,7 @@ export function diffLines(leftText: string, rightText: string, opts?: DiffOption
   const { ia, ib } = intern(a.slice(pre, sufA), b.slice(pre, sufB));
   const raw: Op[] = [];
   if (pre > 0) raw.push({ type: "same", count: pre });
-  raw.push(...myers(ia, ib));
+  raw.push(...histogram(ia, ib));
   if (a.length - sufA > 0) raw.push({ type: "same", count: a.length - sufA });
   const ops = slideRuns(a, b, raw);
 
