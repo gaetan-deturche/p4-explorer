@@ -1153,7 +1153,8 @@ Remove the shelf and submit?`,
       only.length ? "Unshelve files" : "Unshelve changelist",
       "Unshelve",
       "Leave the files offline (write to disk only, no checkout)",
-      true,
+      // Unticked: unshelving your own changelist means getting back to work on it.
+      false,
     );
     if (!answer.ok) return;
 
