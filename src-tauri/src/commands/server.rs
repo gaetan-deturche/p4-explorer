@@ -289,7 +289,7 @@ pub async fn p4_streams(conn: P4Conn) -> Res {
 /// which p4 refuses otherwise: two mainlines are unrelated to it even when one
 /// is fed from the other by merges, as Weekly is from Main.
 #[tauri::command]
-pub async fn p4_switch(conn: P4Conn, stream: String, unrelated: Option<bool>) -> Res {
+pub async fn p4_switch(conn: P4Conn, stream: String, unrelated: Option<bool>, reopen: Option<bool>) -> Res {
     tauri::async_runtime::spawn_blocking(move || {
         // `-Rn`: no reconcile first. Without it switch runs `reconcile -Raed` —
         // the new-file walk alone is ~40 min here — and opens and shelves what
@@ -298,6 +298,11 @@ pub async fn p4_switch(conn: P4Conn, stream: String, unrelated: Option<bool>) ->
         let mut args = vec!["switch", "-Rn", "--no-sync"];
         if unrelated.unwrap_or(false) {
             args.push("--allow-unrelated");
+        }
+        // `-r`: the default changelist's files are reopened in the new stream
+        // instead of shelved for the return.
+        if reopen.unwrap_or(false) {
+            args.push("-r");
         }
         args.push(&stream);
         // Strict: a switch that printed records AND failed (files it could not

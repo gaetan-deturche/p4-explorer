@@ -709,24 +709,28 @@ export const connection = {
     const offline = pending.offline.length;
     const short = stream.split("/").pop() ?? stream;
     const home = from.split("/").pop() || "this stream";
-    const footer = [
-      (pending.openCount("default") ?? 0) > 0 ? "The default changelist is shelved by p4 and restored on return." : "",
-      offline ? `${offline} offline file${offline === 1 ? "" : "s"} may not update.` : "",
-    ]
-      .filter(Boolean)
-      .join("\n");
+    // The default changelist: left alone, p4 shelves it and restores it on the
+    // return; ticked, `p4 switch -r` reopens its files in the new stream.
+    const defOpen = pending.openCount("default") ?? 0;
+    if (defOpen) {
+      choices.push({ label: "Default changelist", detail: `${defOpen} file${defOpen === 1 ? "" : "s"}`, checked: true });
+    }
+    const footer = offline ? `${offline} offline file${offline === 1 ? "" : "s"} may not update.` : "";
     let bringAlong: string[] = [];
-    if (plan.length) {
+    let carryDefault = false;
+    if (choices.length) {
       const a = await h.askChoices(
-        `Switch to ${stream}?\n\nThese changelists are shelved, then reverted. Tick the ones to unshelve into ${short}; ` +
-          `the others come back when you return to ${home}.`,
+        `Switch to ${stream}?\n\n` +
+          (plan.length ? "Numbered changelists are shelved, then reverted. " : "") +
+          `Tick what to bring into ${short}; the rest comes back when you return to ${home}.`,
         "Switch workspace stream",
-        "Park & switch",
+        plan.length ? "Park & switch" : "Switch",
         choices,
         footer,
       );
       if (!a.ok) return;
       bringAlong = plan.filter((_, i) => a.picks[i]).map((p) => p.change);
+      carryDefault = defOpen > 0 && a.picks[plan.length];
     } else if (!(await h.askConfirm(`Switch to ${stream}?${footer ? "\n\n" + footer : ""}`, "Switch workspace stream", "Switch"))) {
       return;
     }
@@ -734,6 +738,7 @@ export const connection = {
     h.setConnError("");
     let parkedNow: string[] = [];
     let switched = false;
+    let reopenRefused = "";
     try {
       if (plan.length) {
         h.setNotice(`Parking ${plan.length} changelist${plan.length === 1 ? "" : "s"}…`, 0);
@@ -744,8 +749,22 @@ export const connection = {
         h.setNotice("", 1);
       }
       h.setNotice(`Switching to ${short}…`, 0);
+      // With the default changelist along: `-r`, and if p4 refuses it, a plain
+      // switch (p4 then shelves it) whose shelf is copied over afterwards.
+      const doSwitch = async (unrelated: boolean) => {
+        if (carryDefault) {
+          try {
+            await p4.switch(conn, stream, unrelated, true);
+            return;
+          } catch (e) {
+            if (/allow-unrelated/.test(String(e))) throw e;
+            reopenRefused = String(e);
+          }
+        }
+        await p4.switch(conn, stream, unrelated);
+      };
       try {
-        await p4.switch(conn, stream); // throws (surfaced below) if p4 refuses
+        await doSwitch(false); // throws (surfaced below) if p4 refuses
       } catch (e) {
         // A stream from another hierarchy: p4 asks for --allow-unrelated, and
         // that is a choice worth asking about, not one to make silently.
@@ -761,7 +780,7 @@ export const connection = {
         if (!yes) return;
         h.setSyncing(true);
         h.setNotice(`Switching to ${short}…`, 0);
-        await p4.switch(conn, stream, true);
+        await doSwitch(true);
       }
       switched = true;
       h.setNotice("", 1);
@@ -790,6 +809,37 @@ export const connection = {
     // B, ticked per changelist in the switch dialog: bring those along.
     const along = parkedNow.filter((c) => bringAlong.includes(c));
     if (along.length) await connection.unpark(along, "", "", false);
+    if (reopenRefused) await connection.carryStash(reopenRefused);
+  },
+
+  /** `p4 switch -r` was refused, so p4 shelved the default changelist for the
+   *  return instead. Bring that shelf's files into this stream's default
+   *  changelist, copied to the same paths (the stash itself stays for the return). */
+  async carryStash(why: string) {
+    if (!h) return;
+    const conn = h.conn();
+    const stash = (await p4.pending(conn, 20).catch(() => []))
+      .filter((r) => /created by 'p4 switch'/.test(String(r.desc ?? "")))
+      .map((r) => String(r.change))
+      .sort((a, b) => Number(b) - Number(a))[0];
+    if (!stash) {
+      h.setConnError(`p4 refused to bring the default changelist (${why}), and its shelf was not found.`);
+      return;
+    }
+    h.setSyncing(true);
+    h.setNotice(`Bringing the default changelist from @${stash}…`, 0);
+    try {
+      const files = (await pending.shelvedFiles(stash)).map((f) => String(f.depotFile));
+      const res = await p4.reviewCopyFiles(conn, stash, files, "edit");
+      const bad = res.filter((r) => r.status === "failed" || r.status === "skipped");
+      if (bad.length) h.setConnError(`${bad.length} file(s) of the default changelist not brought over — ${bad[0].message}`);
+      else h.setNotice(`Default changelist brought over: ${res.length} file${res.length === 1 ? "" : "s"} opened.`);
+    } catch (e) {
+      h.setConnError(String(e));
+    } finally {
+      h.setSyncing(false);
+      pending.load();
+    }
   },
 
   /** Unshelve parked changelists into their own changelists, after asking
