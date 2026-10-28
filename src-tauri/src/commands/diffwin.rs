@@ -569,9 +569,13 @@ pub async fn open_unreal_diff(
                 Ok(diff_script(&l, &r, &name, &left_rev, &right_rev))
             })
         };
+        // The editor's new window opens behind Auger unless Auger hands it the
+        // foreground (see winfocus).
+        let before = crate::winfocus::before_unreal_request();
         match in_place() {
             Ok(Some(())) => {
                 eprintln!("[auger-timing] in-place unreal diff: {:?}", t0.elapsed());
+                crate::winfocus::raise_unreal_after(before);
                 return Ok(if solo.is_some() { "single-remote".to_string() } else { "remote".to_string() });
             }
             Ok(None) => {} // no running editor — launch one
@@ -619,11 +623,13 @@ pub async fn open_unreal_diff(
             std::fs::write(&py, single_script(&spec, &name))
                 .map_err(|e| format!("cannot write the open-asset script: {e}"))?;
             c.arg(format!("-ExecCmds=py {}", py.display()));
-            c.spawn().map_err(|e| format!("failed to launch Unreal: {e}"))?;
+            let child = c.spawn().map_err(|e| format!("failed to launch Unreal: {e}"))?;
+            crate::winfocus::allow_launched(child.id());
             return Ok("single-launched".to_string());
         }
         c.arg("-diff").arg(&left).arg(&right);
-        c.spawn().map_err(|e| format!("failed to launch Unreal diff: {e}"))?;
+        let child = c.spawn().map_err(|e| format!("failed to launch Unreal diff: {e}"))?;
+        crate::winfocus::allow_launched(child.id());
         Ok("launched".to_string())
     })
     .await
