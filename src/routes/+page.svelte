@@ -789,6 +789,10 @@
   }
 
   function refreshAll() {
+    connection.allowRelogin();
+    reloadViews();
+  }
+  function reloadViews() {
     void browse.refresh();
     pending.load();
     if (centerTab === "reviews") void reviews.load();
@@ -1139,7 +1143,7 @@
       askConfirm,
       askChoices,
       promptLogin,
-      refreshViews: refreshAll,
+      refreshViews: reloadViews,
     });
     updates.init({
       isRelease: () => isRelease,

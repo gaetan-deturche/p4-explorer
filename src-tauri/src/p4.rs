@@ -352,6 +352,13 @@ fn run_output(
         // mutation twice.
         let produced_output = !out.stdout.is_empty() && has_data_line(&out.stdout);
         if ok || !is_auth_error(&err) || produced_output || attempt >= AUTH_ATTEMPTS {
+            if !ok && is_auth_error(&err) && !matches!(args.first(), Some(&"login") | Some(&"tickets")) {
+                // Still refused after the retries: the session is dead, and the
+                // window asks for a login (the login checks themselves don't count).
+                if let Some(app) = APP.get() {
+                    let _ = app.emit("p4-session-expired", serde_json::json!({ "port": conn.port }));
+                }
+            }
             return Ok(out);
         }
         // Pass the cached ticket explicitly from here on (the automatic lookup is

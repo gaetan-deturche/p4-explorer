@@ -3,6 +3,7 @@
 //! and the keep-alive/health-check poll. The `conn` object itself stays in the
 //! page (it is two-way bound by dialogs); this store drives everything around it.
 
+import { listen } from "@tauri-apps/api/event";
 import { p4, pickFolder as pickFolderCmd, type P4Conn, type P4Record, type ParkedChange } from "$lib/p4";
 import { loadServers, loadServersAsync, saveServers, withServer, withoutServer } from "$lib/servers";
 import {
@@ -131,6 +132,47 @@ async function loginLoop(conn: P4Conn): Promise<boolean> {
   }
 }
 
+let relogging = false;
+/** The user cancelled the login for this dead session: failing commands stop
+ *  asking until Refresh. */
+let declined = false;
+
+/** A command was refused for want of a valid ticket even after its retries
+ *  (expired, or dropped by the server) — while `p4 info`, which needs no login,
+ *  kept the status at "connected" over emptied views. Re-authenticate the way
+ *  connect() does, once however many commands failed, then reload the views. */
+async function relogin(): Promise<void> {
+  if (!h || !connected || busy || relogging || declined) return;
+  const conn = h.conn();
+  relogging = true;
+  try {
+    // p4's own ticket store may hold a newer, valid ticket (a login from P4V).
+    const fresh = await p4.ticketValue(conn).catch(() => "");
+    if (fresh && fresh !== conn.ticket) {
+      conn.ticket = fresh;
+      if ((await p4.loginStatus(conn).catch(() => ({ ok: false, error: "" }))).ok) {
+        h.setConnError("");
+        h.refreshViews();
+        return;
+      }
+    }
+    conn.ticket = ""; // the pinned ticket is the dead one
+    h.setConnError("Your Perforce session has expired. Log in to continue — Refresh asks again.");
+    // One password prompt for the app: every window hears the event. The others
+    // pick the new ticket up from p4's store on their next refused command.
+    if (h.secondary()) return;
+    if (!(await loginLoop(conn))) {
+      declined = true;
+      return;
+    }
+    conn.ticket = await p4.ticketValue(conn).catch(() => "");
+    h.setConnError("");
+    h.refreshViews();
+  } finally {
+    relogging = false;
+  }
+}
+
 let connected = $state(false);
 let busy = $state(false);
 let serverVersion = $state("");
@@ -183,6 +225,9 @@ function startKeepAlive() {
 export const connection = {
   init(hooks: Hooks) {
     h = hooks;
+    void listen<{ port: string }>("p4-session-expired", (e) => {
+      if (h && e.payload.port === h.conn().port) void relogin();
+    });
     servers = loadServers();
     // If localStorage was reset, recover the list from the SQLite source of truth.
     if (!servers.length) loadServersAsync().then((l) => (servers = l.length ? l : servers));
@@ -198,6 +243,10 @@ export const connection = {
     focused = v;
     if (keepAliveId !== null) startKeepAlive(); // re-arm keep-alive at the new rate
     pending.setFocused(v);
+  },
+  /** Refresh after a cancelled login: the next refused command asks again. */
+  allowRelogin() {
+    declined = false;
   },
   get connected() {
     return connected;
