@@ -17,15 +17,18 @@ import { cacheGet, cacheSet } from "$lib/store.svelte";
 const CHOICE_KEY = "editor"; // store scope `nav`: the chosen editor id
 const DIFF_KEY = "difftool"; // store scope `nav`: "inapp" | "external"
 const MERGE_KEY = "mergetool"; // same, for the three-way resolve window
+const ASSET_KEY = "assetdifftool"; // store scope `nav`: "auger" | "unreal"
 
 let editors = $state<EditorInfo[]>([]);
 let chosenId = $state<string>("");
 export type DiffTool = "inapp" | "external";
 let diffTool = $state<DiffTool>("inapp");
 let mergeTool = $state<DiffTool>("inapp");
+export type AssetDiffTool = "auger" | "unreal";
+let assetDiffTool = $state<AssetDiffTool>("auger");
 
-/** Binary UE assets — text diffs are useless; diff them in Unreal's asset-diff
- *  tool (`UnrealEditor -diff`) instead. */
+/** Binary UE assets — text diffs are useless; they get the asset diff (Auger's
+ *  own, or Unreal's `UnrealEditor -diff`) instead. */
 export function isUnrealAsset(path: string): boolean {
   return /\.(uasset|umap)$/i.test(path);
 }
@@ -50,14 +53,16 @@ export const editor = {
     // fills (see storeSet) — so the preference lived only in SQLite and every
     // restart answered "nothing saved" and reset the choice to the Windows
     // default.
-    const [savedDiff, savedMerge, saved, found] = await Promise.all([
+    const [savedDiff, savedMerge, savedAsset, saved, found] = await Promise.all([
       cacheGet("nav", DIFF_KEY),
       cacheGet("nav", MERGE_KEY),
+      cacheGet("nav", ASSET_KEY),
       cacheGet("nav", CHOICE_KEY),
       detectEditors().catch(() => [] as EditorInfo[]),
     ]);
     diffTool = savedDiff === "external" ? "external" : "inapp";
     mergeTool = savedMerge === "external" ? "external" : "inapp";
+    assetDiffTool = savedAsset === "unreal" ? "unreal" : "auger";
     editors = found;
     if (saved && editors.some((e) => e.id === saved)) {
       chosenId = saved;
@@ -95,6 +100,14 @@ export const editor = {
   setMergeTool(t: DiffTool) {
     mergeTool = t;
     cacheSet("nav", MERGE_KEY, t);
+  },
+  /** Where a .uasset / .umap diff opens: Auger's asset diff or Unreal's. */
+  get assetDiffTool(): AssetDiffTool {
+    return assetDiffTool;
+  },
+  setAssetDiffTool(t: AssetDiffTool) {
+    assetDiffTool = t;
+    cacheSet("nav", ASSET_KEY, t);
   },
 
   /** Open a local file in the preferred editor. */

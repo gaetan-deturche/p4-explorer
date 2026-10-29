@@ -1,6 +1,6 @@
-//! One path for "open a diff outside the list": Unreal's asset-diff tool for a
-//! `.uasset`, else the in-app diff window or the external P4DIFF tool, per
-//! Options → Editor. History, Pending and Reviews all double-click into this;
+//! One path for "open a diff outside the list": the asset diff (Auger's or
+//! Unreal's) for a `.uasset`, else the in-app diff window or the external P4DIFF
+//! tool, per Options → Editor. History, Pending and Reviews all double-click into this;
 //! they differ ONLY in where the two sides come from, which is what `DiffSource`
 //! carries. Keeping a copy per tab is how the Reviews tab shipped without the
 //! Unreal branch (v0.15.0).
@@ -8,6 +8,7 @@
 import {
   p4,
   openDiffWindow,
+  openAssetDiffWindow,
   type CommentTarget,
   type DiffPair,
   type P4Conn,
@@ -39,8 +40,8 @@ export type DiffSource =
       bVersion: number;
     };
 
-/** Materialize both sides on disk (Unreal's diff tool and the in-app window
- *  both take files, not a command). */
+/** Materialize both sides on disk (the asset diffs and the in-app window all
+ *  take files, not a command). */
 function diffPair(conn: P4Conn, src: DiffSource): Promise<DiffPair> {
   switch (src.kind) {
     case "rev":
@@ -101,7 +102,9 @@ export async function openDiff(
   setNotice: (m: string, ms?: number) => void,
 ): Promise<void> {
   try {
-    if (isUnrealAsset(src.file)) {
+    if (isUnrealAsset(src.file) && editor.assetDiffTool === "auger") {
+      await openAssetDiffWindow(await diffPair(conn, src), conn, unrealAssetName(src.file));
+    } else if (isUnrealAsset(src.file)) {
       setNotice("Opening Unreal diff…", 15000); // instant feedback; replaced on completion
       const pair = await diffPair(conn, src);
       const mode = await p4.openUnrealDiff(

@@ -561,6 +561,41 @@ export function openDiffWindow(
   return invoke<void>("open_diff_window", { pair, conn, comments });
 }
 
+/** One line of an asset diff's tree, in display order: its children follow it
+ *  with a greater depth. Containers show their size as `{n}` / `[n]`. */
+export interface AssetRow {
+  depth: number;
+  key: string;
+  left: string | null;
+  right: string | null;
+  status: "same" | "changed" | "added" | "removed";
+  kids: boolean;
+}
+
+export interface AssetDiff {
+  rows: AssetRow[];
+  /** Leaf rows that differ outside "All data", and inside it. */
+  changes: number;
+  rawChanges: number;
+  leftError: string;
+  rightError: string;
+  /** data: URLs of each side's thumbnail, when it has one. */
+  leftThumb: string | null;
+  rightThumb: string | null;
+  class: string;
+}
+
+/** Open the in-app asset diff window; `name` is the asset's object name, kept
+ *  for its "Open in Unreal" button. */
+export function openAssetDiffWindow(pair: DiffPair, conn: P4Conn, name: string): Promise<void> {
+  return invoke<void>("open_asset_diff_window", { pair, conn, name });
+}
+
+/** The connection and asset name an asset diff window was opened with. */
+export function assetDiffJob(job: string): Promise<{ conn: P4Conn; name: string }> {
+  return invoke<{ conn: P4Conn; name: string }>("asset_diff_job", { job });
+}
+
 /** The connection and comment target a diff window was opened with. Rejects for
  *  an ordinary diff, which has no discussion to join. */
 export function diffJob(job: string): Promise<{ conn: P4Conn; comments: CommentTarget }> {
@@ -887,6 +922,8 @@ export const p4 = {
     leftRev: string,
     rightRev: string,
   ) => g<string>("open_unreal_diff", { conn, left, right, name, leftRev, rightRev }),
+  /** Compare two UE asset files in Auger, read straight from disk. */
+  assetDiff: (left: string, right: string) => invoke<AssetDiff>("asset_diff", { left, right }),
   revert: (conn: P4Conn, depotFile: string) => call("p4_revert", { conn, depotFile }),
   /** Blame: every line with the changelist that introduced it. `revSpec` is a
    *  p4 suffix ("#8", "@=1234") or "" for the head revision. */

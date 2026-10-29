@@ -4,6 +4,7 @@ mod wingeom;
 mod winfocus;
 mod merge3;
 mod p4;
+pub mod uasset; // pub: the uassetdump example compares it against the Python reader
 
 use tauri::Manager;
 
@@ -192,6 +193,9 @@ pub fn run() {
             commands::diff_job,
             commands::write_local_file,
             commands::open_unreal_diff,
+            commands::asset_diff,
+            commands::asset_diff_job,
+            commands::open_asset_diff_window,
             commands::p4_submit,
             commands::p4_shelve,
             commands::p4_shelve_delete,

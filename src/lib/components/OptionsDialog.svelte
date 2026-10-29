@@ -149,6 +149,30 @@
           <span class="epath mono dim">P4DIFF (p4 set P4DIFF=…)</span>
         </label>
       </div>
+      <div class="section"><span>Unreal assets</span></div>
+      <p class="hint dim">Where a <code>.uasset</code> / <code>.umap</code> diff opens.</p>
+      <div class="edlist">
+        <label class="erow">
+          <input
+            type="radio"
+            name="assetdifftool"
+            checked={editor.assetDiffTool === "auger"}
+            onchange={() => editor.setAssetDiffTool("auger")}
+          />
+          <span class="ename">Auger asset diff</span>
+          <span class="epath mono dim">every property, graph link and reference — no editor needed</span>
+        </label>
+        <label class="erow">
+          <input
+            type="radio"
+            name="assetdifftool"
+            checked={editor.assetDiffTool === "unreal"}
+            onchange={() => editor.setAssetDiffTool("unreal")}
+          />
+          <span class="ename">Unreal Editor</span>
+          <span class="epath mono dim">the editor's diff tool, in the running editor or a new one</span>
+        </label>
+      </div>
       <div class="section"><span>Merge / resolve</span></div>
       <p class="hint dim">
         The tool used to settle a three-way conflict — a <code>p4 resolve</code> or a rejected
