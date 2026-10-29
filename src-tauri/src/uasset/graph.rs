@@ -370,6 +370,11 @@ impl<'p> PinDecoder<'p> {
     }
 }
 
+/// An FEdGraphPinType stored as a property value (a Blueprint variable's type).
+pub fn read_pin_type(ar: &mut Reader, package: &Package) -> Res<Val> {
+    PinDecoder { package }.pin_type(ar)
+}
+
 /// True when the export's class looks like a UEdGraphNode subclass.
 pub fn is_graph_node(package: &Package, export: &ObjectExport) -> bool {
     let class_name = package.export_class(export);

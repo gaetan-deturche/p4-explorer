@@ -13,6 +13,23 @@ const MAX_RAW: usize = 48;
 
 /// Where the package's raw contents go when an asset-type summary leads.
 pub const ALL_DATA: &str = "All data";
+pub const GRAPHS: &str = "Graphs";
+
+fn text_graphs(pkg: &Package, graph: &[GraphNode]) -> Option<Val> {
+    let main = pkg.exports.iter().position(|e| e.is_asset)?;
+    let class = leaf(&pkg.export_class(&pkg.exports[main])).to_string();
+    if class == "Material" || class.starts_with("MaterialFunction") {
+        let nodes = super::graphs::material_graph(pkg, main);
+        return Some(Val::Map(vec![(super::canvas::MATERIAL_GRAPH.into(), nodes)]));
+    }
+    (!graph.is_empty()).then(|| super::graphs::blueprint_graphs(pkg, graph))
+}
+
+/// A graph node's text form inside a document, for the drawn graph's "changed".
+pub fn graph_node<'d>(doc: &'d Val, graph: &str, node: &str) -> Option<&'d Val> {
+    let root = doc.get(ALL_DATA).unwrap_or(doc);
+    root.get(GRAPHS)?.get(graph)?.get(node)
+}
 
 pub fn document(pkg: &Package) -> Val {
     let graph = read_graph(pkg);
@@ -22,8 +39,10 @@ pub fn document(pkg: &Package) -> Val {
         raw.push(("Asset registry".into(), asset_registry(pkg)));
     }
     raw.push(("Dependencies".into(), dependencies(pkg)));
-    if !graph.is_empty() {
-        raw.push(("Graph links".into(), graph_links(&graph)));
+    // The graphs as text: what a node's details panel shows, and the "changed"
+    // test of the drawn graphs.
+    if let Some(g) = text_graphs(pkg, &graph) {
+        raw.push((GRAPHS.into(), g));
     }
     raw.push(("Objects".into(), objects(pkg, &graph)));
     match super::summary::summary(pkg) {
@@ -62,7 +81,12 @@ pub fn strip_noise(v: Val) -> Val {
 
 /// One export's tagged properties, as the diff shows them.
 pub fn properties(pkg: &Package, index: usize) -> Val {
-    strip_noise(fold_undecoded(read_export_properties(pkg, &pkg.exports[index], MAX_RAW, true)))
+    strip_noise(raw_properties(pkg, index))
+}
+
+/// The same with layout kept (node positions), for drawing a graph.
+pub fn raw_properties(pkg: &Package, index: usize) -> Val {
+    fold_undecoded(read_export_properties(pkg, &pkg.exports[index], MAX_RAW, true))
 }
 
 /// Material graph nodes: their wiring is a graph view's job, and their
@@ -131,30 +155,14 @@ fn node_name(path: &str) -> &str {
     path.split_once('.').map(|(_, rest)| rest).unwrap_or(path)
 }
 
-fn graph_links(graph: &[GraphNode]) -> Val {
-    let mut links = Vec::new();
-    for node in graph {
-        for pin in node.pins.iter().flatten() {
-            if pin.direction != Val::str("Output") {
-                continue;
-            }
-            for link in &pin.linked_to {
-                links.push(format!(
-                    "{}.{} → {}.{}",
-                    node_name(&node.path),
-                    pin.name,
-                    node_name(&link.node),
-                    link.pin.as_deref().unwrap_or("<unknown>")
-                ));
-            }
-        }
-    }
-    sorted(links)
+/// "exec", "object<Actor>", "float[Array]" — a pin type as one line.
+fn pin_type(pin: &Pin) -> String {
+    type_text(&pin.ty)
 }
 
-/// "exec", "object<Actor>", "float[Array]" — the pin type as one line.
-fn pin_type(pin: &Pin) -> String {
-    let get = |k: &str| pin.ty.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+/// The same, for a decoded FEdGraphPinType.
+pub fn type_text(ty: &Val) -> String {
+    let get = |k: &str| ty.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
     let category = get("PinCategory");
     let mut sub = get("PinSubCategory");
     let obj = get("PinSubCategoryObject");

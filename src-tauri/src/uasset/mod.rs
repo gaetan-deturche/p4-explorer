@@ -6,9 +6,11 @@
 //! output for output (the `uassetdump` dev bin prints the same JSON).
 
 pub mod archive;
+pub mod canvas;
 pub mod diff;
 pub mod doc;
 pub mod graph;
+pub mod graphs;
 pub mod package;
 pub mod properties;
 pub mod summary;

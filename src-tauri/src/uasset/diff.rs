@@ -62,6 +62,25 @@ fn exact(v: &Val) -> String {
     }
 }
 
+/// A map's own label (graph nodes carry one: "Call SetActorHidden"), shown on
+/// its row in place of its size.
+pub const LABEL: &str = "__label";
+
+fn label(v: &Val) -> Option<&str> {
+    match v {
+        Val::Map(m) => m.first().filter(|(k, _)| k == LABEL).and_then(|(_, l)| l.as_str()),
+        _ => None,
+    }
+}
+
+fn shown(v: &Val) -> String {
+    match (label(v), v) {
+        (Some(l), _) => l.to_string(),
+        (None, Val::Map(m)) => format!("{{{}}}", m.iter().filter(|(k, _)| k != LABEL).count()),
+        _ => scalar(v),
+    }
+}
+
 fn push(rows: &mut Vec<Row>, depth: u16, key: String, l: Option<String>, r: Option<String>, status: Status, kids: bool) -> usize {
     rows.push(Row { depth, key, left: l, right: r, status, kids });
     rows.len() - 1
@@ -69,12 +88,12 @@ fn push(rows: &mut Vec<Row>, depth: u16, key: String, l: Option<String>, r: Opti
 
 /// A subtree present on one side only.
 fn one_side(rows: &mut Vec<Row>, depth: u16, key: String, v: &Val, status: Status) {
-    let text = Some(scalar(v));
+    let text = Some(shown(v));
     let (l, r) = if status == Status::Removed { (text, None) } else { (None, text) };
     push(rows, depth, key, l, r, status, is_container(v) && !empty(v));
     match v {
         Val::Map(entries) => {
-            for (k, child) in entries {
+            for (k, child) in entries.iter().filter(|(k, _)| k != LABEL) {
                 one_side(rows, depth + 1, k.clone(), child, status);
             }
         }
@@ -89,7 +108,7 @@ fn one_side(rows: &mut Vec<Row>, depth: u16, key: String, v: &Val, status: Statu
 
 fn empty(v: &Val) -> bool {
     match v {
-        Val::Map(m) => m.is_empty(),
+        Val::Map(m) => m.iter().all(|(k, _)| k == LABEL),
         Val::List(l) => l.is_empty(),
         _ => true,
     }
@@ -110,8 +129,8 @@ fn entry(rows: &mut Vec<Row>, depth: u16, key: String, l: Option<&Val>, r: Optio
         (Some(l), Some(r)) => {
             let same_kind = matches!((l, r), (Val::Map(_), Val::Map(_)) | (Val::List(_), Val::List(_)));
             if same_kind {
-                let at = push(rows, depth, key, Some(scalar(l)), Some(scalar(r)), Status::Same, false);
-                let changed = children(rows, depth + 1, Some(l), Some(r));
+                let at = push(rows, depth, key, Some(shown(l)), Some(shown(r)), Status::Same, false);
+                let changed = children(rows, depth + 1, Some(l), Some(r)) | (label(l) != label(r));
                 rows[at].kids = rows.len() > at + 1;
                 if changed {
                     rows[at].status = Status::Changed;
@@ -120,7 +139,7 @@ fn entry(rows: &mut Vec<Row>, depth: u16, key: String, l: Option<&Val>, r: Optio
             }
             if is_container(l) || is_container(r) {
                 // A value that changed shape: the old one out, the new one in.
-                let at = push(rows, depth, key, Some(scalar(l)), Some(scalar(r)), Status::Changed, true);
+                let at = push(rows, depth, key, Some(shown(l)), Some(shown(r)), Status::Changed, true);
                 let (lk, rk) = (rows[at].key.clone(), rows[at].key.clone());
                 one_side(rows, depth + 1, lk, l, Status::Removed);
                 one_side(rows, depth + 1, rk, r, Status::Added);
@@ -152,6 +171,8 @@ fn children(rows: &mut Vec<Row>, depth: u16, l: Option<&Val>, r: Option<&Val>) -
 /// Keys in the left order, with keys only the right has slotted in after the
 /// key that precedes them there.
 fn maps(rows: &mut Vec<Row>, depth: u16, a: &[(String, Val)], b: &[(String, Val)]) -> bool {
+    let unlabelled = |m: &[(String, Val)]| m.iter().filter(|(k, _)| k != LABEL).cloned().collect::<Vec<_>>();
+    let (a, b) = (&unlabelled(a)[..], &unlabelled(b)[..]);
     let left: std::collections::HashMap<&str, usize> = a.iter().enumerate().map(|(i, (k, _))| (k.as_str(), i)).collect();
     let right: std::collections::HashMap<&str, usize> = b.iter().enumerate().map(|(i, (k, _))| (k.as_str(), i)).collect();
     // Right-only entries, grouped by the left index they follow (None: first).
@@ -320,6 +341,16 @@ mod tests {
         let rows = diff(&m(vec![("L", Val::List(vec![item(1)]))]), &m(vec![("L", Val::List(vec![item(2)]))]));
         let changed: Vec<_> = rows.iter().filter(|r| r.status == Status::Changed).map(|r| r.key.clone()).collect();
         assert_eq!(changed, vec!["L", "[0]", "Value"]);
+    }
+
+    #[test]
+    fn a_labelled_node_shows_its_label_and_changes_with_it() {
+        let node = |l: &str| m(vec![(LABEL, Val::str(l)), ("A", Val::Int(1))]);
+        let rows = diff(&m(vec![("N", node("Constant 1"))]), &m(vec![("N", node("Constant 2"))]));
+        assert_eq!(rows[0].status, Status::Changed);
+        assert_eq!((rows[0].left.as_deref(), rows[0].right.as_deref()), (Some("Constant 1"), Some("Constant 2")));
+        // The label is the row's value, not a child of its own.
+        assert_eq!(rows.iter().map(|r| r.key.as_str()).collect::<Vec<_>>(), vec!["N", "A"]);
     }
 
     #[test]

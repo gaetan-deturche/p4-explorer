@@ -34,11 +34,40 @@ fn saved(pkg: &Package, index: usize, skip: &[&str]) -> Val {
     )
 }
 
+/// A Blueprint variable as "Name → {Type, Category, Default, …}".
+fn variable(v: &Val) -> (String, Val) {
+    let name = v.get("VarName").and_then(|n| n.as_str()).unwrap_or("?").to_string();
+    let mut m = Vec::new();
+    if let Some(ty) = v.get("VarType") {
+        m.push(("Type".to_string(), Val::Str(super::doc::type_text(ty))));
+    }
+    if let Val::Map(fields) = v {
+        for (k, f) in fields {
+            let keep = match k.as_str() {
+                "VarName" | "VarGuid" | "VarType" | "FriendlyName" => false,
+                "RepNotifyFunc" => f.as_str() != Some("None"),
+                "ReplicationCondition" => f.as_str() != Some("COND_None"),
+                "MetaDataArray" => !matches!(f, Val::List(l) if l.is_empty()),
+                "DefaultValue" => f.as_str() != Some(""),
+                _ => true,
+            };
+            if keep {
+                m.push((k.clone(), f.clone()));
+            }
+        }
+    }
+    (name, Val::Map(m))
+}
+
 /// The Blueprint asset's own settings and the generated class's defaults
 /// (what the Class Defaults panel shows as changed from the parent).
 fn blueprint(pkg: &Package, main: usize) -> Vec<(String, Val)> {
     let cdo_name = format!("Default__{}_C", pkg.exports[main].object_name);
-    let mut out = vec![("Blueprint".to_string(), saved(pkg, main, &["LastEditedDocuments", "UbergraphPages", "FunctionGraphs"]))];
+    let skip = ["LastEditedDocuments", "UbergraphPages", "FunctionGraphs", "NewVariables"];
+    let mut out = vec![("Blueprint".to_string(), saved(pkg, main, &skip))];
+    if let Some(Val::List(vars)) = map(properties(pkg, main)).into_iter().find(|(k, _)| k == "NewVariables").map(|(_, v)| v) {
+        out.push(("Variables".into(), Val::Map(vars.iter().map(variable).collect())));
+    }
     let cdo = pkg.exports.iter().position(|e| e.outer_index == 0 && e.object_name == cdo_name);
     if let Some(cdo) = cdo {
         out.push(("Class defaults".into(), saved(pkg, cdo, &["UberGraphFrame"])));

@@ -351,6 +351,7 @@ fn read_native_struct(name: &str, ar: &mut Reader, ctx: &Context) -> Option<Res<
             Ok(Val::map(m))
         })(),
         "SimpleCurveKey" if ctx.extended => f32s(ar, &["Time", "Value"]),
+        "EdGraphPinType" if ctx.extended => super::graph::read_pin_type(ar, ctx.package),
         // FGameplayTagContainer::Serialize: the tags as a plain FName array.
         "GameplayTagContainer" if ctx.extended => (|| {
             let count = bounded(ar, 1 << 16, "gameplay tag")?;

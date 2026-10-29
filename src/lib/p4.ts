@@ -583,6 +583,8 @@ export interface AssetDiff {
   leftThumb: string | null;
   rightThumb: string | null;
   class: string;
+  /** Each graph, both revisions, drawable. */
+  graphs: import("$lib/assetgraph").GraphPair[];
 }
 
 /** Open the in-app asset diff window; `name` is the asset's object name, kept

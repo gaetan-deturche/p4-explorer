@@ -23,13 +23,23 @@ fn main() {
         let right = args.next().expect("rows needs a right file");
         let open = |p: &str| Package::open(std::path::Path::new(p)).unwrap();
         let (l, r) = (open(&path), open(&right));
-        let rows = p4gui_lib::uasset::diff::diff(&p4gui_lib::uasset::doc::document(&l), &p4gui_lib::uasset::doc::document(&r));
+        use p4gui_lib::uasset::{canvas, doc, graph::read_graph};
+        let (ldoc, rdoc) = (doc::document(&l), doc::document(&r));
+        let rows = p4gui_lib::uasset::diff::diff(&ldoc, &rdoc);
         let changes = rows.iter().filter(|r| !r.kids && r.status != p4gui_lib::uasset::diff::Status::Same).count();
+        let graphs = canvas::pair(
+            canvas::sides(&l, &read_graph(&l)),
+            canvas::sides(&r, &read_graph(&r)),
+            &|g: &str, n: &str| doc::graph_node(&ldoc, g, n).cloned(),
+            &|g: &str, n: &str| doc::graph_node(&rdoc, g, n).cloned(),
+        );
         let out = serde_json::json!({
             "rows": rows, "changes": changes, "leftError": "", "rightError": "",
             "leftThumb": p4gui_lib::uasset::doc::thumbnail_url(&l),
             "rightThumb": p4gui_lib::uasset::doc::thumbnail_url(&r),
             "class": p4gui_lib::uasset::doc::main_class(&r),
+            "rawChanges": 0,
+            "graphs": graphs,
         });
         println!("{out}");
         return;

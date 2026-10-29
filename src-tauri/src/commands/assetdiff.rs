@@ -7,8 +7,10 @@ use tauri::{AppHandle, WebviewUrl, WebviewWindowBuilder};
 use super::diffwin::{enc, DiffPair};
 use crate::p4::P4Conn;
 use crate::uasset::archive::Val;
+use crate::uasset::canvas::{self, GraphPair};
 use crate::uasset::diff::{diff, Row, Status};
-use crate::uasset::doc::{document, main_class, thumbnail_url, ALL_DATA};
+use crate::uasset::doc::{document, graph_node, main_class, thumbnail_url, ALL_DATA};
+use crate::uasset::graph::read_graph;
 use crate::uasset::package::Package;
 
 #[derive(Serialize)]
@@ -25,6 +27,8 @@ pub struct AssetDiff {
     left_thumb: Option<String>,
     right_thumb: Option<String>,
     class: String,
+    /// Each graph, both revisions drawn side by side.
+    graphs: Vec<GraphPair>,
 }
 
 struct Side {
@@ -32,16 +36,24 @@ struct Side {
     error: String,
     thumb: Option<String>,
     class: String,
+    graphs: Vec<(String, canvas::Side)>,
 }
 
 /// An absent side (an add, a delete) is an empty document, not an error.
 fn read_side(path: &str) -> Side {
-    let empty = |error: String| Side { doc: Val::Map(Vec::new()), error, thumb: None, class: String::new() };
+    let empty =
+        |error: String| Side { doc: Val::Map(Vec::new()), error, thumb: None, class: String::new(), graphs: Vec::new() };
     if path.is_empty() || std::fs::metadata(path).map(|m| m.len() == 0).unwrap_or(true) {
         return empty(String::new());
     }
     match Package::open(std::path::Path::new(path)) {
-        Ok(pkg) => Side { doc: document(&pkg), error: String::new(), thumb: thumbnail_url(&pkg), class: main_class(&pkg) },
+        Ok(pkg) => Side {
+            doc: document(&pkg),
+            error: String::new(),
+            thumb: thumbnail_url(&pkg),
+            class: main_class(&pkg),
+            graphs: canvas::sides(&pkg, &read_graph(&pkg)),
+        },
         Err(e) => empty(e),
     }
 }
@@ -56,6 +68,12 @@ pub async fn asset_diff(left: String, right: String) -> Result<AssetDiff, String
             (l.join().unwrap_or_else(|_| read_side("")), r)
         });
         let rows = diff(&l.doc, &r.doc);
+        let graphs = canvas::pair(
+            l.graphs,
+            r.graphs,
+            &|g: &str, n: &str| graph_node(&l.doc, g, n).cloned(),
+            &|g: &str, n: &str| graph_node(&r.doc, g, n).cloned(),
+        );
         let (mut changes, mut raw_changes, mut in_raw) = (0, 0, false);
         for row in &rows {
             if row.depth == 0 {
@@ -78,6 +96,7 @@ pub async fn asset_diff(left: String, right: String) -> Result<AssetDiff, String
             left_thumb: l.thumb,
             right_thumb: r.thumb,
             class: if r.class.is_empty() { l.class } else { r.class },
+            graphs,
         }
     })
     .await
