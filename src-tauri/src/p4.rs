@@ -188,16 +188,58 @@ pub fn log_command_err(id: u64, args: &[&str], ms: u128, ok: bool, err: &str) {
     }
 }
 
+/// p4 output as text. Server data is UTF-8, but messages p4 relays from Windows
+/// (a failed connect's "Hôte inconnu") are in the ANSI code page: decoding those
+/// as UTF-8 gave "H\u{FFFD}te". Line by line, so one such message never garbles
+/// the UTF-8 paths around it.
+pub fn p4_text(bytes: &[u8]) -> std::borrow::Cow<'_, str> {
+    if let Ok(s) = std::str::from_utf8(bytes) {
+        return std::borrow::Cow::Borrowed(s);
+    }
+    let mut out = String::with_capacity(bytes.len());
+    for line in bytes.split_inclusive(|&b| b == b'\n') {
+        match std::str::from_utf8(line) {
+            Ok(s) => out.push_str(s),
+            Err(_) => out.push_str(&ansi(line)),
+        }
+    }
+    std::borrow::Cow::Owned(out)
+}
+
+#[cfg(windows)]
+fn ansi(bytes: &[u8]) -> String {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn MultiByteToWideChar(page: u32, flags: u32, src: *const u8, len: i32, dst: *mut u16, cap: i32) -> i32;
+    }
+    const CP_ACP: u32 = 0;
+    let len = bytes.len() as i32;
+    unsafe {
+        let n = MultiByteToWideChar(CP_ACP, 0, bytes.as_ptr(), len, std::ptr::null_mut(), 0);
+        if n <= 0 {
+            return String::from_utf8_lossy(bytes).into_owned();
+        }
+        let mut wide = vec![0u16; n as usize];
+        MultiByteToWideChar(CP_ACP, 0, bytes.as_ptr(), len, wide.as_mut_ptr(), n);
+        String::from_utf16_lossy(&wide)
+    }
+}
+
+#[cfg(not(windows))]
+fn ansi(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
 /// The human-readable error of a failed p4 run: stderr if present, else the
 /// `data` of error-severity records on stdout (`-ztag -Mj` reports errors there).
 pub fn extract_error(stdout: &[u8], stderr: &[u8]) -> String {
-    let se = String::from_utf8_lossy(stderr);
+    let se = p4_text(stderr);
     let se = se.trim();
     if !se.is_empty() {
         return se.to_string();
     }
     let mut msgs: Vec<String> = Vec::new();
-    for line in String::from_utf8_lossy(stdout).lines() {
+    for line in p4_text(stdout).lines() {
         if let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(line.trim()) {
             let sev = obj.get("severity").and_then(value_as_i64).unwrap_or(0);
             if sev >= E_FAILED {
@@ -382,14 +424,14 @@ pub fn run_raw(conn: &P4Conn, args: &[&str]) -> Result<String, String> {
         }
         cmd.output()
     })?;
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    Ok(p4_text(&out.stdout).into_owned())
 }
 
 /// Did the command emit any NON-error output? For tagged output that means a
 /// record without an error severity; for plain output, any non-empty line. Used
 /// to keep the auth retry from re-running something that already did work.
 fn has_data_line(stdout: &[u8]) -> bool {
-    for line in String::from_utf8_lossy(stdout).lines() {
+    for line in p4_text(stdout).lines() {
         let line = line.trim();
         if line.is_empty() {
             continue;
@@ -430,7 +472,7 @@ fn ticket_no_retry(conn: &P4Conn) -> Option<String> {
     let mut cmd = base_command(conn);
     cmd.arg("tickets");
     let out = cmd.output().ok()?;
-    parse_ticket(&String::from_utf8_lossy(&out.stdout), conn)
+    parse_ticket(&p4_text(&out.stdout), conn)
 }
 
 /// Run `p4 <global> <args>` feeding `input` on stdin (for `... -i` spec forms).
@@ -452,12 +494,12 @@ pub fn run_raw_stdin(conn: &P4Conn, args: &[&str], input: &str) -> Result<String
     let out = child.wait_with_output().map_err(|e| e.to_string())?;
     log_command_err(id, args, start.elapsed().as_millis(), out.status.success(), &if out.status.success() { String::new() } else { extract_error(&out.stdout, &out.stderr) });
     if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr);
+        let err = p4_text(&out.stderr);
         if !err.trim().is_empty() {
             return Err(err.trim().to_string());
         }
     }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    Ok(p4_text(&out.stdout).into_owned())
 }
 
 /// The cached P4 ticket for this connection's user (`p4 tickets`), if any.
@@ -510,7 +552,7 @@ pub fn run_raw_stdout_diff(conn: &P4Conn, args: &[&str]) -> Result<String, Strin
         .output()
         .map_err(|e| format!("failed to launch p4: {e} (is p4 on PATH?)"))?;
     log_command_err(id, args, start.elapsed().as_millis(), out.status.success(), &if out.status.success() { String::new() } else { extract_error(&out.stdout, &out.stderr) });
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    Ok(p4_text(&out.stdout).into_owned())
 }
 
 /// Run `p4 -ztag -Mj <global> <args>` and return the data records.
@@ -536,7 +578,7 @@ fn parse_tagged(
     stderr: &[u8],
     keep_warnings: bool,
 ) -> Result<(Vec<Record>, Vec<String>), String> {
-    let stdout = String::from_utf8_lossy(stdout);
+    let stdout = p4_text(stdout);
     let mut records: Vec<Record> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
 
@@ -575,7 +617,7 @@ fn parse_tagged(
             return Err(errors.join("\n"));
         }
         if !success {
-            let stderr = String::from_utf8_lossy(stderr);
+            let stderr = p4_text(stderr);
             let stderr = stderr.trim();
             if !stderr.is_empty() {
                 return Err(stderr.to_string());
@@ -744,7 +786,7 @@ pub fn run_strict(conn: &P4Conn, args: &[&str]) -> Result<Vec<Record>, String> {
         }
         cmd.output()
     })?;
-    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stdout = p4_text(&out.stdout);
     let mut records: Vec<Record> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
 
@@ -775,7 +817,7 @@ pub fn run_strict(conn: &P4Conn, args: &[&str]) -> Result<Vec<Record>, String> {
         return Err(errors.join("\n"));
     }
     if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
+        let stderr = p4_text(&out.stderr);
         let stderr = stderr.trim();
         if !stderr.is_empty() {
             return Err(stderr.to_string());
@@ -905,5 +947,19 @@ mod stamp_tests {
     fn leap_day_is_not_skipped() {
         assert_eq!(utc_stamp(1_582_934_400), "2020-02-29 00:00:00");
         assert_eq!(utc_stamp(1_583_020_800), "2020-03-01 00:00:00");
+    }
+}
+
+#[cfg(test)]
+mod text_tests {
+    #[test]
+    fn utf8_output_passes_through_and_a_windows_message_is_decoded() {
+        assert_eq!(super::p4_text("//dépôt/a.txt\n".as_bytes()), "//dépôt/a.txt\n");
+        // "Hôte inconnu" in cp1252 after a UTF-8 line: each line decoded on its own.
+        let mixed = [&b"//d\xc3\xa9p\xc3\xb4t\n"[..], &b"H\xf4te inconnu."[..]].concat();
+        let text = super::p4_text(&mixed);
+        assert!(text.starts_with("//dépôt\n"), "{text}");
+        #[cfg(windows)]
+        assert!(!text.contains('\u{FFFD}'), "{text}");
     }
 }
