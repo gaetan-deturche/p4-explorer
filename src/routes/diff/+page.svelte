@@ -14,11 +14,11 @@
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { diffLines, lineEndings, lineKey, type DiffRow } from "$lib/linediff";
   import { endingLabel, renderLine } from "$lib/invisibles";
+  import { watchOccurrences } from "$lib/occurhighlight";
   import FindBar from "$lib/components/FindBar.svelte";
   import {
     findHits,
     rangesByLine,
-    rangesInLine,
     selectionTerm,
     sortByRow,
     stepHit,
@@ -888,12 +888,8 @@ initSplit(leftText.trim() === "");
     if (finding) return ""; // a search on screen is what the eye is following
     return selectionQuery();
   });
-  /** Where the selected text also appears on one line. Computed per DRAWN row —
-   *  sixty of them — so a selection costs nothing on a file of any size, and
-   *  needs no debouncing while the mouse is down. */
-  function occursOn(line: string): readonly [number, number][] | undefined {
-    return occurQuery ? rangesInLine(line, occurQuery, true) : undefined;
-  }
+  // The left pane's marks; the result pane draws its own.
+  $effect(() => watchOccurrences([paneEls[0]], ".line .src", occurQuery));
 
   /** Alt+Up / Alt+Down step through the changes from anywhere in the window. */
   function onWindowKey(e: KeyboardEvent) {
@@ -1408,7 +1404,6 @@ initSplit(leftText.trim() === "");
             hot: hots[first + k],
             finds: leftHits.get(base + first + k),
             current: currentOn(0, base + first + k),
-            occurs: occursOn(line),
           }) as seg}<span
             style:color={seg.color}
             class:ghost={seg.ghost}
@@ -1849,9 +1844,12 @@ initSplit(leftText.trim() === "");
      find bar is ON takes a stronger one, so stepping is visible without
      reading the counter. */
   /* Another occurrence of what is selected: present, but not a search result. */
-  .src :global(.occur) {
-    background: rgba(170, 178, 190, 0.16);
-    border-radius: 2px;
+  :global(::highlight(occur)) {
+    background-color: rgba(170, 178, 190, 0.16);
+  }
+  /* The browser's selection, in the colour the result pane draws its own in. */
+  .col :global(::selection) {
+    background: rgba(217, 141, 58, 0.28);
   }
   .src :global(.found) {
     background: rgba(232, 192, 90, 0.25);

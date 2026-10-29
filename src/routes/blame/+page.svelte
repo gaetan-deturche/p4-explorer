@@ -16,10 +16,11 @@
   import ContextMenu from "$lib/components/ContextMenu.svelte";
   import { langForFile, openSyntax, type SyntaxSession, type TokenRun } from "$lib/syntax";
   import { colorParts, renderLine } from "$lib/invisibles";
+  import { watchOccurrences } from "$lib/occurhighlight";
   import FindBar from "$lib/components/FindBar.svelte";
   import ChangeDetails from "$lib/components/ChangeDetails.svelte";
   import { history } from "$lib/history.svelte";
-  import { findHits, rangesByLine, rangesInLine, selectionTerm, stepHit } from "$lib/find";
+  import { findHits, rangesByLine, selectionTerm, stepHit } from "$lib/find";
   import { cacheGet, cacheSet } from "$lib/store.svelte";
   import { openDiff } from "$lib/opendiff";
   import { editor } from "$lib/editor.svelte";
@@ -307,12 +308,7 @@
     if (finding) return ""; // a search on screen is what the eye is following
     return selectionQuery();
   });
-  /** Where the selected text also appears on one line. Computed per DRAWN row —
-   *  sixty of them — so a selection costs nothing on a file of any size, and
-   *  needs no debouncing while the mouse is down. */
-  function occursOn(line: string): readonly [number, number][] | undefined {
-    return occurQuery ? rangesInLine(line, occurQuery, true) : undefined;
-  }
+  $effect(() => watchOccurrences([scrollEl], ".row .code", occurQuery));
 
   const marks = $derived.by<Mark[]>(() => {
     // A band under about two pixels cannot be read, and a file like
@@ -649,11 +645,10 @@
               style="top:{i * LH}px; background: {shade(l.change, 0.07)}"
             >
               <span class="lno dim">{i + 1}</span><span class="code"
-                >{#if hitLines.size || (tokens && tokens[i])}{#each renderLine(l.text, tokens?.[i], { finds: hitLines.get(i), current: currentOn(i), occurs: occursOn(l.text) }) as seg}<span
+                >{#if hitLines.size || (tokens && tokens[i])}{#each renderLine(l.text, tokens?.[i], { finds: hitLines.get(i), current: currentOn(i) }) as seg}<span
                       style:color={seg.color}
                       class:found={seg.found}
-                      class:current={seg.current}
-                      class:occur={seg.occur}>{seg.text}</span
+                      class:current={seg.current}>{seg.text}</span
                     >{/each}{:else}{l.text}{/if}</span
               >
             </div>
@@ -838,9 +833,8 @@
      is ON takes a stronger one, so stepping is visible without reading the
      counter. */
   /* Another occurrence of what is selected: present, but not a search result. */
-  .code :global(.occur) {
-    background: rgba(170, 178, 190, 0.16);
-    border-radius: 2px;
+  :global(::highlight(occur)) {
+    background-color: rgba(170, 178, 190, 0.16);
   }
   .code :global(.found) {
     background: rgba(232, 192, 90, 0.25);

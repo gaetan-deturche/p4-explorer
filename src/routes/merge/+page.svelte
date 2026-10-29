@@ -41,11 +41,11 @@
     type MergeAction,
   } from "$lib/mergedoc";
   import { colorParts, renderLine } from "$lib/invisibles";
+  import { watchOccurrences } from "$lib/occurhighlight";
   import FindBar from "$lib/components/FindBar.svelte";
   import {
     findHits,
     rangesByLine,
-    rangesInLine,
     selectionTerm,
     sortByRow,
     stepHit,
@@ -812,12 +812,8 @@
     if (finding) return ""; // a search on screen is what the eye is following
     return selectionQuery();
   });
-  /** Where the selected text also appears on one line. Computed per DRAWN row —
-   *  sixty of them — so a selection costs nothing on a file of any size, and
-   *  needs no debouncing while the mouse is down. */
-  function occursOn(line: string): readonly [number, number][] | undefined {
-    return occurQuery ? rangesInLine(line, occurQuery, true) : undefined;
-  }
+  // The side panes' marks; the result pane draws its own.
+  $effect(() => watchOccurrences([paneEls[0], paneEls[2]], ".line .src", occurQuery));
 
   /** Put region `i` in view, a few rows below the top edge.
    *
@@ -1200,7 +1196,7 @@
       ><span class="ln"
         >{base + first + k + 1}</span
       ><span class="src"
-        >{#if line && (toks[base + first + k] || hitRanges[pi].size)}{#each renderLine(line, toks[base + first + k], { finds: hitRanges[pi].get(base + first + k), current: currentOn(pi, base + first + k), occurs: occursOn(line) }) as seg}<span
+        >{#if line && (toks[base + first + k] || hitRanges[pi].size)}{#each renderLine(line, toks[base + first + k], { finds: hitRanges[pi].get(base + first + k), current: currentOn(pi, base + first + k) }) as seg}<span
               style:color={seg.color}
               class:found={seg.found}
               class:current={seg.current}>{seg.text}</span
@@ -1919,9 +1915,12 @@
   /* A match keeps its syntax colour and takes a wash behind it; the one the
      find bar is ON takes a stronger one. */
   /* Another occurrence of what is selected: present, but not a search result. */
-  .src :global(.occur) {
-    background: rgba(170, 178, 190, 0.16);
-    border-radius: 2px;
+  :global(::highlight(occur)) {
+    background-color: rgba(170, 178, 190, 0.16);
+  }
+  /* The browser's selection, in the colour the result pane draws its own in. */
+  .col :global(::selection) {
+    background: rgba(217, 141, 58, 0.28);
   }
   .src :global(.found) {
     background: rgba(232, 192, 90, 0.25);
