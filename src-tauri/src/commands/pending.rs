@@ -52,7 +52,9 @@ pub async fn p4_opened(conn: P4Conn, change: String) -> Res {
             continue;
         };
         let Some(path) = local.get(&depot) else { continue };
-        let gone = !std::path::Path::new(path).exists();
+        // A file open for delete is meant to be gone.
+        let action = r.get("action").and_then(|v| v.as_str()).unwrap_or("");
+        let gone = !matches!(action, "delete" | "move/delete") && !std::path::Path::new(path).exists();
         r.insert("localFile".into(), serde_json::Value::String(path.clone()));
         r.insert("missing".into(), serde_json::Value::Bool(gone));
     }
