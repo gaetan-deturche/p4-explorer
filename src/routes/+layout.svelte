@@ -1,6 +1,8 @@
 <script lang="ts">
   import "../app.css";
+  import { logUncaughtErrors } from "$lib/errorlog";
   let { children } = $props();
+  logUncaughtErrors();
 </script>
 
 <!-- Suppress the webview's native context menu so right-click can be handled
