@@ -58,6 +58,7 @@ export const P4_COMMANDS: P4Cmd[] = [
   { key: "resolve_needed", label: "fstat (needs resolve)", read: true },
   { key: "watch_file", label: "watch file", read: true },
   { key: "unwatch_file", label: "watch file (stop)", read: true },
+  { key: "file_digest", label: "watch file (compare)", read: true },
   { key: "merge_reload", label: "resolve (reload)", read: true },
   { key: "merge_start_resolve", label: "resolve (prepare merge)", read: true },
   { key: "merge_start_patch", label: "patch (prepare merge)", read: true },

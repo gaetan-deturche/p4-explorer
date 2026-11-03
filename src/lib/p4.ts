@@ -869,6 +869,8 @@ export const p4 = {
    *  `file-on-disk-changed` when something touches it. One watch per window. */
   watchFile: (label: string, path: string) => g<void>("watch_file", { label, path }),
   unwatchFile: (label: string) => g<void>("unwatch_file", { label }),
+  /** A digest of a file's bytes, to tell a binary file's real change from a touch. */
+  fileDigest: (path: string) => g<string>("file_digest", { path }),
   /** Prepare a merge again from the file as it stands now, under the same id. */
   mergeReload: (id: string) => g<void>("merge_reload", { id }),
   /** Depot files under `path` that p4 says still need resolving. */

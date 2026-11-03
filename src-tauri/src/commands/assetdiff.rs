@@ -9,7 +9,7 @@ use crate::p4::P4Conn;
 use crate::uasset::archive::Val;
 use crate::uasset::canvas::{self, GraphPair};
 use crate::uasset::diff::{diff, Row, Status};
-use crate::uasset::doc::{document_in, graph_node, main_class, thumbnail_url, ALL_DATA};
+use crate::uasset::doc::{document_in, graph_node, main_class, thumbnail_url, ALL_DATA, GRAPHS};
 use crate::uasset::graph::read_graph;
 use crate::uasset::package::Package;
 
@@ -86,13 +86,17 @@ pub async fn asset_diff(left: String, right: String, job: Option<String>) -> Res
             &|g: &str, n: &str| graph_node(&l.doc, g, n).cloned(),
             &|g: &str, n: &str| graph_node(&r.doc, g, n).cloned(),
         );
-        let (mut changes, mut raw_changes, mut in_raw) = (0, 0, false);
+        // The graphs' text sits under "All data", but a graph edit is a change in its own right.
+        let (mut changes, mut raw_changes, mut in_raw, mut in_graphs) = (0, 0, false, false);
         for row in &rows {
             if row.depth == 0 {
                 in_raw = row.key == ALL_DATA;
             }
+            if row.depth == 1 && in_raw {
+                in_graphs = row.key == GRAPHS;
+            }
             if !row.kids && row.status != Status::Same {
-                if in_raw {
+                if in_raw && !in_graphs {
                     raw_changes += 1;
                 } else {
                     changes += 1;
@@ -157,13 +161,14 @@ pub async fn open_asset_diff_window(app: AppHandle, pair: DiffPair, conn: P4Conn
         .map_err(|_| "window registry poisoned")?
         .insert(label.clone(), AssetJob { conn, name, root });
     let url = format!(
-        "assetdiff?left={}&right={}&ll={}&rl={}&title={}&job={}",
+        "assetdiff?left={}&right={}&ll={}&rl={}&title={}&job={}&live={}",
         enc(&pair.left),
         enc(&pair.right),
         enc(&pair.left_label),
         enc(&pair.right_label),
         enc(&pair.title),
         enc(&label),
+        if pair.right_editable { "1" } else { "0" },
     );
     let win = WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(url.into()))
         .title(format!("Asset diff — {}", pair.title))

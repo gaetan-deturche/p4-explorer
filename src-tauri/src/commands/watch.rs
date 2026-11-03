@@ -77,6 +77,18 @@ pub async fn watch_file(app: AppHandle, label: String, path: String) -> Result<(
     Ok(())
 }
 
+/// A digest of a file's bytes: how a window showing a binary file (an asset)
+/// tells someone else's edit from a touch that changed nothing.
+#[tauri::command]
+pub async fn file_digest(path: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let bytes = std::fs::read(&path).map_err(|e| format!("{path}: {e}"))?;
+        Ok(sha1_smol::Sha1::from(&bytes).digest().to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Stop watching for one window. Idempotent: a window that never watched
 /// anything (a diff of two depot revisions) closes through here too.
 #[tauri::command]

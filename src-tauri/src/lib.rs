@@ -138,6 +138,7 @@ pub fn run() {
             commands::note_workspace_window,
             commands::workspace_session,
             commands::unwatch_file,
+            commands::file_digest,
             commands::merge_reload,
             commands::pick_folder,
             commands::p4_dirs,

@@ -10,7 +10,9 @@
   //! Above the tree, the asset's graphs (event graph, functions, a material's
   //! graph) are drawn: both revisions side by side, sharing one pan and zoom.
   //! Clicking a node shows its entry in the tree.
-  import { onMount, tick, untrack } from "svelte";
+  import { onDestroy, onMount, tick, untrack } from "svelte";
+  import { listen } from "@tauri-apps/api/event";
+  import { getCurrentWindow } from "@tauri-apps/api/window";
   import { p4, assetDiffJob, setClipboard, type AssetDiff } from "$lib/p4";
   import { cacheGet, cacheSet } from "$lib/store.svelte";
   import { bounds, geom, type GNode } from "$lib/assetgraph";
@@ -26,6 +28,8 @@
   const rightLabel = params.get("rl") ?? "right";
   const title = params.get("title") ?? "";
   const job = params.get("job") ?? "";
+  /** The right side is the workspace file, which something else can rewrite. */
+  const live = params.get("live") === "1";
 
   const RH = 22; // row height
   /** An added or removed branch this small opens by itself. */
@@ -205,22 +209,72 @@
     window.setTimeout(() => (notice = ""), ms);
   }
 
+  async function load() {
+    data = await p4.assetDiff(leftPath, rightPath, job);
+    // Stay on the graph being looked at, else open on the one that changed most.
+    if (!data.graphs.some((g) => g.name === graphName)) {
+      graphName = [...data.graphs].sort((a, b) => b.changes - a.changes)[0]?.name ?? "";
+    }
+    if (/Texture/.test(data.class)) void loadTexture();
+  }
+
   onMount(async () => {
     onlyChanges = ((await cacheGet("nav", "assetdiff-changes")) ?? "1") === "1";
     const h = Number(await cacheGet("nav", "assetdiff-graphh"));
     if (h > 0) graphH = Math.min(h, window.innerHeight - 160);
     try {
-      data = await p4.assetDiff(leftPath, rightPath, job);
-      // Open on the graph that changed most.
-      const g = [...data.graphs].sort((a, b) => b.changes - a.changes)[0];
-      if (g) graphName = g.name;
-      if (/Texture/.test(data.class)) void loadTexture();
+      await load();
     } catch (e) {
       error = String(e);
     } finally {
       loading = false;
     }
+    if (!live) return;
+    diskDigest = await p4.fileDigest(rightPath).catch(() => "");
+    void p4.watchFile(getCurrentWindow().label, rightPath).catch(() => {});
+    stopWatching = await listen("file-on-disk-changed", () => {
+      void p4
+        .fileDigest(rightPath)
+        .then((now) => {
+          if (now !== diskDigest) changedOnDisk = true;
+        })
+        .catch(() => {});
+    });
   });
+
+  // --- the workspace file rewritten while the window is open (a save in the editor) ---
+  let changedOnDisk = $state(false);
+  let reloading = $state(false);
+  /** Bumps on a reload, so the texture and mesh views read the file again. */
+  let generation = $state(0);
+  /** The workspace file as this window last read it. */
+  let diskDigest = "";
+  let stopWatching: (() => void) | null = null;
+  onDestroy(() => {
+    stopWatching?.();
+    if (live) void p4.unwatchFile(getCurrentWindow().label).catch(() => {});
+  });
+
+  /** Compare against the file as it stands now. Offered, never done on its own:
+   *  a diff rearranging itself while it is being read is not a kindness. */
+  async function reloadFromDisk() {
+    reloading = true;
+    try {
+      const now = await p4.fileDigest(rightPath).catch(() => "");
+      await load();
+      diskDigest = now;
+      changedOnDisk = false;
+      toggled = new Map();
+      selected = -1;
+      selectedNode = "";
+      changeAt = -1;
+      generation++;
+    } catch (e) {
+      setNotice(String(e), 8000);
+    } finally {
+      reloading = false;
+    }
+  }
 
   const rows = $derived(data?.rows ?? []);
   /** The only side the asset exists on (added or deleted), else null. */
@@ -245,12 +299,15 @@
     return { end, parent };
   });
 
+  const summaryChanged = $derived(rows.some((r) => r.depth === 0 && r.key !== "All data" && r.status !== "same"));
+
   function isOpen(i: number): boolean {
     const t = toggled.get(i);
     if (t !== undefined) return t;
     const r = rows[i];
-    // The raw package contents behind an asset-type summary: there when wanted.
-    if (r.depth === 0 && r.key === "All data") return false;
+    // The raw package contents behind an asset-type summary: there when wanted,
+    // or when they hold every change (a graph edit).
+    if (r.depth === 0 && r.key === "All data") return !summaryChanged;
     if (r.status === "changed") return true;
     if (r.status === "same") return false;
     return shape.end[i] - i - 1 <= SMALL;
@@ -411,6 +468,16 @@
     <button onclick={openInUnreal} title="Diff the same two files in Unreal's own asset diff">Open in Unreal</button>
   </div>
   {#if notice}<div class="note">{notice}</div>{/if}
+  {#if changedOnDisk}
+    <div class="stale">
+      <span>This file has changed on disk since the window opened.</span>
+      <span class="grow"></span>
+      <button disabled={reloading} onclick={reloadFromDisk}>{reloading ? "Reading…" : "Reload"}</button>
+      <button disabled={reloading} onclick={() => (changedOnDisk = false)} title="Keep showing what the window has"
+        >Ignore</button
+      >
+    </div>
+  {/if}
   {#if data?.leftError}<div class="err">{leftLabel}: {data.leftError}</div>{/if}
   {#if data?.rightError}<div class="err">{rightLabel}: {data.rightError}</div>{/if}
 
@@ -482,14 +549,14 @@
         {#if texLoading}
           <div class="pad dim">Reading the texture's source layout…</div>
         {:else if texLayouts[0] || texLayouts[1]}
-          <TextureView layouts={texLayouts} load={texView} {leftLabel} {rightLabel} />
+          {#key generation}<TextureView layouts={texLayouts} load={texView} {leftLabel} {rightLabel} />{/key}
         {/if}
       </div>
       <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div class="split" onpointerdown={splitDown} title="Drag to resize"></div>
     {:else if isMesh}
       <div class="gsec" style="height:{graphH}px">
-        <MeshView load={meshView} {leftLabel} {rightLabel} />
+        {#key generation}<MeshView load={meshView} {leftLabel} {rightLabel} />{/key}
       </div>
       <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div class="split" onpointerdown={splitDown} title="Drag to resize"></div>
@@ -606,6 +673,22 @@
   .err {
     color: #f08a8a;
     background: color-mix(in srgb, #f08a8a 12%, transparent);
+  }
+  .stale {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    font-size: 12px;
+    color: #f0c674;
+    background: color-mix(in srgb, #f0c674 12%, transparent);
+    border-bottom: 1px solid color-mix(in srgb, #f0c674 40%, transparent);
+  }
+  .stale button {
+    font-size: 11px;
+    padding: 1px 8px;
+    flex: none;
   }
   .head,
   .row {
