@@ -19,6 +19,8 @@ export interface GNode {
   w?: number;
   h?: number;
   color?: [number, number, number, number];
+  /** A Custom node's HLSL, drawn inside it. */
+  code?: string;
   inputs: GPin[];
   outputs: GPin[];
   status: GStatus;
@@ -50,6 +52,19 @@ export const HEADER = 26;
 export const ROW = 20;
 const CHAR = 6.6; // 11px mono-ish text
 const KNOT = 12;
+export const CODE_ROW = 13;
+const CODE_CHAR = 6.05; // 10px monospace
+const CODE_LINES = 24;
+const CODE_COLUMNS = 100;
+
+/** The lines of a node's code as drawn: tabs expanded, long lines and long code cut. */
+export function codeLines(n: GNode): string[] {
+  if (!n.code) return [];
+  const lines = n.code.replace(/\r/g, "").replace(/\t/g, "    ").replace(/\n+$/, "").split("\n");
+  const cut = lines.slice(0, CODE_LINES).map((l) => (l.length > CODE_COLUMNS ? l.slice(0, CODE_COLUMNS - 1) + "…" : l));
+  if (lines.length > CODE_LINES) cut.push(`… ${lines.length - CODE_LINES} more lines`);
+  return cut;
+}
 
 export interface Geom {
   x: number;
@@ -73,9 +88,11 @@ export function geom(n: GNode): Geom {
   const label = (p: GPin) => (p.kind === "exec" && /^(execute|then)$/i.test(p.name) ? "" : p.name);
   const inW = Math.max(0, ...n.inputs.map((p) => (label(p).length + (p.value ? p.value.length + 2 : 0)) * CHAR));
   const outW = Math.max(0, ...n.outputs.map((p) => label(p).length * CHAR));
-  const w = Math.max(110, n.label.length * 7.2 + 24, inW + outW + 48);
+  const code = codeLines(n);
+  const codeW = Math.max(0, ...code.map((l) => l.length * CODE_CHAR + 20));
+  const w = Math.max(110, n.label.length * 7.2 + 24, inW + outW + 48, codeW);
   const rows = Math.max(n.inputs.length, n.outputs.length, 1);
-  const h = HEADER + rows * ROW + 6;
+  const h = HEADER + rows * ROW + 6 + (code.length ? code.length * CODE_ROW + 10 : 0);
   const pinY = (i: number) => n.y + HEADER + i * ROW + ROW / 2;
   return {
     x: n.x,

@@ -8,6 +8,8 @@
     STATUS_COLOR,
     HEADER,
     ROW,
+    CODE_ROW,
+    codeLines,
     type GNode,
     type GSide,
     type Geom,
@@ -89,7 +91,7 @@
   }
 
   function nodeStroke(n: GNode): string {
-    if (n.id === selected) return "#f0d050";
+    if (n.shape === "knot" && n.id === selected) return "#f0d050";
     return n.status === "same" && n.moved ? "#9aa0aa" : STATUS_COLOR[n.status];
   }
 </script>
@@ -136,11 +138,15 @@
             {#if n.shape === "knot"}
               <circle cx={g.x + g.w / 2} cy={g.y + g.h / 2} r="6" fill="#444" stroke={nodeStroke(n)} stroke-width="2" />
             {:else}
+              {#if n.id === selected}
+                <rect x={g.x - 5} y={g.y - 5} width={g.w + 10} height={g.h + 10} rx="9" fill="none" stroke="#f0d050" stroke-width="2.5" />
+              {/if}
               <rect x={g.x} y={g.y} width={g.w} height={g.h} rx="6" class="body" />
+              <!-- The title keeps the editor's colour for the node's kind; what changed is on the outline. -->
               <path
                 d="M{g.x},{g.y + HEADER} v{-(HEADER - 6)} a6,6 0 0 1 6,-6 h{g.w - 12} a6,6 0 0 1 6,6 v{HEADER - 6} z"
-                fill={n.status === "same" ? "#3a3d44" : STATUS_COLOR[n.status]}
-                fill-opacity={n.status === "same" ? 1 : 0.55}
+                fill={n.color ? rgba(n.color, 1) : "#3a3d44"}
+                fill-opacity={n.color ? 0.5 : 1}
               />
               <rect
                 x={g.x}
@@ -150,8 +156,8 @@
                 rx="6"
                 fill="none"
                 stroke={nodeStroke(n)}
-                stroke-width={n.status === "same" && !n.moved && n.id !== selected ? 1 : 3}
-                stroke-dasharray={n.status === "same" && n.moved && n.id !== selected ? "8 5" : ""}
+                stroke-width={n.status === "same" && !n.moved ? 1 : 3}
+                stroke-dasharray={n.status === "same" && n.moved ? "8 5" : ""}
               />
               <text x={g.x + 10} y={g.y + 17} class="label">{n.label}</text>
               {#each n.inputs as p, i (p.name + i)}
@@ -166,6 +172,14 @@
                 <circle cx={g.x + g.w} cy={y} r="4" fill={kindColor(p.kind)} />
                 <text x={g.x + g.w - 10} y={y + 4} class="pin" text-anchor="end">{pinLabel(p.name, p.kind)}</text>
               {/each}
+              {@const code = codeLines(n)}
+              {#if code.length}
+                {@const top = g.y + HEADER + Math.max(n.inputs.length, n.outputs.length, 1) * ROW + 4}
+                <rect x={g.x + 6} y={top} width={g.w - 12} height={code.length * CODE_ROW + 6} rx="3" class="codebox" />
+                <text class="code">
+                  {#each code as line, i (i)}<tspan x={g.x + 10} y={top + 13 + i * CODE_ROW}>{line}</tspan>{/each}
+                </text>
+              {/if}
             {/if}
           </g>
         {/each}
@@ -240,5 +254,13 @@
   }
   .val {
     fill: #9a9a9a;
+  }
+  .codebox {
+    fill: #17181b;
+  }
+  .code {
+    font: 10px var(--mono, monospace);
+    fill: #d4d4c8;
+    white-space: pre;
   }
 </style>
