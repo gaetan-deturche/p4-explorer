@@ -275,7 +275,8 @@ const NATIVE_DECODED: &[&str] = &[
     "Timespan", "FrameNumber", "FrameRate", "Box", "Box2D", "Sphere", "Matrix", "Matrix44f",
     "TopLevelAssetPath", "SoftObjectPath", "SoftClassPath", "ExpressionInput", "MaterialAttributesInput",
     "ScalarMaterialInput", "ShadingModelMaterialInput", "SubstrateMaterialInput", "StrataMaterialInput",
-    "VectorMaterialInput", "Vector2MaterialInput", "ColorMaterialInput",
+    "VectorMaterialInput", "Vector2MaterialInput", "ColorMaterialInput", "PerPlatformFloat", "PerPlatformInt",
+    "PerPlatformBool",
 ];
 
 /// The decoder of a native struct, or None when there is none.
@@ -339,6 +340,28 @@ fn read_native_struct(name: &str, ar: &mut Reader, ctx: &Context) -> Option<Res<
         "VectorMaterialInput" => material_input(ar, ctx, |ar| floats_named(ar, XYZ, false)),
         "Vector2MaterialInput" => material_input(ar, ctx, |ar| floats_named(ar, XY, false)),
         "ColorMaterialInput" => material_input(ar, ctx, |ar| floats_named(ar, RGBA, false)),
+        // TPerPlatformProperty: cooked flag, default, then (uncooked) the platform overrides.
+        "PerPlatformFloat" | "PerPlatformInt" | "PerPlatformBool" => (|| {
+            let value = |ar: &mut Reader| -> Res<Val> {
+                Ok(match name {
+                    "PerPlatformFloat" => Val::Float(ar.f32()? as f64),
+                    "PerPlatformInt" => Val::Int(ar.i32()? as i64),
+                    _ => Val::Bool(ar.bool32()?),
+                })
+            };
+            let cooked = ar.bool32()?;
+            let default = value(ar)?;
+            let overrides = if cooked { 0 } else { bounded(ar, 1 << 10, "per-platform")? };
+            if overrides == 0 {
+                return Ok(default);
+            }
+            let mut m = vec![("Default".to_string(), default)];
+            for _ in 0..overrides {
+                let platform = ar.name()?;
+                m.push((platform, value(ar)?));
+            }
+            Ok(Val::Map(m))
+        })(),
         "DeprecateSlateVector2D" if ctx.extended => f32s(ar, XY),
         // FRichCurveKey::Serialize: three enum bytes, then six floats.
         "RichCurveKey" if ctx.extended => (|| {

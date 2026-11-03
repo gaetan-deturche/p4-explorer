@@ -16,6 +16,7 @@
   import { bounds, geom, type GNode } from "$lib/assetgraph";
   import AssetGraph from "$lib/components/AssetGraph.svelte";
   import TextureView, { type TexLayout } from "$lib/components/TextureView.svelte";
+  import MeshView from "$lib/components/MeshView.svelte";
   import { invoke } from "@tauri-apps/api/core";
 
   const params = new URLSearchParams(window.location.search);
@@ -194,6 +195,11 @@
     }
   }
 
+  // --- meshes: both revisions' source geometry, decoded in Rust ---------------
+  const isMesh = $derived(/^(StaticMesh|SkeletalMesh)$/.test(data?.class ?? ""));
+  const meshView = (lod: string) =>
+    invoke<ArrayBuffer>("mesh_view", { left: leftPath, right: rightPath, job, lod });
+
   function setNotice(m: string, ms = 5000) {
     notice = m;
     window.setTimeout(() => (notice = ""), ms);
@@ -204,7 +210,7 @@
     const h = Number(await cacheGet("nav", "assetdiff-graphh"));
     if (h > 0) graphH = Math.min(h, window.innerHeight - 160);
     try {
-      data = await p4.assetDiff(leftPath, rightPath);
+      data = await p4.assetDiff(leftPath, rightPath, job);
       // Open on the graph that changed most.
       const g = [...data.graphs].sort((a, b) => b.changes - a.changes)[0];
       if (g) graphName = g.name;
@@ -478,6 +484,12 @@
         {:else if texLayouts[0] || texLayouts[1]}
           <TextureView layouts={texLayouts} load={texView} {leftLabel} {rightLabel} />
         {/if}
+      </div>
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div class="split" onpointerdown={splitDown} title="Drag to resize"></div>
+    {:else if isMesh}
+      <div class="gsec" style="height:{graphH}px">
+        <MeshView load={meshView} {leftLabel} {rightLabel} />
       </div>
       <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div class="split" onpointerdown={splitDown} title="Drag to resize"></div>

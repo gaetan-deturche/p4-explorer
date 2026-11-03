@@ -11,6 +11,7 @@ pub mod diff;
 pub mod doc;
 pub mod graph;
 pub mod graphs;
+pub mod mesh;
 pub mod package;
 pub mod properties;
 pub mod summary;

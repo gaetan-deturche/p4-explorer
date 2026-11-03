@@ -157,12 +157,14 @@ fn bytes_per(format: &str) -> Option<(usize, usize)> {
 const TRAILER_HEADER_TAG: u64 = 0xD1C43B2E80A5F697;
 const TRAILER_FOOTER_TAG: u64 = 0x29BFCA045138DE76;
 const FOOTER_SIZE: usize = 8 + 8 + 4;
-const NO_TRAILER: &str = "the package has no payload trailer";
+pub(super) const NO_TRAILER: &str = "the package has no payload trailer";
 
-struct Payload {
-    offset: usize,
-    compressed: usize,
-    raw: u64,
+pub(super) struct Payload {
+    /// The payload's content id (FIoHash), as an FEditorBulkData names it.
+    pub hash: [u8; 20],
+    pub offset: usize,
+    pub compressed: usize,
+    pub raw: u64,
 }
 
 fn le_u32(b: &[u8], at: usize) -> u32 {
@@ -172,17 +174,21 @@ fn le_u64(b: &[u8], at: usize) -> u64 {
     u64::from_le_bytes(b[at..at + 8].try_into().unwrap())
 }
 
-/// The payloads stored in the package file itself (FPackageTrailer::TryLoadBackwards).
-fn local_payloads(data: &[u8]) -> Result<Vec<Payload>, String> {
+/// The payloads stored in the package file itself (FPackageTrailer::TryLoadBackwards),
+/// or from the summary's `toc` offset when the footer is missing (a padded file).
+pub(super) fn local_payloads(data: &[u8], toc: i64) -> Result<Vec<Payload>, String> {
     if data.len() < FOOTER_SIZE {
         return Err("package too small for a trailer".into());
     }
     let foot = data.len() - FOOTER_SIZE;
-    if le_u64(data, foot) != TRAILER_FOOTER_TAG {
+    let start = if le_u64(data, foot) == TRAILER_FOOTER_TAG {
+        let trailer_len = le_u64(data, foot + 8) as usize;
+        data.len().checked_sub(trailer_len).ok_or("bad trailer length")?
+    } else if toc > 0 && (toc as usize) < foot && le_u64(data, toc as usize) == TRAILER_HEADER_TAG {
+        toc as usize
+    } else {
         return Err(NO_TRAILER.into());
-    }
-    let trailer_len = le_u64(data, foot + 8) as usize;
-    let start = data.len().checked_sub(trailer_len).ok_or("bad trailer length")?;
+    };
     if le_u64(data, start) != TRAILER_HEADER_TAG {
         return Err("bad trailer header".into());
     }
@@ -202,6 +208,7 @@ fn local_payloads(data: &[u8]) -> Result<Vec<Payload>, String> {
         if at + 44 > data.len() {
             return Err("truncated payload table".into());
         }
+        let hash: [u8; 20] = data[at..at + 20].try_into().unwrap();
         let offset = le_u64(data, at + 20) as i64;
         let compressed = le_u64(data, at + 28) as usize;
         let raw = le_u64(data, at + 36);
@@ -217,7 +224,7 @@ fn local_payloads(data: &[u8]) -> Result<Vec<Payload>, String> {
             legacy_local && offset >= 0
         };
         if local && offset >= 0 {
-            out.push(Payload { offset: start + header_len + offset as usize, compressed, raw });
+            out.push(Payload { hash, offset: start + header_len + offset as usize, compressed, raw });
         }
     }
     Ok(out)
@@ -236,7 +243,7 @@ fn be_u64(b: &[u8], at: usize) -> u64 {
     u64::from_be_bytes(b[at..at + 8].try_into().unwrap())
 }
 
-fn decompress(buf: &[u8], oodle: &dyn Fn() -> Result<&'static Oodle, String>) -> Result<Vec<u8>, String> {
+pub(super) fn decompress(buf: &[u8], oodle: &dyn Fn() -> Result<&'static Oodle, String>) -> Result<Vec<u8>, String> {
     if buf.len() < BUFFER_HEADER || be_u32(buf, 0) != BUFFER_MAGIC {
         return Err("payload is not a compressed buffer".into());
     }
@@ -251,21 +258,41 @@ fn decompress(buf: &[u8], oodle: &dyn Fn() -> Result<&'static Oodle, String>) ->
         return Err(format!("payload compression method {method} is not supported (only Oodle)"));
     }
     let block_size = 1usize << block_exp;
-    let mut out = vec![0u8; raw_size];
+    let mut sources = Vec::with_capacity(blocks);
     let mut at = BUFFER_HEADER + 4 * blocks;
     for i in 0..blocks {
         let stored = be_u32(buf, BUFFER_HEADER + 4 * i) as usize;
-        let raw_start = i * block_size;
-        let raw_len = block_size.min(raw_size - raw_start);
-        let src = buf.get(at..at + stored).ok_or("truncated payload block")?;
-        let dst = &mut out[raw_start..raw_start + raw_len];
-        if stored < raw_len {
-            oodle()?.decompress(src, dst)?;
-        } else {
-            dst.copy_from_slice(&src[..raw_len]); // stored uncompressed
-        }
+        sources.push(buf.get(at..at + stored).ok_or("truncated payload block")?);
         at += stored;
     }
+    let mut out = vec![0u8; raw_size];
+    let mut dsts: Vec<&mut [u8]> = out.chunks_mut(block_size).collect();
+    if dsts.len() != blocks {
+        return Err("payload block count does not match its size".into());
+    }
+    let compressed = sources.iter().zip(&dsts).any(|(s, d)| s.len() < d.len());
+    let lib = if compressed { Some(oodle()?) } else { None };
+    let unpack = |src: &[u8], dst: &mut [u8]| -> Result<(), String> {
+        match lib {
+            Some(lib) if src.len() < dst.len() => lib.decompress(src, dst),
+            _ => {
+                dst.copy_from_slice(src.get(..dst.len()).ok_or("truncated payload block")?); // stored uncompressed
+                Ok(())
+            }
+        }
+    };
+    // Blocks unpack on their own: big payloads (a mesh description runs to hundreds of MB) in parallel.
+    let threads = if raw_size < 8 << 20 { 1 } else { std::thread::available_parallelism().map_or(1, |n| n.get()).min(8) };
+    let per = blocks.div_ceil(threads).max(1);
+    let unpack = &unpack;
+    std::thread::scope(|s| {
+        let jobs: Vec<_> = dsts
+            .chunks_mut(per)
+            .zip(sources.chunks(per))
+            .map(|(d, src)| s.spawn(move || d.iter_mut().zip(src).try_for_each(|(d, s)| unpack(s, d))))
+            .collect();
+        jobs.into_iter().try_for_each(|j| j.join().unwrap_or_else(|_| Err("unpacking the payload panicked".into())))
+    })?;
     Ok(out)
 }
 
@@ -591,7 +618,7 @@ pub fn payload(pkg: &Package, key: &str, roots: &[PathBuf]) -> Result<Arc<Vec<u8
     if let Some((_, p)) = cache.lock().map_err(|_| "cache poisoned")?.iter().find(|(k, _)| k == key) {
         return Ok(p.clone());
     }
-    let raw = Arc::new(match local_payloads(&pkg.data) {
+    let raw = Arc::new(match local_payloads(&pkg.data, pkg.summary.payload_toc_offset) {
         Err(e) if e == NO_TRAILER => inline_payload(pkg, roots)?,
         payloads => {
             let payloads = payloads?;
@@ -642,22 +669,8 @@ fn inline_payload(pkg: &Package, roots: &[PathBuf]) -> Result<Vec<u8>, String> {
         ar.u16()?; // FStripDataFlags
         let flags = ar.u32()?;
         if pkg.summary.custom_version(UE5_MAIN_STREAM_VERSION) < TEXTURE_SOURCE_VIRTUALIZATION {
-            let (count, stored, offset) = if flags & BULKDATA_SIZE_64BIT != 0 {
-                (ar.i64()?, ar.i64()?, ar.i64()?)
-            } else {
-                (ar.i32()? as i64, ar.i32()? as i64, ar.i64()?)
-            };
-            if flags & BULKDATA_BAD_DATA_VERSION != 0 {
-                ar.u16()?;
-            }
-            let at = if flags & BULKDATA_PAYLOAD_AT_END_OF_FILE == 0 {
-                main.serial_offset + ar.tell() as i64
-            } else if flags & BULKDATA_NO_OFFSET_FIXUP == 0 {
-                offset + pkg.summary.bulk_data_start_offset
-            } else {
-                offset
-            };
-            Ok((true, flags & BULKDATA_SERIALIZE_COMPRESSED_ZLIB != 0, at, stored, count))
+            let b = byte_bulk(pkg, &mut ar, main.serial_offset, flags)?;
+            Ok((true, b.flags & BULKDATA_SERIALIZE_COMPRESSED_ZLIB != 0, b.at, b.stored, b.count))
         } else {
             ar.guid()?; // BulkDataId
             ar.bytes(20)?; // PayloadContentId
@@ -680,6 +693,50 @@ fn inline_payload(pkg: &Package, roots: &[PathBuf]) -> Result<Vec<u8>, String> {
         return inflate_chunks(tail, raw_len as usize);
     }
     tail.get(..stored as usize).map(|b| b.to_vec()).ok_or("source payload outside the file".into())
+}
+
+/// Where an FByteBulkData (BulkData.cpp) keeps its bytes.
+pub struct ByteBulk {
+    pub flags: u32,
+    /// Absolute offset in the package.
+    pub at: i64,
+    pub stored: i64,
+    pub count: i64,
+}
+
+impl ByteBulk {
+    /// Inline bulk data follows its header (a reader must skip `stored` bytes).
+    pub fn is_inline(&self) -> bool {
+        self.flags & BULKDATA_PAYLOAD_AT_END_OF_FILE == 0
+    }
+
+    pub fn bytes(&self, pkg: &Package) -> Result<Vec<u8>, String> {
+        let tail = usize::try_from(self.at).ok().and_then(|at| pkg.data.get(at..)).ok_or("bulk data outside the file")?;
+        if self.flags & BULKDATA_SERIALIZE_COMPRESSED_ZLIB != 0 {
+            return inflate_chunks(tail, self.count.max(0) as usize);
+        }
+        tail.get(..self.stored.max(0) as usize).map(|b| b.to_vec()).ok_or("bulk data outside the file".into())
+    }
+}
+
+/// An FByteBulkData header after its `flags`; `serial_offset` is where `ar`'s export starts.
+pub(super) fn byte_bulk(pkg: &Package, ar: &mut Reader, serial_offset: i64, flags: u32) -> super::archive::Res<ByteBulk> {
+    let (count, stored, offset) = if flags & BULKDATA_SIZE_64BIT != 0 {
+        (ar.i64()?, ar.i64()?, ar.i64()?)
+    } else {
+        (ar.i32()? as i64, ar.i32()? as i64, ar.i64()?)
+    };
+    if flags & BULKDATA_BAD_DATA_VERSION != 0 {
+        ar.u16()?;
+    }
+    let at = if flags & BULKDATA_PAYLOAD_AT_END_OF_FILE == 0 {
+        serial_offset + ar.tell() as i64
+    } else if flags & BULKDATA_NO_OFFSET_FIXUP == 0 {
+        offset + pkg.summary.bulk_data_start_offset
+    } else {
+        offset
+    };
+    Ok(ByteBulk { flags, at, stored, count })
 }
 
 /// FArchive::SerializeCompressed: a header (file tag, chunk size), the total sizes,

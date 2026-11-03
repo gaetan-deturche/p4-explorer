@@ -6,13 +6,16 @@
 //! settings come from the asset registry tags where the editor writes the
 //! effective values (blend mode, shading model, domain).
 
+use std::path::PathBuf;
+
 use super::archive::Val;
 use super::doc::{leaf, properties, NOISE};
+use super::mesh;
 use super::package::Package;
 
 /// The summary sections leading the document, or None for an asset type
-/// without one.
-pub fn summary(pkg: &Package) -> Option<Vec<(String, Val)>> {
+/// without one. `roots` lead to the engine whose Oodle unpacks mesh sources.
+pub fn summary(pkg: &Package, roots: &[PathBuf]) -> Option<Vec<(String, Val)>> {
     let main = pkg.exports.iter().position(|e| e.is_asset)?;
     let class = pkg.export_class(&pkg.exports[main]);
     Some(match leaf(&class) {
@@ -20,6 +23,8 @@ pub fn summary(pkg: &Package) -> Option<Vec<(String, Val)>> {
         c if c.starts_with("MaterialInstance") => material_instance(pkg, main),
         c if c.starts_with("MaterialFunction") => material_function(pkg, main),
         c if c.ends_with("Blueprint") => blueprint(pkg, main),
+        "StaticMesh" => static_mesh(pkg, main, roots),
+        "SkeletalMesh" => skeletal_mesh(pkg, main, roots),
         _ => vec![("Properties".into(), saved(pkg, main, &[]))],
     })
 }
@@ -305,4 +310,230 @@ fn material_instance(pkg: &Package, main: usize) -> Vec<(String, Val)> {
         ("Parameters".into(), Val::Map(parameters)),
         ("Static switches".into(), Val::Map(statics)),
     ]
+}
+
+/// A LOD's source geometry as the summary shows it, or why there is none.
+fn lod_geometry(
+    lod: &mesh::SourceLod,
+    decoded: &Result<Option<std::sync::Arc<mesh::Geometry>>, String>,
+    material: &dyn Fn(&str) -> Option<String>,
+) -> (bool, Vec<(String, Val)>) {
+    match decoded {
+        Ok(Some(g)) => (true, mesh::stats(g, material)),
+        Err(e) => (false, vec![("Source".into(), Val::Str(format!("unreadable: {e}")))]),
+        Ok(None) => (false, vec![("Source".into(), Val::str(mesh::missing_source(lod)))]),
+    }
+}
+
+/// A source model's settings after its geometry, minus the bulk data pointer and,
+/// when the geometry was read, the counts the editor caches from it.
+fn lod_settings(out: &mut Vec<(String, Val)>, settings: &Val, decoded: bool, cached: &[&str]) {
+    for (k, v) in map(settings.clone()) {
+        if k == "StaticMeshDescriptionBulkData" || k == "MeshDescriptionBulkData" || (decoded && cached.contains(&k.as_str())) {
+            continue;
+        }
+        out.push((k, v));
+    }
+}
+
+/// The export an object property points at.
+fn export_at(pkg: &Package, path: Option<&Val>) -> Option<usize> {
+    let path = path?.as_str()?;
+    (0..pkg.exports.len()).find(|&i| pkg.export_path(i) == path)
+}
+
+/// Collision primitives by kind; a convex hull as its size and a fingerprint of
+/// its points rather than every point.
+fn collision(pkg: &Package, body: Option<usize>) -> Val {
+    let Some(body) = body else { return Val::Map(Vec::new()) };
+    let mut props = map(properties(pkg, body));
+    let mut out = vec![("Complexity".to_string(), take(&mut props, "CollisionTraceFlag").unwrap_or(Val::str("CTF_UseDefault")))];
+    if let Some(profile) = props.iter().find(|(k, _)| k == "DefaultInstance").and_then(|(_, v)| v.get("CollisionProfileName")) {
+        out.push(("Profile".into(), profile.clone()));
+    }
+    let geom = map(take(&mut props, "AggGeom").unwrap_or(Val::Map(Vec::new())));
+    for (key, label, one) in [
+        ("BoxElems", "Boxes", "Box"),
+        ("SphereElems", "Spheres", "Sphere"),
+        ("SphylElems", "Capsules", "Capsule"),
+        ("TaperedCapsuleElems", "Tapered capsules", "Tapered capsule"),
+        ("ConvexElems", "Convex hulls", "Convex hull"),
+        ("LevelSetElems", "Level sets", "Level set"),
+        ("SkinnedLevelSetElems", "Skinned level sets", "Skinned level set"),
+    ] {
+        let Some(Val::List(elems)) = geom.iter().find(|(k, _)| k == key).map(|(_, v)| v) else { continue };
+        if elems.is_empty() {
+            continue;
+        }
+        let shown = elems
+            .iter()
+            .enumerate()
+            .map(|(i, e)| (format!("{one} {i}"), if key == "ConvexElems" { convex_hull(e) } else { e.clone() }))
+            .collect();
+        out.push((label.into(), Val::Map(shown)));
+    }
+    out.extend(props.into_iter().filter(|(k, _)| !DERIVED.contains(&k.as_str()) && k != "BodySetupGuid"));
+    Val::Map(out)
+}
+
+fn convex_hull(e: &Val) -> Val {
+    let coord = |p: &Val, k: &str| match p.get(k) {
+        Some(Val::Float(f)) => *f,
+        _ => 0.0,
+    };
+    let points: Vec<[f64; 3]> = match e.get("VertexData") {
+        Some(Val::List(v)) => v.iter().map(|p| [coord(p, "X"), coord(p, "Y"), coord(p, "Z")]).collect(),
+        _ => Vec::new(),
+    };
+    let mut lo = [f64::MAX; 3];
+    let mut hi = [f64::MIN; 3];
+    let mut h = sha1_smol::Sha1::new();
+    for p in &points {
+        for k in 0..3 {
+            lo[k] = lo[k].min(p[k]);
+            hi[k] = hi[k].max(p[k]);
+            h.update(&((p[k] * 1000.0).round() as i64).to_le_bytes());
+        }
+    }
+    let r = |v: f64| super::diff::scalar(&Val::Float((v * 100.0).round() / 100.0));
+    let mut m = vec![("Points".to_string(), Val::Int(points.len() as i64))];
+    if !points.is_empty() {
+        m.push(("Size".into(), Val::Str(format!("{} × {} × {}", r(hi[0] - lo[0]), r(hi[1] - lo[1]), r(hi[2] - lo[2])))));
+        m.push(("Center".into(), Val::Str(format!("{}, {}, {}", r((hi[0] + lo[0]) / 2.0), r((hi[1] + lo[1]) / 2.0), r((hi[2] + lo[2]) / 2.0)))));
+        m.push(("Shape".into(), Val::Str(format!("sha1 {}", &h.digest().to_string()[..12]))));
+    }
+    if let Val::Map(fields) = e {
+        m.extend(fields.iter().filter(|(k, _)| k != "VertexData" && k != "ElemBox" && k != "IndexData").cloned());
+    }
+    Val::Map(m)
+}
+
+/// The asset registry tags: what the editor computed at save (built triangle
+/// counts, Nanite and distance field sizes).
+fn build_stats(pkg: &Package, main: usize, skip: &[&str]) -> Val {
+    let mut tags = registry_tags(pkg, main);
+    tags.retain(|(k, _)| !skip.contains(&k.as_str()));
+    Val::Map(tags)
+}
+
+fn static_mesh(pkg: &Package, main: usize, roots: &[PathBuf]) -> Vec<(String, Val)> {
+    let mut props = map(properties(pkg, main));
+    let slots = mesh::material_slots(pkg, main);
+    take(&mut props, "StaticMaterials");
+    let material = |group: &str| mesh::slot_material(&slots, group);
+    // FMeshSectionInfoMap keys are LOD << 16 | section.
+    let mut section_info: Vec<(i64, String, Val)> = Vec::new();
+    if let Some(Val::List(entries)) = take(&mut props, "SectionInfoMap").and_then(|m| m.get("Map").cloned()) {
+        for e in &entries {
+            if let (Some(Val::Int(key)), Some(v)) = (e.get("key"), e.get("value")) {
+                section_info.push((key >> 16, format!("Section {}", key & 0xffff), v.clone()));
+            }
+        }
+    }
+    take(&mut props, "OriginalSectionInfoMap");
+    let mut lods = Vec::new();
+    let source = mesh::source_lods(pkg);
+    let geometries = mesh::geometries(pkg, &source, roots);
+    for (i, (lod, g)) in source.iter().zip(&geometries).enumerate() {
+        let (decoded, mut m) = lod_geometry(lod, g, &material);
+        lod_settings(&mut m, &lod.settings, decoded, &["CacheMeshDescriptionTrianglesCount", "CacheMeshDescriptionVerticesCount"]);
+        let sections: Vec<(String, Val)> = section_info
+            .iter()
+            .filter(|(l, _, _)| *l == i as i64 && lod.name != mesh::HI_RES)
+            .map(|(_, s, v)| (s.clone(), v.clone()))
+            .collect();
+        if !sections.is_empty() {
+            m.push(("Section settings".into(), Val::Map(sections)));
+        }
+        lods.push((lod.name.clone(), Val::Map(m)));
+    }
+    take(&mut props, "SourceModels");
+    take(&mut props, "HiResSourceModel");
+    let materials = slots.iter().map(|(slot, _, mat)| (slot.clone(), Val::Str(mat.clone()))).collect();
+    let nanite = take(&mut props, "NaniteSettings").unwrap_or(Val::Map(Vec::new()));
+    // UStaticMesh::Serialize writes its BodySetup natively: find the one it owns.
+    let body = pkg.exports.iter().position(|e| e.outer_index == main as i32 + 1 && leaf(&pkg.export_class(e)) == "BodySetup");
+    let mut sockets: Vec<(String, Val)> = Vec::new();
+    if let Some(Val::List(list)) = take(&mut props, "Sockets") {
+        for s in &list {
+            let Some(e) = export_at(pkg, Some(s)) else { continue };
+            let mut p = map(properties(pkg, e));
+            let name = take(&mut p, "SocketName").and_then(|n| n.as_str().map(String::from)).unwrap_or(pkg.exports[e].object_name.clone());
+            insert_unique(&mut sockets, name, Val::Map(p));
+        }
+    }
+    for k in ["BodySetup", "NavCollision", "AssetImportData", "ThumbnailInfo"] {
+        take(&mut props, k);
+    }
+    let mut out = vec![
+        ("LODs".to_string(), Val::Map(lods)),
+        ("Materials".into(), Val::Map(materials)),
+        ("Nanite".into(), nanite),
+        ("Collision".into(), collision(pkg, body)),
+    ];
+    if !sockets.is_empty() {
+        out.push(("Sockets".into(), Val::Map(sockets)));
+    }
+    out.push(("Settings".into(), Val::Map(props.into_iter().filter(|(k, _)| !DERIVED.contains(&k.as_str())).collect())));
+    out.push(("Build stats".into(), build_stats(pkg, main, &["AssetImportData", "StaticMaterials"])));
+    out
+}
+
+fn skeletal_mesh(pkg: &Package, main: usize, roots: &[PathBuf]) -> Vec<(String, Val)> {
+    let mut props = map(properties(pkg, main));
+    let native = mesh::skeletal_native(pkg, main);
+    let slots = native.as_ref().map(|n| n.materials.clone()).unwrap_or_default();
+    let material = |group: &str| mesh::slot_material(&slots, group);
+    let info = match take(&mut props, "LODInfo") {
+        Some(Val::List(l)) => l,
+        _ => Vec::new(),
+    };
+    let cached = [
+        "TriangleCount",
+        "VertexCount",
+        "Bounds",
+        "CachedSkinWeightProfileNames",
+        "CachedMorphTargetNames",
+        "CachedHasVertexColors",
+        "CachedVertexColorGuid",
+    ];
+    let mut lods = Vec::new();
+    let source = mesh::source_lods(pkg);
+    let geometries = mesh::geometries(pkg, &source, roots);
+    for (i, (lod, g)) in source.iter().zip(&geometries).enumerate() {
+        let (decoded, mut m) = lod_geometry(lod, g, &material);
+        lod_settings(&mut m, &lod.settings, decoded, &cached);
+        if let Some(settings) = info.get(i) {
+            m.extend(map(settings.clone()));
+        }
+        lods.push((lod.name.clone(), Val::Map(m)));
+    }
+    take(&mut props, "SourceModels");
+    let mut out = vec![("LODs".to_string(), Val::Map(lods))];
+    let mut skeleton = vec![
+        ("Skeleton".to_string(), take(&mut props, "Skeleton").unwrap_or(Val::Null)),
+        ("Physics asset".into(), take(&mut props, "PhysicsAsset").unwrap_or(Val::Null)),
+    ];
+    match &native {
+        Ok(n) => {
+            out.push(("Materials".into(), Val::Map(n.materials.iter().map(|(slot, _, mat)| (slot.clone(), Val::Str(mat.clone()))).collect())));
+            let parent = |p: i32| usize::try_from(p).ok().and_then(|p| n.bones.get(p)).map(|b| b.0.clone()).unwrap_or("(root)".into());
+            let bones = n.bones.iter().map(|(name, p)| (name.clone(), Val::Str(parent(*p)))).collect();
+            skeleton.push(("Bones (parent)".into(), Val::Map(bones)));
+        }
+        Err(e) => out.push(("Materials".into(), Val::Str(e.clone()))),
+    }
+    out.push(("Skeleton".into(), Val::Map(skeleton)));
+    let morphs: Vec<Val> = registry_tags(pkg, main)
+        .into_iter()
+        .find(|(k, _)| k == "MorphTargetNames")
+        .and_then(|(_, v)| v.as_str().map(|s| s.split(';').filter(|m| !m.is_empty()).map(Val::str).collect()))
+        .unwrap_or_default();
+    if !morphs.is_empty() {
+        out.push(("Morph targets".into(), Val::List(morphs)));
+    }
+    take(&mut props, "AssetImportData");
+    out.push(("Settings".into(), Val::Map(props.into_iter().filter(|(k, _)| !DERIVED.contains(&k.as_str())).collect())));
+    out.push(("Build stats".into(), build_stats(pkg, main, &["AssetImportData", "MorphTargetNames", "MaterialParamNames"])));
+    out
 }

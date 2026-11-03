@@ -45,6 +45,61 @@ fn main() {
         }
         return;
     }
+    if mode == "mesh" {
+        // uassetdump <mesh> mesh <engine root> [other revision]: each source LOD's
+        // geometry, and LOD 0 compared with the other revision.
+        use p4gui_lib::uasset::mesh;
+        let root = vec![std::path::PathBuf::from(args.next().unwrap_or_else(|| ".".into()))];
+        let other = args.next();
+        let pkg = Package::open(std::path::Path::new(&path)).unwrap();
+        if std::env::var("MESH_VERSIONS").is_ok() {
+            let v = |g: &str| pkg.summary.custom_version(g);
+            println!(
+                "ue4 {} ue5 {} editor {} release {} ue5main {}",
+                pkg.summary.file_version_ue4,
+                pkg.summary.file_version_ue5,
+                v("E4B068EDF49442E9A231DA0B2E46BB41"),
+                v("9C54D522A8264FBE9421074661B482D0"),
+                v("697DD581E64F41ABAA4A51ECBEB7B628")
+            );
+        }
+        let start = std::time::Instant::now();
+        let mut first = None;
+        for lod in mesh::source_lods(&pkg) {
+            match mesh::geometry(&pkg, &lod, &root) {
+                Ok(Some(g)) => {
+                    let stats = Val::Map(mesh::stats(&g, &|_| None));
+                    println!("{}: {}", lod.name, serde_json::to_string(&stats).unwrap());
+                    first.get_or_insert(g);
+                }
+                Ok(None) => println!("{}: {}", lod.name, mesh::missing_source(&lod)),
+                Err(e) => println!("{}: error: {e}", lod.name),
+            }
+        }
+        println!("decoded in {:?}", start.elapsed());
+        if let (Some(other), Some(a)) = (other, first) {
+            let opkg = Package::open(std::path::Path::new(&other)).unwrap();
+            let lods = mesh::source_lods(&opkg);
+            if let Some(Ok(Some(b))) = lods.first().map(|l| mesh::geometry(&opkg, l, &root)) {
+                let c = mesh::compare(&a, &b);
+                println!(
+                    "LOD 0: same topology {} moved {} (max {}) removed {} added {}",
+                    c.same_topology, c.moved_vertices, c.max_move, c.removed_triangles, c.added_triangles
+                );
+            }
+        }
+        return;
+    }
+    if mode == "meshview" {
+        // uassetdump <left> meshview <right> <out.bin> [lod]: the mesh_view command's answer.
+        let right = args.next().expect("meshview needs a right file");
+        let out = args.next().expect("meshview needs an output file");
+        let lod = args.next().unwrap_or_default();
+        let bytes = p4gui_lib::commands::mesh_view_bytes(&path, &right, &lod, &[std::path::PathBuf::from(".")]);
+        std::fs::write(&out, &bytes).unwrap();
+        println!("{} bytes", bytes.len());
+        return;
+    }
     if mode == "rows" {
         // uassetdump <left> rows <right>: the asset_diff command's answer, for a
         // browser test of the window without the app.
@@ -52,7 +107,8 @@ fn main() {
         let open = |p: &str| Package::open(std::path::Path::new(p)).unwrap();
         let (l, r) = (open(&path), open(&right));
         use p4gui_lib::uasset::{canvas, doc, graph::read_graph};
-        let (ldoc, rdoc) = (doc::document(&l), doc::document(&r));
+        let roots = [std::path::PathBuf::from(".")];
+        let (ldoc, rdoc) = (doc::document_in(&l, &roots), doc::document_in(&r, &roots));
         let rows = p4gui_lib::uasset::diff::diff(&ldoc, &rdoc);
         let changes = rows.iter().filter(|r| !r.kids && r.status != p4gui_lib::uasset::diff::Status::Same).count();
         let graphs = canvas::pair(
@@ -75,7 +131,8 @@ fn main() {
     if mode == "diff" {
         // uassetdump <left> diff <right>: the rows that differ, indented.
         let right = args.next().expect("diff needs a right file");
-        let open = |p: &str| p4gui_lib::uasset::doc::document(&Package::open(std::path::Path::new(p)).unwrap());
+        let roots = [std::path::PathBuf::from(".")];
+        let open = |p: &str| p4gui_lib::uasset::doc::document_in(&Package::open(std::path::Path::new(p)).unwrap(), &roots);
         let rows = p4gui_lib::uasset::diff::diff(&open(&path), &open(&right));
         for r in rows.iter().filter(|r| r.status != p4gui_lib::uasset::diff::Status::Same) {
             let text = |s: &Option<String>| s.as_deref().unwrap_or("").chars().take(70).collect::<String>();
@@ -90,7 +147,8 @@ fn main() {
             std::process::exit(2);
         }
     };
-    let out = if mode == "doc" { p4gui_lib::uasset::doc::document(&pkg) } else { python_shape(&pkg) };
+    let roots = [std::path::PathBuf::from(".")];
+    let out = if mode == "doc" { p4gui_lib::uasset::doc::document_in(&pkg, &roots) } else { python_shape(&pkg) };
     println!("{}", serde_json::to_string(&out).unwrap());
 }
 

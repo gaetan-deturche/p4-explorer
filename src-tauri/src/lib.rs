@@ -198,6 +198,7 @@ pub fn run() {
             commands::open_asset_diff_window,
             commands::texture_pixels,
             commands::texture_layout,
+            commands::mesh_view,
             commands::p4_submit,
             commands::p4_shelve,
             commands::p4_shelve_delete,

@@ -130,6 +130,8 @@ pub struct Summary {
     pub saved_by_engine_version: String,
     pub asset_registry_data_offset: i32,
     pub bulk_data_start_offset: i64,
+    /// Where the package trailer starts (0 when the package has none or predates it).
+    pub payload_toc_offset: i64,
 }
 
 impl Summary {
@@ -680,7 +682,7 @@ fn read_summary(data: &[u8]) -> Res<Summary> {
         ar.i32()?;
     }
     if s.file_version_ue5 >= UE5_PAYLOAD_TOC {
-        ar.i64()?;
+        s.payload_toc_offset = ar.i64()?;
     }
     if s.file_version_ue5 >= UE5_DATA_RESOURCES {
         ar.i32()?;

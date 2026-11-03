@@ -925,7 +925,7 @@ export const p4 = {
     rightRev: string,
   ) => g<string>("open_unreal_diff", { conn, left, right, name, leftRev, rightRev }),
   /** Compare two UE asset files in Auger, read straight from disk. */
-  assetDiff: (left: string, right: string) => invoke<AssetDiff>("asset_diff", { left, right }),
+  assetDiff: (left: string, right: string, job: string) => invoke<AssetDiff>("asset_diff", { left, right, job }),
   revert: (conn: P4Conn, depotFile: string) => call("p4_revert", { conn, depotFile }),
   /** Blame: every line with the changelist that introduced it. `revSpec` is a
    *  p4 suffix ("#8", "@=1234") or "" for the head revision. */

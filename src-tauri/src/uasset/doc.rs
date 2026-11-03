@@ -32,6 +32,11 @@ pub fn graph_node<'d>(doc: &'d Val, graph: &str, node: &str) -> Option<&'d Val> 
 }
 
 pub fn document(pkg: &Package) -> Val {
+    document_in(pkg, &[])
+}
+
+/// The document, with `roots` leading to an engine (Oodle for mesh sources).
+pub fn document_in(pkg: &Package, roots: &[std::path::PathBuf]) -> Val {
     let graph = read_graph(pkg);
     let mut raw: Vec<(String, Val)> = Vec::new();
     raw.push(("Package".into(), package_info(pkg)));
@@ -45,7 +50,7 @@ pub fn document(pkg: &Package) -> Val {
         raw.push((GRAPHS.into(), g));
     }
     raw.push(("Objects".into(), objects(pkg, &graph)));
-    match super::summary::summary(pkg) {
+    match super::summary::summary(pkg, roots) {
         Some(mut top) => {
             top.push((ALL_DATA.into(), Val::Map(raw)));
             Val::Map(top)
