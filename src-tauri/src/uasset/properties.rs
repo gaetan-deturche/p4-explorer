@@ -262,8 +262,11 @@ fn material_input(ar: &mut Reader, ctx: &Context, constant: fn(&mut Reader) -> R
 /// Structs that serialize natively (opaque to the tag walk), including the one
 /// this reader has no decoder for.
 fn is_native_struct(name: &str) -> bool {
-    name == "UniqueNetIdRepl" || NATIVE_DECODED.contains(&name)
+    NATIVE_UNDECODED.contains(&name) || NATIVE_DECODED.contains(&name)
 }
+
+const NATIVE_UNDECODED: &[&str] =
+    &["UniqueNetIdRepl", "MovieSceneFloatChannel", "MovieSceneDoubleChannel", "MovieSceneFloatValue", "MovieSceneDoubleValue"];
 
 const NATIVE_DECODED: &[&str] = &[
     "Vector", "Vector3d", "Vector3f", "Vector2D", "Vector2d", "Vector2f", "Vector4", "Vector4d", "Vector4f",
@@ -416,7 +419,19 @@ fn read_value(ar: &mut Reader, ty: &TypeName, ctx: &Context, depth: u32, tag: Op
         "LazyObjectProperty" => return Ok(Val::Str(ar.guid()?)),
         "SoftObjectProperty" | "SoftClassProperty" => return ctx.soft_object(ar),
         "TextProperty" => return read_text(ar, ctx.package),
-        "StructProperty" => return read_struct(ar, ty, ctx, depth, tag.map(|t| t.binary_or_native)),
+        "StructProperty" => {
+            let native = tag.map(|t| t.binary_or_native);
+            let Some(end) = tag.map(|t| (ar.tell() + t.size.max(0) as usize).min(ar.data.len())) else {
+                return read_struct(ar, ty, ctx, depth, native);
+            };
+            // Keep a struct inside its tag: a native one misread as tagged properties
+            // would otherwise walk the rest of the file.
+            let mut inner = Reader::new(&ar.data[..end], ar.names);
+            inner.seek(ar.tell() as i64)?;
+            let value = read_struct(&mut inner, ty, ctx, depth, native);
+            ar.seek(inner.tell() as i64)?;
+            return value;
+        }
         _ if OBJECT_READERS.contains(&kind) => return Ok(ctx.resolve_object(ar.package_index()?)),
         _ => {}
     }
@@ -424,9 +439,23 @@ fn read_value(ar: &mut Reader, ty: &TypeName, ctx: &Context, depth: u32, tag: Op
         "ArrayProperty" => {
             let Some(inner) = ty.param(0) else { return decode_err("array without inner type".into()) };
             let count = bounded(ar, 1 << 22, "array")?;
+            let s = &ctx.package.summary;
+            // Pre-complete-type-name arrays of structs carry an inner tag naming the struct.
+            let inner_tag = if inner.name == "StructProperty"
+                && s.file_version_ue5 < UE5_PROPERTY_TAG_COMPLETE_TYPE_NAME
+                && s.file_version_ue4 >= VER_UE4_INNER_ARRAY_TAG_INFO
+            {
+                match read_tag_legacy(ar, s)? {
+                    Some(t) => Some(t),
+                    None => return decode_err("array inner tag is None".into()),
+                }
+            } else {
+                None
+            };
+            let inner = inner_tag.as_ref().map_or(inner, |t| &t.ty);
             let mut out = Vec::with_capacity(count.min(4096));
             for _ in 0..count {
-                out.push(read_value(ar, inner, ctx, depth + 1, None)?);
+                out.push(read_value(ar, inner, ctx, depth + 1, inner_tag.as_ref())?);
             }
             Ok(Val::List(out))
         }
@@ -687,18 +716,23 @@ pub fn read_text(ar: &mut Reader, package: &Package) -> Res<Val> {
 
 /// Reads the tagged property block of one export.
 pub fn read_export_properties(package: &Package, export: &ObjectExport, max_raw: usize, extended: bool) -> Val {
+    read_export_properties_end(package, export, max_raw, extended).0
+}
+
+/// Same, plus where the block ends in the export's data (its native serialization follows).
+pub fn read_export_properties_end(package: &Package, export: &ObjectExport, max_raw: usize, extended: bool) -> (Val, usize) {
     let data = package.export_data(export);
     let mut ar = Reader::new(data, &package.names);
     let ctx = Context { package, max_raw, extended, floats: false };
     let start = export.script_start.max(0) as usize;
     let end = if export.script_end > 0 { Some(export.script_end as usize) } else { None };
     if start >= data.len() {
-        return Val::Map(Vec::new());
+        return (Val::Map(Vec::new()), data.len());
     }
     if package.summary.file_version_ue5 >= UE5_SCRIPT_SERIALIZATION_OFFSET && export.script_end == 0 {
         // The export map records an empty script range: this object serializes only
         // native data (e.g. FLandscapeHeightmapTextureEdgeFixup), no tagged properties.
-        return Val::Map(Vec::new());
+        return (Val::Map(Vec::new()), start);
     }
     let head = (|| -> Res<()> {
         ar.seek(start as i64)?;
@@ -713,7 +747,8 @@ pub fn read_export_properties(package: &Package, export: &ObjectExport, max_raw:
         Ok(())
     })();
     if let Err(Error::Archive(e) | Error::Decode(e)) = head {
-        return Val::map(vec![("__error", Val::Str(e))]);
+        return (Val::map(vec![("__error", Val::Str(e))]), start);
     }
-    read_tagged_properties(&mut ar, &ctx, 0, end)
+    let props = read_tagged_properties(&mut ar, &ctx, 0, end);
+    (props, end.unwrap_or(ar.tell()))
 }

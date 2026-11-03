@@ -116,7 +116,7 @@ impl std::fmt::Display for FName {
 pub struct Reader<'a> {
     pub data: &'a [u8],
     pos: usize,
-    names: &'a [String],
+    pub names: &'a [String],
 }
 
 macro_rules! scalar {

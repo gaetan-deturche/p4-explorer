@@ -17,6 +17,34 @@ fn main() {
         std::process::exit(2);
     };
     let mode = args.next().unwrap_or_else(|| "py".into());
+    if mode == "layout" {
+        // uassetdump <texture> layout: the source layout as one JSON line.
+        let pkg = Package::open(std::path::Path::new(&path)).unwrap();
+        println!("{}", serde_json::to_string(&p4gui_lib::uasset::texture::source_layout(&pkg)).unwrap());
+        return;
+    }
+    if mode == "tex" {
+        // uassetdump <texture> tex <out.png> <engine root> [block layer mip slice max]: one decoded view.
+        let out = args.next().expect("tex needs an output file");
+        let root = std::path::PathBuf::from(args.next().unwrap_or_else(|| ".".into()));
+        let mut n = || args.next().and_then(|a| a.parse::<usize>().ok()).unwrap_or(0);
+        let view = (n(), n(), n(), n());
+        let max = n();
+        let pkg = Package::open(std::path::Path::new(&path)).unwrap();
+        let start = std::time::Instant::now();
+        match p4gui_lib::uasset::texture::decode_view(&pkg, &path, &[root], view, max) {
+            Ok(p4gui_lib::uasset::texture::Pixels::Rgba { width, height, data }) => {
+                std::fs::write(&out, png(width, height, &data)).unwrap();
+                println!("{view:?} -> {width}x{height} in {:?}", start.elapsed());
+            }
+            Ok(p4gui_lib::uasset::texture::Pixels::Encoded { mime, data }) => {
+                std::fs::write(&out, data).unwrap();
+                println!("{view:?} -> {mime} file");
+            }
+            Err(e) => println!("error: {e}"),
+        }
+        return;
+    }
     if mode == "rows" {
         // uassetdump <left> rows <right>: the asset_diff command's answer, for a
         // browser test of the window without the app.
@@ -125,4 +153,43 @@ fn python_shape(pkg: &Package) -> Val {
         ("connections", Val::List(links)),
         ("properties", Val::Map(properties)),
     ])
+}
+
+/// A minimal RGBA8 PNG (stored rows, zlib), for looking at a decoded texture.
+fn png(width: u32, height: u32, rgba: &[u8]) -> Vec<u8> {
+    use std::io::Write;
+    fn crc(data: &[u8]) -> u32 {
+        let mut c = 0xffff_ffffu32;
+        for &b in data {
+            c ^= b as u32;
+            for _ in 0..8 {
+                c = if c & 1 != 0 { 0xedb8_8320 ^ (c >> 1) } else { c >> 1 };
+            }
+        }
+        !c
+    }
+    fn chunk(out: &mut Vec<u8>, kind: &[u8], body: &[u8]) {
+        out.extend((body.len() as u32).to_be_bytes());
+        let start = out.len();
+        out.extend(kind);
+        out.extend(body);
+        let c = crc(&out[start..]);
+        out.extend(c.to_be_bytes());
+    }
+    let mut raw = Vec::with_capacity(rgba.len() + height as usize);
+    for row in rgba.chunks(width as usize * 4) {
+        raw.push(0);
+        raw.extend(row);
+    }
+    let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+    z.write_all(&raw).unwrap();
+    let mut out = b"\x89PNG\r\n\x1a\n".to_vec();
+    let mut ihdr = Vec::new();
+    ihdr.extend(width.to_be_bytes());
+    ihdr.extend(height.to_be_bytes());
+    ihdr.extend([8, 6, 0, 0, 0]);
+    chunk(&mut out, b"IHDR", &ihdr);
+    chunk(&mut out, b"IDAT", &z.finish().unwrap());
+    chunk(&mut out, b"IEND", &[]);
+    out
 }

@@ -14,3 +14,4 @@ pub mod graphs;
 pub mod package;
 pub mod properties;
 pub mod summary;
+pub mod texture;

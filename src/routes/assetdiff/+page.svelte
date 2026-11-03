@@ -15,6 +15,8 @@
   import { cacheGet, cacheSet } from "$lib/store.svelte";
   import { bounds, geom, type GNode } from "$lib/assetgraph";
   import AssetGraph from "$lib/components/AssetGraph.svelte";
+  import TextureView, { type TexLayout } from "$lib/components/TextureView.svelte";
+  import { invoke } from "@tauri-apps/api/core";
 
   const params = new URLSearchParams(window.location.search);
   const leftPath = params.get("left") ?? "";
@@ -156,6 +158,42 @@
     if (n >= 0 && scrollEl) scrollEl.scrollTop = Math.max(0, n * RH - 2 * RH);
   }
 
+  // --- textures: both revisions' source pixels, decoded in Rust -------------
+  let texLayouts = $state<[TexLayout | null, TexLayout | null]>([null, null]);
+  let texLoading = $state(false);
+  let texError = $state("");
+  const isTexture = $derived(/Texture/.test(data?.class ?? ""));
+
+  /** One view of one side: RGBA from Rust, or a PNG/JPEG source decoded here. */
+  async function texView(side: 0 | 1, block: number, layer: number, mip: number, slice: number, max: number) {
+    const path = side === 0 ? leftPath : rightPath;
+    if (!path || !texLayouts[side]) return null;
+    const buf = new Uint8Array(
+      await invoke<ArrayBuffer>("texture_pixels", { path, job, block, layer, mip, slice, max }),
+    );
+    const kind = buf[0];
+    const head = new DataView(buf.buffer, buf.byteOffset, 9);
+    const body = buf.subarray(9);
+    if (kind === 0) return new ImageData(new Uint8ClampedArray(body), head.getUint32(1, true), head.getUint32(5, true));
+    const bmp = await createImageBitmap(new Blob([body], { type: kind === 1 ? "image/png" : "image/jpeg" }));
+    const ctx = new OffscreenCanvas(bmp.width, bmp.height).getContext("2d")!;
+    ctx.drawImage(bmp, 0, 0);
+    return ctx.getImageData(0, 0, bmp.width, bmp.height);
+  }
+
+  async function loadTexture() {
+    texLoading = true;
+    try {
+      texLayouts = (await Promise.all(
+        [leftPath, rightPath].map((path) => invoke<TexLayout | null>("texture_layout", { path })),
+      )) as [TexLayout | null, TexLayout | null];
+    } catch (e) {
+      texError = String(e);
+    } finally {
+      texLoading = false;
+    }
+  }
+
   function setNotice(m: string, ms = 5000) {
     notice = m;
     window.setTimeout(() => (notice = ""), ms);
@@ -170,6 +208,7 @@
       // Open on the graph that changed most.
       const g = [...data.graphs].sort((a, b) => b.changes - a.changes)[0];
       if (g) graphName = g.name;
+      if (/Texture/.test(data.class)) void loadTexture();
     } catch (e) {
       error = String(e);
     } finally {
@@ -431,6 +470,17 @@
         <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div class="split" onpointerdown={splitDown} title="Drag to resize"></div>
       {/if}
+    {:else if isTexture}
+      <div class="gsec" style="height:{graphH}px">
+        {#if texError}<div class="err mono">{texError}</div>{/if}
+        {#if texLoading}
+          <div class="pad dim">Reading the texture's source layout…</div>
+        {:else if texLayouts[0] || texLayouts[1]}
+          <TextureView layouts={texLayouts} load={texView} {leftLabel} {rightLabel} />
+        {/if}
+      </div>
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div class="split" onpointerdown={splitDown} title="Drag to resize"></div>
     {/if}
     <div class="head" class:single={only}>
       <span>Property</span>

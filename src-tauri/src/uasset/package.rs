@@ -17,6 +17,7 @@ pub const VER_UE4_STRUCT_GUID_IN_PROPERTY_TAG: i32 = 441;
 pub const VER_UE4_PACKAGE_SUMMARY_HAS_COMPATIBLE_ENGINE_VERSION: i32 = 444;
 pub const VER_UE4_SERIALIZE_TEXT_IN_PACKAGES: i32 = 459;
 pub const VER_UE4_COOKED_ASSETS_IN_EDITOR_SUPPORT: i32 = 485;
+pub const VER_UE4_INNER_ARRAY_TAG_INFO: i32 = 500;
 pub const VER_UE4_PROPERTY_GUID_IN_PROPERTY_TAG: i32 = 503;
 pub const VER_UE4_NAME_HASHES_SERIALIZED: i32 = 504;
 pub const VER_UE4_PRELOAD_DEPENDENCIES_IN_COOKED_EXPORTS: i32 = 507;
@@ -128,6 +129,7 @@ pub struct Summary {
     pub thumbnail_table_offset: i32,
     pub saved_by_engine_version: String,
     pub asset_registry_data_offset: i32,
+    pub bulk_data_start_offset: i64,
 }
 
 impl Summary {
@@ -438,10 +440,10 @@ impl Package {
                     }
                 }
             } else {
-                match self.imports.get((-current - 1) as usize) {
+                match self.imports.get((-(current as i64) - 1) as usize) {
                     Some(i) => (&i.object_name, i.outer_index),
                     None => {
-                        parts.push(format!("<badimport#{}>", -current - 1));
+                        parts.push(format!("<badimport#{}>", -(current as i64) - 1));
                         break;
                     }
                 }
@@ -465,7 +467,7 @@ impl Package {
     pub fn resolve_index(&self, package_index: i32) -> String {
         match package_index {
             0 => "None".to_string(),
-            i if i < 0 => self.import_path((-i - 1) as usize),
+            i if i < 0 => join_object_path(&self.walk_outer_chain(i)),
             i => self.export_path((i - 1) as usize),
         }
     }
@@ -654,7 +656,7 @@ fn read_summary(data: &[u8]) -> Res<Summary> {
     }
 
     s.asset_registry_data_offset = ar.i32()?;
-    ar.i64()?; // BulkDataStartOffset
+    s.bulk_data_start_offset = ar.i64()?;
 
     if s.file_version_ue4 >= VER_UE4_WORLD_LEVEL_INFO {
         ar.i32()?; // WorldTileInfoDataOffset

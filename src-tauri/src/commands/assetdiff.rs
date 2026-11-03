@@ -103,11 +103,13 @@ pub async fn asset_diff(left: String, right: String) -> Result<AssetDiff, String
     .map_err(|e| e.to_string())
 }
 
-/// What an asset diff window needs to hand the same pair to Unreal.
+/// What an asset diff window needs to hand the same pair to Unreal, and the
+/// workspace root whose engine holds the Oodle library textures need.
 #[derive(Serialize, Clone)]
 pub struct AssetJob {
     pub conn: P4Conn,
     pub name: String,
+    pub root: String,
 }
 
 fn asset_jobs() -> &'static std::sync::Mutex<std::collections::HashMap<String, AssetJob>> {
@@ -131,10 +133,17 @@ pub fn asset_diff_job(job: String) -> Result<AssetJob, String> {
 pub async fn open_asset_diff_window(app: AppHandle, pair: DiffPair, conn: P4Conn, name: String) -> Result<(), String> {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     let label = format!("assetdiff-{}", NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+    let info_conn = conn.clone();
+    let root = tauri::async_runtime::spawn_blocking(move || crate::p4::run(&info_conn, &["info"]))
+        .await
+        .ok()
+        .and_then(|r| r.ok())
+        .and_then(|recs| recs.first().and_then(|r| r.get("clientRoot")).and_then(|v| v.as_str()).map(String::from))
+        .unwrap_or_default();
     asset_jobs()
         .lock()
         .map_err(|_| "window registry poisoned")?
-        .insert(label.clone(), AssetJob { conn, name });
+        .insert(label.clone(), AssetJob { conn, name, root });
     let url = format!(
         "assetdiff?left={}&right={}&ll={}&rl={}&title={}&job={}",
         enc(&pair.left),
@@ -153,4 +162,60 @@ pub async fn open_asset_diff_window(app: AppHandle, pair: DiffPair, conn: P4Conn
         .map_err(|e| format!("failed to open asset diff window: {e}"))?;
     crate::wingeom::apply(&win, "assetdiff");
     Ok(())
+}
+
+/// A texture's source layout (UDIM blocks, layers, mips, slices), or None for
+/// a side that does not exist or holds no texture source.
+#[tauri::command]
+pub async fn texture_layout(path: String) -> Result<Option<crate::uasset::texture::Layout>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        if path.is_empty() || std::fs::metadata(&path).map(|m| m.len() == 0).unwrap_or(true) {
+            return Ok(None);
+        }
+        let pkg = Package::open(std::path::Path::new(&path))?;
+        Ok(crate::uasset::texture::source_layout(&pkg))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// One view of a texture's source for the viewer — UDIM block, layer, source
+/// mip, slice, at most `max` texels a side (0 = full) — as one binary message:
+/// kind (0 RGBA8, 1 PNG file, 2 JPEG file), width and height (u32 LE), then the
+/// pixels or the file.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn texture_pixels(
+    path: String,
+    job: String,
+    block: usize,
+    layer: usize,
+    mip: usize,
+    slice: usize,
+    max: usize,
+) -> Result<tauri::ipc::Response, String> {
+    let root = asset_jobs().lock().ok().and_then(|j| j.get(&job).map(|j| j.root.clone())).unwrap_or_default();
+    tauri::async_runtime::spawn_blocking(move || {
+        use crate::uasset::texture::{decode_view, Pixels};
+        let meta = std::fs::metadata(&path).map_err(|e| format!("{path}: {e}"))?;
+        let key = format!("{path}|{}|{:?}", meta.len(), meta.modified().ok());
+        let pkg = Package::open(std::path::Path::new(&path))?;
+        // The workspace's engine first; the file's own folders work for a workspace file.
+        let mut roots = vec![std::path::PathBuf::from(&path)];
+        if !root.is_empty() {
+            roots.insert(0, std::path::PathBuf::from(&root));
+        }
+        let (kind, w, h, data) = match decode_view(&pkg, &key, &roots, (block, layer, mip, slice), max)? {
+            Pixels::Rgba { width, height, data } => (0u8, width, height, data),
+            Pixels::Encoded { mime, data } => (if mime == "image/png" { 1 } else { 2 }, 0, 0, data),
+        };
+        let mut out = Vec::with_capacity(data.len() + 9);
+        out.push(kind);
+        out.extend(w.to_le_bytes());
+        out.extend(h.to_le_bytes());
+        out.extend(data);
+        Ok(tauri::ipc::Response::new(out))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
