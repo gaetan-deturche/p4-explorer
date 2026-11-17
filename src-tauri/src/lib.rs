@@ -267,7 +267,10 @@ pub fn run() {
             // Everything still open, plus whatever this shutdown has just closed.
             // Tauri reports this only once the windows are destroyed, which is why
             // they are remembered rather than forgotten on the way out.
-            tauri::RunEvent::ExitRequested { .. } => commands::save_session(app),
+            tauri::RunEvent::ExitRequested { .. } => {
+                wingeom::flush(app);
+                commands::save_session(app);
+            }
             _ => {}
         });
 }

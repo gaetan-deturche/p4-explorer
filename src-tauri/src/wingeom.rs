@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use tauri::{LogicalPosition, LogicalSize, Manager, WebviewWindow, WindowEvent};
+use tauri::{AppHandle, LogicalPosition, LogicalSize, Manager, WebviewWindow, WindowEvent};
 
 use crate::index::AppState;
 
@@ -51,15 +51,51 @@ fn load(win: &WebviewWindow, kind: &str) -> Option<Geom> {
     serde_json::from_str(&json).ok()
 }
 
-fn store(win: &WebviewWindow, kind: &str, g: Geom) {
-    let Some(state) = win.app_handle().try_state::<AppState>() else { return };
+fn store(app: &AppHandle, kind: &str, g: Geom) {
+    let Some(state) = app.try_state::<AppState>() else { return };
+    let asked = Instant::now();
     let Ok(db) = state.cache_db.lock() else { return };
+    let waited = asked.elapsed();
+    if waited > Duration::from_millis(100) {
+        crate::p4::log_note(&format!("wingeom: waited {} ms for the cache database", waited.as_millis()));
+    }
     let Ok(json) = serde_json::to_string(&g) else { return };
     let _ = db.execute(
         "INSERT INTO cache(scope, key, json) VALUES('wingeom', ?1, ?2)
          ON CONFLICT(scope, key) DO UPDATE SET json=excluded.json",
         rusqlite::params![kind, json],
     );
+}
+
+/// Geometry waiting to be written, per kind. Each write takes the newest, so
+/// writes that run out of order still leave the latest value.
+static PENDING: Mutex<Option<HashMap<String, Geom>>> = Mutex::new(None);
+
+/// Write `g` off the main thread. Window events run on the main thread, which
+/// every window needs, and the database lock can be held by other writes:
+/// waiting for it there froze the whole app on opening and closing windows.
+fn store_later(app: &AppHandle, kind: &str, g: Geom) {
+    with_map(&PENDING, |m| {
+        m.insert(kind.to_string(), g);
+    });
+    let app = app.clone();
+    let kind = kind.to_string();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut latest = None;
+        with_map(&PENDING, |m| latest = m.remove(&kind));
+        if let Some(g) = latest {
+            store(&app, &kind, g);
+        }
+    });
+}
+
+/// Write what is still pending, at exit, before the process goes.
+pub fn flush(app: &AppHandle) {
+    let mut pending = HashMap::new();
+    with_map(&PENDING, |m| pending = std::mem::take(m));
+    for (kind, g) in pending {
+        store(app, &kind, g);
+    }
 }
 
 /// Is `g` at least partly on a monitor that exists right now? Compares in
@@ -163,7 +199,7 @@ pub fn watch(win: &WebviewWindow, kind: &str) {
                 return;
             }
         }
-        store(&w, &kind, g);
+        store_later(w.app_handle(), &kind, g);
     });
 }
 
