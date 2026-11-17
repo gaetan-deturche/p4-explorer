@@ -286,6 +286,28 @@ export const reviews = {
     }
   },
 
+  /** Approve a review. The row shows it at once (in memory only, so a refused
+   *  approval is never saved), then the list reloads to what Swarm says. */
+  async approve(row: ReviewRow) {
+    if (!h) return;
+    const before = rows.find((r) => r.id === row.id);
+    const swap = (next: ReviewRow | undefined) => {
+      if (!next) return;
+      rows = rows.map((r) => (r.id === row.id ? next : r));
+      version++;
+    };
+    swap(before && { ...before, state: "approved", stateLabel: "Approved" });
+    try {
+      const label = await p4.swarmSetState(h.conn(), row.id, "approved");
+      h.setNotice(`Review #${row.id} is now ${label}.`, 6000);
+    } catch (e) {
+      swap(before);
+      h.setError(String(e));
+      return;
+    }
+    void reviews.load();
+  },
+
   /** Fetch the first page for the current filters. */
   async load() {
     if (!h || !h.connected()) {

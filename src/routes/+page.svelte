@@ -490,6 +490,43 @@
 
   // --- reviews: context menu over the Swarm review list ----------------------
   let reviewCtx = $state<{ x: number; y: number; r: ReviewRow } | null>(null);
+  /** Whether Swarm lets this user approve the review under the menu (null while
+   *  asking), and its reason when not: asked as the menu opens, so the item is
+   *  only enabled when the approval would be accepted. */
+  let reviewApproval = $state<{ id: number; ok: boolean | null; why: string }>({ id: 0, ok: null, why: "" });
+
+  function openReviewMenu(r: ReviewRow, e: MouseEvent) {
+    reviewCtx = { x: e.clientX, y: e.clientY, r };
+    reviewApproval = { id: r.id, ok: null, why: "" };
+    if (r.kind === "shelf" || r.state === "approved") return;
+    const settle = (ok: boolean, why: string) => {
+      if (reviewApproval.id === r.id) reviewApproval = { id: r.id, ok, why };
+    };
+    void p4.swarmTransitions(conn, r.id).then(
+      (t) => settle(t.items.some((i) => i.key === "approved"), t.blocked[0] ?? ""),
+      (err) => settle(false, String(err)),
+    );
+  }
+
+  /** Approve from the list, asking first as the review window does: an approval
+   *  is what other people act on. */
+  async function approveReview(r: ReviewRow) {
+    const detail = await p4.swarmReviewDetail(conn, r.id).catch(() => null);
+    const stale = detail?.reviewers.some((x) => x.stale && x.vote !== 0)
+      ? "\n\nOther reviewers' votes are older than the current version."
+      : "";
+    if (!(await askConfirm(`Approve review #${r.id}?${stale}`, "Approve", "Approve"))) return;
+    void reviews.approve(r);
+  }
+
+  function approveItem(r: ReviewRow) {
+    if (r.state === "approved") return { label: "Approve (already approved)", disabled: true };
+    const a = reviewApproval.id === r.id ? reviewApproval : null;
+    if (!a || a.ok === null) return { label: "Approve (checking…)", disabled: true };
+    if (a.ok) return { label: "Approve…", action: () => void approveReview(r).catch((e) => setError(String(e))) };
+    const why = a.why || "Swarm does not offer it to you";
+    return { label: `Can't approve: ${why.length > 70 ? why.slice(0, 69) + "…" : why}`, disabled: true };
+  }
 
   function reviewMenuItems(r: ReviewRow) {
     type MenuItem = { label: string; action?: () => void; disabled?: boolean; sep?: boolean };
@@ -509,6 +546,7 @@
         label: "Open review window…",
         action: () => void openReviewWindow(conn, r.id).catch((e) => setError(String(e))),
       });
+      items.push(approveItem(r));
       items.push({ label: "", sep: true });
     }
     items.push({
@@ -1486,7 +1524,7 @@
           onOpenDiff={(f, rev, change, submitted) => reviews.openDiff(f, rev, change, submitted)}
           onContext={(r, e) => {
             e.preventDefault();
-            reviewCtx = { x: e.clientX, y: e.clientY, r };
+            openReviewMenu(r, e);
           }}
           users={userList}
           onOpenReview={(r) =>
