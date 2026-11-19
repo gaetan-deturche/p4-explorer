@@ -56,6 +56,17 @@ export interface LocalDir {
 }
 
 /** One row of the Swarm review list. */
+/** A History search over a folder's stored history. */
+export interface HistorySearch {
+  rows: P4Record[];
+  /** How many matched in all (`rows` stops at the asked maximum). */
+  matched: number;
+  /** How many changelists the history holds. */
+  total: number;
+  /** Where a searched changelist number was submitted, when not in this history. */
+  note: string;
+}
+
 export interface ReviewRow {
   /** "review" for a Swarm review, "shelf" for a shelved changelist with no
    *  review at all — the latter has no state, reviewers or Swarm page. */
@@ -656,6 +667,11 @@ export const p4 = {
   files: (conn: P4Conn, path: string) => call("p4_files", { conn, path }),
   changes: (conn: P4Conn, path: string, max = 50, before?: number) =>
     call("p4_changes", { conn, path, max, before: before ?? null }),
+  /** Fill in a folder's stored history in the background (History opening). */
+  historyWarm: (conn: P4Conn, path: string) => g<void>("history_warm", { conn, path }),
+  /** Search a folder's whole history, kept in SQLite (filled in if still missing). */
+  historySearch: (conn: P4Conn, path: string, query: string, max = 500) =>
+    g<HistorySearch>("history_search", { conn, path, query, max }),
   pending: (conn: P4Conn, max = 50) => call("p4_pending", { conn, max }),
   haveChange: (conn: P4Conn, path: string) => call("p4_have_change", { conn, path }),
   changesExact: (conn: P4Conn, spec: string, max = 1) =>

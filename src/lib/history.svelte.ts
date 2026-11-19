@@ -6,7 +6,7 @@
 //! selection (no competing cache), so it stays plain $state. Shared bits (conn,
 //! path translation, notices) come via init().
 
-import { p4, type P4Conn, type P4Record } from "$lib/p4";
+import { p4, type HistorySearch, type P4Conn, type P4Record } from "$lib/p4";
 import { openDiff } from "$lib/opendiff";
 import type { HistEntry } from "$lib/cache";
 import {
@@ -218,6 +218,13 @@ export const history = {
     }
   },
 
+  /** Search the current folder's whole history (kept in SQLite by the backend).
+   *  Null in file mode, where the table filters the revisions it has. */
+  search(query: string): Promise<HistorySearch> | null {
+    if (!h || !currentId || curMode() !== "folder") return null;
+    return p4.historySearch(h.conn(), h.toQuery(currentId.slice(2)), query);
+  },
+
   /** Drop the persisted + in-memory history cache for the client (on Refresh). */
   clearMemCache() {
     if (h) storeClearScope(histScope(h.conn().client));
@@ -280,6 +287,8 @@ export const history = {
       safe(() => p4.haveChange(h!.conn(), q)),
     ]);
     if (seq !== loadSeq) return; // selection changed — keep whatever's shown
+    // The whole history, stored for searching, while the user reads the first page.
+    void p4.historyWarm(h.conn(), q).catch(() => {});
     const haveCl = have[0]?.change ?? "";
 
     // Nothing cached → paint progressively as pages arrive; cache shown → keep it

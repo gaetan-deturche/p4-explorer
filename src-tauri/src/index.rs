@@ -130,7 +130,8 @@ pub fn init_schema(db: &Connection) -> rusqlite::Result<()> {
              PRIMARY KEY(scope, key)
          );",
     )?;
-    crate::commands::stash_schema(db)
+    crate::commands::stash_schema(db)?;
+    crate::commands::histdb_schema(db)
 }
 
 // --- Generic blob cache (source of truth for view data; the front-end mirrors

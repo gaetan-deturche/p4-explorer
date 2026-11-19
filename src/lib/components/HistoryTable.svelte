@@ -1,6 +1,6 @@
 <script lang="ts">
   import { tick } from "svelte";
-  import { fmtTime, firstLine, type P4Record } from "$lib/p4";
+  import { fmtTime, firstLine, type HistorySearch, type P4Record } from "$lib/p4";
   import { loadHistCols, saveHistCols } from "$lib/nav";
 
   let {
@@ -18,6 +18,7 @@
     deepening = false,
     followBranches = true,
     onFollowBranches,
+    onSearch,
   }: {
     mode: "folder" | "file";
     subject: string;
@@ -34,6 +35,9 @@
     /** File mode only: whether the log follows the branch the file came from. */
     followBranches?: boolean;
     onFollowBranches?: (v: boolean) => void;
+    /** Search the WHOLE history (folder mode); null when it cannot, and the
+     *  loaded rows are filtered instead. */
+    onSearch?: (query: string) => Promise<HistorySearch> | null;
   } = $props();
 
   // Changelist number the workspace is synced to (the "you are here" anchor).
@@ -158,7 +162,36 @@
     }
     return false;
   }
+  // Folder history is searched whole, in the backend's store, rather than by
+  // paging all of it through this view (see histdb.rs).
+  const fullSearch = $derived(mode === "folder" && !!onSearch && !!query.trim());
+  let found = $state<{ key: string; res: HistorySearch } | null>(null);
+  let searchError = $state("");
+  const searchKey = $derived(`${subject}|${query.trim()}`);
+  /** The answer for what is typed now, or null while it is being asked. */
+  const result = $derived(found && found.key === searchKey ? found.res : null);
+  $effect(() => {
+    const key = searchKey;
+    const q = query.trim();
+    if (!fullSearch) return;
+    searchError = "";
+    const timer = setTimeout(() => {
+      const ask = onSearch?.(q);
+      if (!ask) return;
+      ask.then(
+        (res) => {
+          if (key === searchKey) found = { key, res };
+        },
+        (e) => {
+          if (key === searchKey) searchError = String(e);
+        },
+      );
+    }, 200);
+    return () => clearTimeout(timer);
+  });
+
   const shown = $derived.by(() => {
+    if (fullSearch) return result?.rows ?? [];
     const terms = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
     if (!terms.length) return rows;
     return rows.filter((r) => {
@@ -234,7 +267,7 @@
   let body = $state<HTMLDivElement>();
   $effect(() => {
     void shown.length; // re-check as results stream in
-    if (!body || !onDeepen || deepening || exhausted || loading) return;
+    if (!body || !onDeepen || deepening || exhausted || loading || fullSearch) return;
     if (!query.trim() || rows.length === 0) return;
     if (body.scrollHeight <= body.clientHeight + 50) {
       lenBeforeDeepen = rows.length;
@@ -293,6 +326,15 @@
       <div class="msg dim">Loading…</div>
     {:else if rows.length === 0}
       <div class="msg dim">No history. Pick a file or a folder on the left.</div>
+    {:else if fullSearch && searchError}
+      <div class="msg err">{searchError}</div>
+    {:else if fullSearch && !result}
+      <div class="msg dim">Searching the full history…</div>
+    {:else if fullSearch && result && shown.length === 0}
+      <div class="msg dim">
+        No changelists matching “{query.trim()}” in the full history ({result.total} changelists).
+        {#if result.note}<div>{result.note}</div>{/if}
+      </div>
     {:else if shown.length === 0}
       {#if exhausted || !onDeepen}
         <div class="msg dim">
@@ -397,7 +439,15 @@
     {/if}
     <!-- While a search is active the coverage matters: say how far back the
          loaded rows go and offer to page deeper. -->
-    {#if query.trim() && rows.length > 0 && shown.length > 0 && onDeepen}
+    {#if fullSearch && result && shown.length > 0}
+      <div class="deepen">
+        <span class="dim"
+          >{result.matched} of {result.total} changelists match{result.matched > shown.length
+            ? ` — showing the newest ${shown.length}`
+            : ""}</span
+        >
+      </div>
+    {:else if query.trim() && rows.length > 0 && shown.length > 0 && onDeepen}
       <div class="deepen">
         <span class="dim">searching the {rows.length} loaded changelists</span>
         <button disabled={deepening} onclick={onDeepen}>

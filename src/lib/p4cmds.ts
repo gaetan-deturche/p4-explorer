@@ -17,6 +17,8 @@ export const P4_COMMANDS: P4Cmd[] = [
   { key: "p4_dirs", label: "dirs", read: true },
   { key: "p4_files", label: "files", read: true },
   { key: "p4_changes", label: "changes", read: true },
+  { key: "history_search", label: "changes (search history)", read: true },
+  { key: "history_warm", label: "changes (search history)", read: true },
   { key: "p4_pending", label: "pending changes", read: true },
   { key: "p4_have_change", label: "changes (have)", read: true },
   { key: "p4_changes_exact", label: "changes (have)", read: true },

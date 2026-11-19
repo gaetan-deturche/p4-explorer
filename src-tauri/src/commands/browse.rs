@@ -629,18 +629,18 @@ mod twisted_tests {
 /// set, pages backward: only changelists <= that number are returned, so the
 /// caller can fetch history in chunks (`before = smallest_seen - 1`).
 #[tauri::command]
-pub async fn p4_changes(conn: P4Conn, path: String, max: u32, before: Option<u32>) -> Res {
+pub async fn p4_changes(app: tauri::AppHandle, conn: P4Conn, path: String, max: u32, before: Option<u32>) -> Res {
     let max = max.to_string();
-    let base = if path.ends_with("...") || path.contains('*') {
-        path
-    } else {
-        format!("{}/...", path.trim_end_matches('/'))
-    };
+    let base = super::histdb::history_base(&path);
     let spec = match before {
         Some(b) => format!("{base}@{b}"),
-        None => base,
+        None => base.clone(),
     };
-    run(conn, v(&["changes", "-l", "-m", &max, "-s", "submitted", &spec])).await
+    let server = conn.port.clone();
+    let recs = run(conn, v(&["changes", "-l", "-m", &max, "-s", "submitted", &spec])).await?;
+    // Whatever a History view has seen stays searchable (see histdb).
+    tauri::async_runtime::spawn(super::histdb::remember_later(app, server, base, recs.clone()));
+    Ok(recs)
 }
 
 /// The changelist a depot path is currently synced to (highest CL among the

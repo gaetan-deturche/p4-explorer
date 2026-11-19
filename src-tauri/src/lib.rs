@@ -200,6 +200,8 @@ pub fn run() {
             commands::texture_pixels,
             commands::texture_layout,
             commands::mesh_view,
+            commands::history_search,
+            commands::history_warm,
             commands::p4_submit,
             commands::p4_shelve,
             commands::p4_shelve_delete,

@@ -1592,6 +1592,7 @@
               deepening={history.deepening}
               followBranches={history.followBranches}
               onFollowBranches={(v) => history.setFollowBranches(v)}
+              onSearch={(q) => history.search(q)}
             />
           </div>
           <div
