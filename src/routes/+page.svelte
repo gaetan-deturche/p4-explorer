@@ -1174,6 +1174,9 @@
         error = m;
         notifications.add("error", m);
       },
+      clearAuthError: () => {
+        if (/p4passwd|session has expired/i.test(error)) error = "";
+      },
       setNotice,
       setOptionsOpen: (v) => (optionsOpen = v),
       getSyncing: () => syncing,

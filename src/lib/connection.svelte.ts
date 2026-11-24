@@ -3,7 +3,7 @@
 //! and the keep-alive/health-check poll. The `conn` object itself stays in the
 //! page (it is two-way bound by dialogs); this store drives everything around it.
 
-import { listen } from "@tauri-apps/api/event";
+import { emit, listen } from "@tauri-apps/api/event";
 import { p4, pickFolder as pickFolderCmd, type P4Conn, type P4Record, type ParkedChange } from "$lib/p4";
 import { loadServers, loadServersAsync, saveServers, withServer, withoutServer } from "$lib/servers";
 import {
@@ -49,6 +49,8 @@ type Hooks = {
   secondary: () => boolean;
   getTab: () => Tab;
   setConnError: (m: string) => void; // persistent connection banner ("" clears)
+  /** Drop the banner only if it is a login/ticket error. */
+  clearAuthError: () => void;
   setNotice: (m: string, ms?: number) => void;
   setOptionsOpen: (v: boolean) => void;
   getSyncing: () => boolean;
@@ -132,6 +134,15 @@ async function loginLoop(conn: P4Conn): Promise<boolean> {
   }
 }
 
+/** One login at a time: a second caller joins the one in progress. Two used to
+ *  open the dialog at once (connect at boot + the expired-session handler); the
+ *  second replaced the first, whose promise then never settled. */
+let loginInFlight: Promise<boolean> | null = null;
+function loginOnce(conn: P4Conn): Promise<boolean> {
+  if (!loginInFlight) loginInFlight = loginLoop(conn).finally(() => (loginInFlight = null));
+  return loginInFlight;
+}
+
 let relogging = false;
 /** The user cancelled the login for this dead session: failing commands stop
  *  asking until Refresh. */
@@ -146,13 +157,16 @@ async function relogin(): Promise<void> {
   const conn = h.conn();
   relogging = true;
   try {
-    // p4's own ticket store may hold a newer, valid ticket (a login from P4V).
+    // p4's own ticket store may hold a newer, valid ticket (a login from P4V) —
+    // or the very ticket this window already uses, when the refusal came from a
+    // command started with the old one before a login: then nothing is wrong.
     const fresh = await p4.ticketValue(conn).catch(() => "");
-    if (fresh && fresh !== conn.ticket) {
+    if (fresh) {
+      const newer = fresh !== conn.ticket;
       conn.ticket = fresh;
       if ((await p4.loginStatus(conn).catch(() => ({ ok: false, error: "" }))).ok) {
-        h.setConnError("");
-        h.refreshViews();
+        h.clearAuthError();
+        if (newer) h.refreshViews();
         return;
       }
     }
@@ -161,15 +175,45 @@ async function relogin(): Promise<void> {
     // One password prompt for the app: every window hears the event. The others
     // pick the new ticket up from p4's store on their next refused command.
     if (h.secondary()) return;
-    if (!(await loginLoop(conn))) {
+    const joined = loginInFlight !== null;
+    if (!(await loginOnce(conn))) {
       declined = true;
+      return;
+    }
+    if (joined) {
+      // connect() owns that login and reloads the views itself.
+      h.clearAuthError();
       return;
     }
     conn.ticket = await p4.ticketValue(conn).catch(() => "");
     h.setConnError("");
     h.refreshViews();
+    announceLogin(conn);
   } finally {
     relogging = false;
+  }
+}
+
+/** Tell every window this server has a fresh ticket: the others showed the
+ *  expired banner and never prompted, and nothing else would clear it. */
+function announceLogin(conn: P4Conn) {
+  void emit("p4-session-restored", { port: conn.port }).catch(() => {});
+}
+
+/** Another window logged in to this server: take its ticket and drop the banner. */
+async function adoptLogin(): Promise<void> {
+  if (!h) return;
+  const conn = h.conn();
+  declined = false;
+  const fresh = await p4.ticketValue(conn).catch(() => "");
+  if (!fresh || fresh === conn.ticket) {
+    h.clearAuthError(); // this window made the login and already has it
+    return;
+  }
+  conn.ticket = fresh;
+  if ((await p4.loginStatus(conn).catch(() => ({ ok: false, error: "" }))).ok) {
+    h.clearAuthError();
+    h.refreshViews();
   }
 }
 
@@ -227,6 +271,9 @@ export const connection = {
     h = hooks;
     void listen<{ port: string }>("p4-session-expired", (e) => {
       if (h && e.payload.port === h.conn().port) void relogin();
+    });
+    void listen<{ port: string }>("p4-session-restored", (e) => {
+      if (h && e.payload.port === h.conn().port) void adoptLogin();
     });
     servers = loadServers();
     // If localStorage was reset, recover the list from the SQLite source of truth.
@@ -421,13 +468,17 @@ export const connection = {
       // workspace BEFORE calling us, so a login here means every load the UI
       // already did ran against an expired ticket.
       const loggedIn = !authed;
-      if (!authed && !(await loginLoop(conn))) {
+      if (!authed && !(await loginOnce(conn))) {
         connected = false;
         return; // user cancelled — stay disconnected, no success toast
       }
+      // The views restored before this connect ran on the expired ticket, and
+      // their errors landed after the clear above.
+      if (loggedIn) h.clearAuthError();
       // Pin the session to its ticket: later commands can land on a different
       // edge where the automatic lookup fails mid-session ("P4PASSWD invalid").
       if (!conn.ticket) conn.ticket = await p4.ticketValue(conn).catch(() => "");
+      if (loggedIn) announceLogin(conn);
       connected = true;
       h.setOptionsOpen(false);
       startKeepAlive();
@@ -717,7 +768,8 @@ export const connection = {
         saveCharsetFor(conn.port, conn.charset);
       }
     }
-    if (!(await loginLoop(conn))) return; // cancelled — leave the state untouched
+    if (!(await loginOnce(conn))) return; // cancelled — leave the state untouched
+    announceLogin(conn);
     h.setNotice("Logged in.");
     saveUserFor(conn.port, conn.user); // remember the account that worked NOW —
     saveCharsetFor(conn.port, conn.charset); // even if the connect below hiccups
