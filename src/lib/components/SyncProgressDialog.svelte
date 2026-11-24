@@ -7,6 +7,11 @@
     issueLine,
     phase,
     message,
+    totalFiles = 0,
+    written = 0,
+    totalBytes = 0,
+    rate = 0,
+    idleSecs = 0,
     onCancel,
     onClose,
   }: {
@@ -17,9 +22,32 @@
     issueLine: string;
     phase: "running" | "error";
     message: string;
+    totalFiles?: number;
+    written?: number;
+    totalBytes?: number;
+    rate?: number;
+    idleSecs?: number;
     onCancel: () => void;
     onClose: () => void;
   } = $props();
+
+  function size(n: number): string {
+    if (n >= 1e9) return `${(n / 1e9).toFixed(2)} GB`;
+    if (n >= 1e6) return `${(n / 1e6).toFixed(1)} MB`;
+    if (n >= 1e3) return `${(n / 1e3).toFixed(0)} KB`;
+    return `${n} B`;
+  }
+  // Text files grow on disk (CRLF), so the bytes written can pass the depot total.
+  let pct = $derived(totalBytes > 0 ? Math.min(100, (written / totalBytes) * 100) : 0);
+  // A parallel sync lists every file before it transfers any.
+  let listed = $derived(totalFiles > 0 && count >= totalFiles);
+  let eta = $derived.by(() => {
+    if (!totalBytes || rate <= 0 || written >= totalBytes) return "";
+    const s = (totalBytes - written) / rate;
+    if (s < 60) return `${Math.ceil(s)} s left`;
+    if (s < 3600) return `${Math.ceil(s / 60)} min left`;
+    return `${(s / 3600).toFixed(1)} h left`;
+  });
 </script>
 
 <div class="overlay">
@@ -37,11 +65,26 @@
         <span class="spin"></span>
         {#if count === 0}
           <span class="cnt mono">Preparing… (scanning the workspace)</span>
+        {:else if listed}
+          <span class="cnt mono">{count} files listed — downloading</span>
+        {:else if totalFiles > 0}
+          <span class="cnt mono">{count} of {totalFiles} files</span>
         {:else}
           <span class="cnt mono">{count} file{count === 1 ? "" : "s"} synced</span>
         {/if}
       </div>
-      {#if current}<div class="cur mono dim" title={current}>{current}</div>{/if}
+      {#if totalBytes > 0}
+        <div class="bar"><div class="fill" style:width="{pct}%"></div></div>
+        <div class="cur mono dim">
+          {size(Math.min(written, totalBytes))} of {size(totalBytes)} · {size(rate)}/s{eta ? ` · ${eta}` : ""}
+        </div>
+      {/if}
+      {#if idleSecs >= 15}
+        <div class="warnhead mono">
+          Nothing written for {idleSecs} s — p4 is waiting on the server or on a file another program holds.
+        </div>
+      {/if}
+      {#if current && !listed}<div class="cur mono dim" title={current}>{current}</div>{/if}
       {#if issues > 0}
         <div class="warnhead mono">
           ⚠ {issues} file{issues === 1 ? "" : "s"} couldn't be synced (open in another app)
@@ -114,6 +157,17 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  .bar {
+    height: 6px;
+    border-radius: 3px;
+    background: var(--border);
+    overflow: hidden;
+  }
+  .fill {
+    height: 100%;
+    background: var(--accent);
+    transition: width 0.4s linear;
   }
   .warnhead {
     font-size: 12px;

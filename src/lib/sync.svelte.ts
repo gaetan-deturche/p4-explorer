@@ -29,6 +29,13 @@ type Progress = {
   issueLine: string;
   phase: "running" | "error";
   message: string;
+  /** Files the run will touch, from p4's first tagged record (0 = unknown). */
+  totalFiles: number;
+  /** Transfer: bytes p4 has written, of `totalBytes` (0 = unknown). */
+  written: number;
+  totalBytes: number;
+  rate: number;
+  idleSecs: number;
 };
 type ErrItem = {
   line: string;
@@ -189,13 +196,38 @@ export const sync = {
     if (!h) return null;
     cancelled = false;
     errorItems = [];
-    progress = { title, count: 0, current: "", issues: 0, issueLine: "", phase: "running", message: "" };
-    const un1 = await listen<{ count: number; line: string }>("sync-progress", (e) => {
+    progress = {
+      title,
+      count: 0,
+      current: "",
+      issues: 0,
+      issueLine: "",
+      phase: "running",
+      message: "",
+      totalFiles: 0,
+      written: 0,
+      totalBytes: 0,
+      rate: 0,
+      idleSecs: 0,
+    };
+    const un1 = await listen<{ count: number; line: string; totalFiles?: number }>("sync-progress", (e) => {
       if (progress) {
         progress.count = e.payload.count;
         progress.current = e.payload.line;
+        progress.totalFiles = e.payload.totalFiles ?? 0;
       }
     });
+    const un3 = await listen<{ written: number; total: number; rate: number; idleSecs: number }>(
+      "sync-transfer",
+      (e) => {
+        if (progress) {
+          progress.written = e.payload.written;
+          progress.totalBytes = e.payload.total;
+          progress.rate = e.payload.rate;
+          progress.idleSecs = e.payload.idleSecs;
+        }
+      },
+    );
     const un2 = await listen<{ count: number; line: string; file: string | null }>("sync-issue", (e) => {
       errorItems.push({ line: e.payload.line, file: e.payload.file });
       if (progress) {
@@ -228,6 +260,7 @@ export const sync = {
     } finally {
       un1();
       un2();
+      un3();
     }
   },
 

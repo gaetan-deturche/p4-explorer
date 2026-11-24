@@ -1730,6 +1730,11 @@
     issueLine={sync.progress.issueLine}
     phase={sync.progress.phase}
     message={sync.progress.message}
+    totalFiles={sync.progress.totalFiles}
+    written={sync.progress.written}
+    totalBytes={sync.progress.totalBytes}
+    rate={sync.progress.rate}
+    idleSecs={sync.progress.idleSecs}
     onCancel={() => sync.cancel()}
     onClose={() => sync.dismissProgress()}
   />

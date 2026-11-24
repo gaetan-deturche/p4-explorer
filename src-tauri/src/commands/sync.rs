@@ -20,6 +20,11 @@ fn sync_run(
     use tauri::Emitter;
 
     let mut cmd = p4::base_command(conn);
+    // Tagged output carries the run's totalFileSize/totalFileCount, which is
+    // what turns the silent transfer phase of a parallel sync into a progress bar.
+    if !preview {
+        cmd.arg("-ztag");
+    }
     // Bound network waits (seconds of silence) so a hung connection — a real
     // risk with parallel transfer on a flaky link — aborts with an error
     // instead of stalling the sync forever, like P4V's timeout.
@@ -91,26 +96,59 @@ fn sync_run(
         (n, all)
     });
 
+    // A parallel sync lists every file first, then transfers them with nothing on
+    // stdout, so the file count alone stalls for the whole download. The bytes
+    // p4 has written, against the run's total, show the transfer instead.
+    let total_bytes = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let monitor_stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let monitor = window.map(|w| {
+        let w = w.clone();
+        let total = total_bytes.clone();
+        let stop = monitor_stop.clone();
+        #[cfg(windows)]
+        let handle = {
+            use std::os::windows::io::AsRawHandle;
+            child.as_raw_handle() as usize
+        };
+        #[cfg(not(windows))]
+        let handle = 0usize;
+        std::thread::spawn(move || transfer_monitor(&w, handle, &total, &stop))
+    });
+
     let stdout = child.stdout.take().ok_or("no stdout")?;
-    let mut count = 0usize;
-    let mut last = String::new();
+    let mut tags = SyncTags::default();
+    let mut emitted = 0usize;
     for line in BufReader::new(stdout).lines() {
         let Ok(line) = line else { break };
-        if line.trim().is_empty() {
+        if !tags.feed(&line) {
             continue;
         }
-        count += 1;
-        last = line;
+        if tags.total_bytes > 0 {
+            total_bytes.store(tags.total_bytes, std::sync::atomic::Ordering::Relaxed);
+        }
         if let Some(w) = window {
-            if count % 10 == 0 {
-                let _ = w.emit("sync-progress", serde_json::json!({ "count": count, "line": last }));
+            if tags.files >= emitted + 10 {
+                emitted = tags.files;
+                let _ = w.emit(
+                    "sync-progress",
+                    serde_json::json!({ "count": tags.files, "line": tags.current, "totalFiles": tags.total_files }),
+                );
             }
         }
     }
     let status = child.wait().map_err(|e| e.to_string())?;
+    // Joined BEFORE `child` drops: the monitor reads through the child's handle.
+    monitor_stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    if let Some(m) = monitor {
+        let _ = m.join();
+    }
     pids.lock().unwrap().retain(|&p| p != id);
+    let count = tags.files;
     if let Some(w) = window {
-        let _ = w.emit("sync-progress", serde_json::json!({ "count": count, "line": last }));
+        let _ = w.emit(
+            "sync-progress",
+            serde_json::json!({ "count": count, "line": tags.current, "totalFiles": tags.total_files }),
+        );
     }
     let (_issues, err) = err_handle.join().unwrap_or((0, String::new()));
     // The streaming sync bypasses p4::run — log it to the Commands view too,
@@ -168,6 +206,128 @@ fn error_file(line: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Running state of a `p4 -ztag sync` stdout stream: one record per file
+/// (`... depotFile`, `... action`, …, blank line), the first one also carrying
+/// the run's totals.
+#[derive(Default)]
+struct SyncTags {
+    files: usize,
+    total_files: u64,
+    total_bytes: u64,
+    current: String,
+    depot: String,
+    tagged: bool,
+}
+
+impl SyncTags {
+    /// Take one stdout line; true when it changed what the dialog shows.
+    fn feed(&mut self, line: &str) -> bool {
+        let line = line.trim_end();
+        if line.trim().is_empty() {
+            return false;
+        }
+        let Some(tag) = line.strip_prefix("... ") else {
+            // Untagged text: a file line from a plain sync, or an info message
+            // (e.g. a resolve notice) between tagged records.
+            if !self.tagged {
+                self.files += 1;
+            }
+            self.current = line.to_string();
+            return true;
+        };
+        self.tagged = true;
+        let (key, value) = tag.split_once(' ').unwrap_or((tag, ""));
+        match key {
+            "depotFile" => {
+                self.files += 1;
+                self.depot = value.to_string();
+                self.current = self.depot.clone();
+            }
+            "rev" => self.current = format!("{}#{value}", self.depot),
+            "action" => self.current = format!("{} - {value}", self.current),
+            "totalFileSize" => self.total_bytes = value.parse().unwrap_or(0),
+            "totalFileCount" => self.total_files = value.parse().unwrap_or(0),
+            _ => return false,
+        }
+        true
+    }
+}
+
+/// Bytes the process has written so far — files and pipes alike — from
+/// Windows' per-process I/O counters.
+#[cfg(windows)]
+fn bytes_written(handle: usize) -> Option<u64> {
+    #[repr(C)]
+    #[derive(Default)]
+    struct IoCounters {
+        read_ops: u64,
+        write_ops: u64,
+        other_ops: u64,
+        read_bytes: u64,
+        write_bytes: u64,
+        other_bytes: u64,
+    }
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetProcessIoCounters(process: *mut std::ffi::c_void, counters: *mut IoCounters) -> i32;
+    }
+    let mut c = IoCounters::default();
+    let ok = unsafe { GetProcessIoCounters(handle as *mut std::ffi::c_void, &mut c) };
+    (ok != 0).then_some(c.write_bytes)
+}
+
+#[cfg(not(windows))]
+fn bytes_written(_handle: usize) -> Option<u64> {
+    None
+}
+
+/// Emit `sync-transfer` twice a second until `stop`: bytes written, the run's
+/// total (0 until p4 reports it), the recent rate, and how long nothing moved.
+fn transfer_monitor(
+    window: &tauri::Window,
+    handle: usize,
+    total: &std::sync::atomic::AtomicU64,
+    stop: &std::sync::atomic::AtomicBool,
+) {
+    use std::sync::atomic::Ordering;
+    use std::time::{Duration, Instant};
+    use tauri::Emitter;
+    let tick = Duration::from_millis(500);
+    // Rate over the last few seconds: a single 500 ms sample swings with each
+    // batch landing.
+    let mut samples: std::collections::VecDeque<(Instant, u64)> = Default::default();
+    let mut last_change = Instant::now();
+    let mut last_written = 0u64;
+    while !stop.load(Ordering::SeqCst) {
+        std::thread::sleep(tick);
+        let Some(written) = bytes_written(handle) else { return };
+        let now = Instant::now();
+        if written != last_written {
+            last_written = written;
+            last_change = now;
+        }
+        samples.push_back((now, written));
+        while samples.len() > 8 {
+            samples.pop_front();
+        }
+        let rate = match (samples.front(), samples.back()) {
+            (Some(a), Some(b)) if b.0 > a.0 => {
+                (b.1.saturating_sub(a.1)) as f64 / (b.0 - a.0).as_secs_f64()
+            }
+            _ => 0.0,
+        };
+        let _ = window.emit(
+            "sync-transfer",
+            serde_json::json!({
+                "written": written,
+                "total": total.load(Ordering::Relaxed),
+                "rate": rate as u64,
+                "idleSecs": (now - last_change).as_secs(),
+            }),
+        );
+    }
 }
 
 /// Streaming sync: runs `p4 sync [path]` and emits throttled `sync-progress`
@@ -1148,6 +1308,57 @@ mod revert_tests {
         let r = outcome("//d/a.uasset", false, true, false, &notes);
         assert!(!r.ok);
         assert!(r.message.contains("still reports the file as open"));
+    }
+}
+
+#[cfg(test)]
+mod tag_tests {
+    use super::*;
+
+    #[test]
+    fn tagged_records_count_files_and_carry_the_totals() {
+        // The real shape of `p4 -ztag sync` output.
+        let out = "... depotFile //d/a.cpp\n... clientFile H:\\w\\a.cpp\n... rev 2\n... action updated\n\
+                   ... fileSize 7153\n... totalFileSize 2968811\n... totalFileCount 216\n... change 223442\n\n\
+                   ... depotFile //d/b.h\n... clientFile H:\\w\\b.h\n... rev 5\n... action added\n... fileSize 10\n";
+        let mut t = SyncTags::default();
+        for l in out.lines() {
+            t.feed(l);
+        }
+        assert_eq!(t.files, 2);
+        assert_eq!(t.total_bytes, 2_968_811);
+        assert_eq!(t.total_files, 216);
+        assert_eq!(t.current, "//d/b.h#5 - added");
+    }
+
+    #[test]
+    fn a_message_between_records_is_shown_but_not_counted() {
+        let mut t = SyncTags::default();
+        t.feed("... depotFile //d/a.cpp");
+        t.feed("//d/a.cpp - must resolve #3 before submitting");
+        assert_eq!(t.files, 1);
+        assert!(t.current.contains("must resolve"));
+    }
+
+    #[test]
+    fn untagged_output_counts_one_file_per_line() {
+        let mut t = SyncTags::default();
+        t.feed("//d/a.cpp#2 - updating H:\\w\\a.cpp");
+        t.feed("//d/b.h#5 - added as H:\\w\\b.h");
+        assert_eq!(t.files, 2);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn this_process_has_written_something() {
+        use std::os::windows::io::AsRawHandle;
+        let child = std::process::Command::new("cmd")
+            .args(["/c", "echo", "hi"])
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        assert!(bytes_written(child.as_raw_handle() as usize).is_some());
+        let _ = child.wait_with_output();
     }
 }
 
