@@ -132,7 +132,7 @@
     opacity: 0.7;
   }
   .bad {
-    color: #f08a8a;
+    color: var(--warn);
   }
   .mono {
     font-family: var(--mono);

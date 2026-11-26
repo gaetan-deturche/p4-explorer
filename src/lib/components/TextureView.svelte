@@ -459,7 +459,7 @@
     flex: 1;
   }
   .err {
-    color: #f08a8a;
+    color: var(--warn);
   }
   .dim {
     opacity: 0.7;

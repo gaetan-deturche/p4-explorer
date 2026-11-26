@@ -333,7 +333,7 @@
     align-items: center;
     gap: 8px;
     padding: 4px 8px;
-    border-bottom: 1px solid var(--line, #2a2a2a);
+    border-bottom: 1px solid var(--border);
     font-size: 12px;
   }
   .name {
@@ -357,12 +357,12 @@
     font-size: 12px;
   }
   .err {
-    color: #f08a8a;
-    background: color-mix(in srgb, #f08a8a 12%, transparent);
+    color: var(--warn);
+    background: color-mix(in srgb, var(--warn) 12%, transparent);
   }
   .note {
-    color: var(--fg, #ddd);
-    background: color-mix(in srgb, var(--fg, #ddd) 8%, transparent);
+    color: var(--text);
+    background: color-mix(in srgb, var(--text) 8%, transparent);
   }
   .split {
     flex: 1;
@@ -383,7 +383,7 @@
     flex: none;
     width: 5px;
     cursor: col-resize;
-    background: var(--line, #2a2a2a);
+    background: var(--border);
   }
   .gutter:hover {
     background: var(--accent, #4a7);

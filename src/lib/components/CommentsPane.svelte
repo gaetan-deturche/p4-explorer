@@ -179,8 +179,8 @@
     align-items: center;
     gap: 8px;
     padding: 4px 8px;
-    background: color-mix(in srgb, var(--fg, #ddd) 6%, transparent);
-    border-bottom: 1px solid var(--line, #2a2a2a);
+    background: color-mix(in srgb, var(--text) 6%, transparent);
+    border-bottom: 1px solid var(--border);
     font-size: 11px;
     text-transform: uppercase;
     letter-spacing: 0.04em;
@@ -225,8 +225,8 @@
   .err {
     padding: 4px 6px;
     margin-bottom: 6px;
-    color: #f08a8a;
-    background: color-mix(in srgb, #f08a8a 12%, transparent);
+    color: var(--warn);
+    background: color-mix(in srgb, var(--warn) 12%, transparent);
   }
   .group {
     padding: 4px 0 2px;
@@ -235,7 +235,7 @@
   }
   .composer {
     flex: none;
-    border-top: 1px solid var(--line, #2a2a2a);
+    border-top: 1px solid var(--border);
     padding: 5px 6px;
   }
   .composer textarea {

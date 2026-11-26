@@ -687,29 +687,31 @@
     align-items: center;
     gap: 8px;
     padding: 4px 8px;
-    border-bottom: 1px solid var(--line, #2a2a2a);
+    border-bottom: 1px solid var(--border);
     font-size: 12px;
   }
   .rid {
     font-weight: 600;
   }
+  /* Same pill as the Reviews tab. */
   .state {
-    padding: 1px 6px;
-    border-radius: 8px;
-    font-size: 11px;
-    background: color-mix(in srgb, var(--fg, #ddd) 14%, transparent);
+    font-size: 10px;
+    font-weight: 600;
+    line-height: 16px;
+    padding: 0 6px;
+    border-radius: 10px;
+    border: 1px solid currentColor;
+    color: var(--text-dim);
+  }
+  .state.s-needsReview {
+    color: var(--accent);
   }
   .state.s-approved {
-    color: #7ec97e;
-    background: color-mix(in srgb, #7ec97e 16%, transparent);
+    color: var(--have);
   }
-  .state.s-rejected {
-    color: #f08a8a;
-    background: color-mix(in srgb, #f08a8a 16%, transparent);
-  }
+  .state.s-rejected,
   .state.s-needsRevision {
-    color: #e0b060;
-    background: color-mix(in srgb, #e0b060 16%, transparent);
+    color: var(--warn);
   }
   .grow {
     flex: 1;
@@ -721,7 +723,7 @@
     font-size: 11px;
   }
   .warn {
-    color: #e0b060;
+    color: var(--writable);
   }
   .mono {
     font-family: var(--mono, ui-monospace, Consolas, monospace);
@@ -736,8 +738,8 @@
     font-size: 12px;
   }
   .err {
-    color: #f08a8a;
-    background: color-mix(in srgb, #f08a8a 12%, transparent);
+    color: var(--warn);
+    background: color-mix(in srgb, var(--warn) 12%, transparent);
   }
   .err .x {
     margin-left: auto;
@@ -747,14 +749,14 @@
     cursor: pointer;
   }
   .note {
-    background: color-mix(in srgb, var(--fg, #ddd) 8%, transparent);
+    background: color-mix(in srgb, var(--text) 8%, transparent);
   }
   .desc {
     flex: none;
     max-height: 5.5em;
     overflow: auto;
     padding: 6px 10px;
-    border-bottom: 1px solid var(--line, #2a2a2a);
+    border-bottom: 1px solid var(--border);
     font-size: 12px;
     white-space: pre-wrap;
   }
@@ -767,7 +769,7 @@
     flex: 0 0 260px;
     min-height: 0;
     overflow: auto;
-    border-right: 1px solid var(--line, #2a2a2a);
+    border-right: 1px solid var(--border);
     font-size: 12px;
   }
   .main {
@@ -781,8 +783,8 @@
   .head {
     flex: none;
     padding: 4px 8px;
-    background: color-mix(in srgb, var(--fg, #ddd) 6%, transparent);
-    border-bottom: 1px solid var(--line, #2a2a2a);
+    background: color-mix(in srgb, var(--text) 6%, transparent);
+    border-bottom: 1px solid var(--border);
     font-size: 11px;
     text-transform: uppercase;
     letter-spacing: 0.04em;
@@ -813,10 +815,10 @@
     text-align: center;
   }
   .vote.up {
-    color: #7ec97e;
+    color: var(--have);
   }
   .vote.down {
-    color: #f08a8a;
+    color: var(--warn);
   }
   .vote.none {
     opacity: 0.45;
@@ -831,15 +833,15 @@
     padding: 0 4px;
     border-radius: 6px;
     font-size: 10px;
-    background: color-mix(in srgb, var(--fg, #ddd) 12%, transparent);
+    background: color-mix(in srgb, var(--text) 12%, transparent);
   }
   .tag.req {
-    color: #8ab4f0;
-    background: color-mix(in srgb, #8ab4f0 16%, transparent);
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 16%, transparent);
   }
   .tag.stale {
-    color: #e0b060;
-    background: color-mix(in srgb, #e0b060 16%, transparent);
+    color: var(--writable);
+    background: color-mix(in srgb, var(--writable) 16%, transparent);
   }
   .acts {
     display: flex;
@@ -848,8 +850,8 @@
     padding: 6px 8px;
   }
   .acts button.primary {
-    border-color: #7ec97e;
-    color: #7ec97e;
+    border-color: var(--have);
+    color: var(--have);
   }
   .vtable {
     flex: none;
@@ -875,7 +877,7 @@
     opacity: 0.7;
   }
   .vtable tr.baserow td {
-    border-bottom: 1px solid var(--line, #2a2a2a);
+    border-bottom: 1px solid var(--border);
     font-style: italic;
   }
   .vtable tr.sel {
@@ -895,7 +897,7 @@
     background: color-mix(in srgb, var(--accent, #4a7) 30%, transparent);
   }
   .chip.b {
-    background: color-mix(in srgb, #8ab4f0 30%, transparent);
+    background: color-mix(in srgb, var(--accent) 30%, transparent);
   }
   /* The two sides of the comparison, as Swarm does it: one place to look, and
      an option that would invert the diff is greyed rather than absent. */
@@ -936,7 +938,7 @@
     flex: none;
     width: 5px;
     cursor: col-resize;
-    background: var(--line, #2a2a2a);
+    background: var(--border);
   }
   .gutter:hover {
     background: var(--accent, #4a7);
@@ -955,11 +957,11 @@
     padding: 0 4px;
     border-radius: 6px;
     font-size: 10px;
-    background: color-mix(in srgb, var(--fg, #ddd) 14%, transparent);
+    background: color-mix(in srgb, var(--text) 14%, transparent);
   }
   .cbadge.hastask {
-    color: #e0b060;
-    background: color-mix(in srgb, #e0b060 18%, transparent);
+    color: var(--writable);
+    background: color-mix(in srgb, var(--writable) 18%, transparent);
   }
   .cbadge + .size {
     margin-left: 6px;
@@ -978,7 +980,7 @@
     cursor: default;
   }
   .frow:hover {
-    background: color-mix(in srgb, var(--fg, #ddd) 8%, transparent);
+    background: color-mix(in srgb, var(--text) 8%, transparent);
   }
   .act {
     flex: none;
@@ -987,13 +989,13 @@
     opacity: 0.8;
   }
   .st-changed .act {
-    color: #e0b060;
+    color: var(--accent);
   }
   .st-added .act {
-    color: #7ec97e;
+    color: var(--have);
   }
   .st-removed .act {
-    color: #f08a8a;
+    color: var(--warn);
   }
   .st-same .act {
     opacity: 0.45;
@@ -1014,6 +1016,6 @@
   .hint {
     flex: none;
     padding: 3px 8px;
-    border-top: 1px solid var(--line, #2a2a2a);
+    border-top: 1px solid var(--border);
   }
 </style>

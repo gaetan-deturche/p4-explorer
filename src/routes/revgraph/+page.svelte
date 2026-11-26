@@ -462,8 +462,8 @@
     font-size: 12px;
   }
   .err {
-    color: #f08a8a;
-    background: color-mix(in srgb, #f08a8a 12%, transparent);
+    color: var(--warn);
+    background: color-mix(in srgb, var(--warn) 12%, transparent);
   }
   .clpanel {
     position: fixed;

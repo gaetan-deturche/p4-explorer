@@ -779,7 +779,7 @@
   }
   /* Whitespace marks: visible, never competing with the code. */
   .ghost {
-    color: var(--dim, #8a8a8a);
+    color: var(--text-dim);
     opacity: 0.55;
   }
   /* The marks are drawn, never written: the text keeps its real spaces and

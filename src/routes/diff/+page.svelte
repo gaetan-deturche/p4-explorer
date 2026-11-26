@@ -1834,7 +1834,7 @@ initSplit(leftText.trim() === "");
     align-items: center;
     gap: 4px;
     font-size: 11px;
-    color: var(--dim, #8a8a8a);
+    color: var(--text-dim);
     cursor: pointer;
     white-space: nowrap;
   }
@@ -1864,7 +1864,7 @@ initSplit(leftText.trim() === "");
   }
   /* Whitespace marks: present, but never competing with the code. */
   .src :global(.ghost) {
-    color: var(--dim, #8a8a8a);
+    color: var(--text-dim);
     opacity: 0.55;
   }
   /* The marks are drawn, never written: the text keeps its real spaces and
@@ -2025,10 +2025,10 @@ initSplit(leftText.trim() === "");
     white-space: pre;
   }
   .snip .add {
-    color: #7ec97e;
+    color: var(--have);
   }
   .snip .del {
-    color: #f08a8a;
+    color: var(--warn);
   }
   .crow {
     display: flex;
@@ -2079,7 +2079,7 @@ initSplit(leftText.trim() === "");
     z-index: 2;
   }
   .cmark.task {
-    color: #e0b060;
+    color: var(--writable);
   }
   .cmark:hover {
     background: color-mix(in srgb, var(--accent, #4a7) 25%, transparent);

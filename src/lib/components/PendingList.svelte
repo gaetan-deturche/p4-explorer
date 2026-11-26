@@ -1125,7 +1125,7 @@
   .unres {
     flex: none;
     font-size: 10px;
-    color: var(--danger, #d76a6a);
+    color: var(--warn);
     border: 1px solid currentColor;
     border-radius: 999px;
     padding: 0 6px;

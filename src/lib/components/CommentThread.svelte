@@ -193,7 +193,7 @@
 
 <style>
   .thread {
-    border: 1px solid var(--line, #2a2a2a);
+    border: 1px solid var(--border);
     border-radius: 4px;
     padding: 6px;
     margin: 0 0 6px;
@@ -214,22 +214,22 @@
     padding: 4px 6px;
     max-height: 7em;
     overflow: auto;
-    background: color-mix(in srgb, var(--fg, #ddd) 6%, transparent);
+    background: color-mix(in srgb, var(--text) 6%, transparent);
     border-radius: 3px;
     font-size: 11px;
     white-space: pre;
   }
   .snip .add {
-    color: #7ec97e;
+    color: var(--have);
   }
   .snip .del {
-    color: #f08a8a;
+    color: var(--warn);
   }
   .cmt {
     padding: 3px 0;
   }
   .cmt + .cmt {
-    border-top: 1px dotted var(--line, #2a2a2a);
+    border-top: 1px dotted var(--border);
   }
   .chead {
     display: flex;
@@ -258,19 +258,19 @@
     padding: 0 4px;
     border-radius: 6px;
     font-size: 10px;
-    background: color-mix(in srgb, var(--fg, #ddd) 12%, transparent);
+    background: color-mix(in srgb, var(--text) 12%, transparent);
   }
   .task.t-open {
-    color: #e0b060;
-    background: color-mix(in srgb, #e0b060 16%, transparent);
+    color: var(--writable);
+    background: color-mix(in srgb, var(--writable) 16%, transparent);
   }
   .task.t-addressed {
-    color: #8ab4f0;
-    background: color-mix(in srgb, #8ab4f0 16%, transparent);
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 16%, transparent);
   }
   .task.t-verified {
-    color: #7ec97e;
-    background: color-mix(in srgb, #7ec97e 16%, transparent);
+    color: var(--have);
+    background: color-mix(in srgb, var(--have) 16%, transparent);
   }
   .body {
     white-space: pre-wrap;

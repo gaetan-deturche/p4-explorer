@@ -294,7 +294,7 @@
     white-space: nowrap;
   }
   .pill.ok {
-    color: var(--ok, #6cc36c);
+    color: var(--have);
     border-color: currentColor;
   }
   .pill.warnish {
@@ -302,7 +302,7 @@
     border-color: currentColor;
   }
   .pill.bad {
-    color: var(--danger, #d76a6a);
+    color: var(--warn);
     border-color: currentColor;
   }
   .opts {

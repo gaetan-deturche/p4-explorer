@@ -534,7 +534,7 @@
   .pick,
   .userbox,
   .search {
-    background: var(--bg-input, var(--bg-panel));
+    background: var(--bg-panel);
     color: var(--text);
     border: 1px solid var(--border);
     border-radius: 3px;
