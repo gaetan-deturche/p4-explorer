@@ -46,6 +46,7 @@ pub const UE5_PROPERTY_TAG_COMPLETE_TYPE_NAME: i32 = 1012;
 pub const UE5_METADATA_SERIALIZATION_OFFSET: i32 = 1014;
 pub const UE5_VERSE_CELLS: i32 = 1015;
 pub const UE5_PACKAGE_SAVED_HASH: i32 = 1016;
+pub const UE5_IMPORT_TYPE_HIERARCHIES: i32 = 1018;
 
 pub const PKG_COOKED: u32 = 0x00000200;
 pub const PKG_UNVERSIONED_PROPERTIES: u32 = 0x00002000;
@@ -614,6 +615,11 @@ fn read_summary(data: &[u8]) -> Res<Summary> {
     }
 
     s.thumbnail_table_offset = ar.i32()?;
+
+    if s.file_version_ue5 >= UE5_IMPORT_TYPE_HIERARCHIES {
+        ar.i32()?; // ImportTypeHierarchiesCount
+        ar.i32()?; // ImportTypeHierarchiesOffset
+    }
 
     if s.file_version_ue5 < UE5_PACKAGE_SAVED_HASH {
         ar.guid()?; // Guid
