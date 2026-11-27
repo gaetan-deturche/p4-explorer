@@ -17,6 +17,7 @@
   import { cacheGet, cacheSet } from "$lib/store.svelte";
   import { bounds, geom, type GNode } from "$lib/assetgraph";
   import AssetGraph from "$lib/components/AssetGraph.svelte";
+  import AnimTimeline from "$lib/components/AnimTimeline.svelte";
   import TextureView, { type TexLayout } from "$lib/components/TextureView.svelte";
   import MeshView from "$lib/components/MeshView.svelte";
   import { invoke } from "@tauri-apps/api/core";
@@ -62,6 +63,12 @@
   let fitted = ""; // the graph the view was last fitted to
 
   const graph = $derived(data?.graphs.find((g) => g.name === graphName) ?? null);
+  /** What the top pane shows: the graphs or the animations' time line. */
+  let topMode = $state<"graph" | "anim">("graph");
+  let animName = $state("");
+  const anims = $derived(data?.animations ?? []);
+  const anim = $derived(anims.find((a) => a.name === animName) ?? null);
+  const showAnim = $derived(!!anim && (topMode === "anim" || !graph));
   /** The side a graph exists on when only one revision has it, else null. */
   const graphOnly = $derived(graph && !graph.left ? "right" : graph && !graph.right ? "left" : null);
   /** Width of one graph pane: the whole area when only one side is drawn. */
@@ -128,7 +135,11 @@
 
   /** A node's row in the tree (under All data › Graphs), or -1. */
   function nodeRow(graphName: string, id: string): number {
-    const path = ["All data", "Graphs", graphName, id];
+    return rowAt(["All data", "Graphs", graphName, id]);
+  }
+
+  /** The row at a key path from the top of the tree, or -1. */
+  function rowAt(path: string[]): number {
     let lo = 0;
     let hi = rows.length;
     let found = -1;
@@ -150,7 +161,11 @@
   /** Select a node on both sides and show its entry in the tree, opened. */
   async function selectNode(id: string) {
     selectedNode = id;
-    const at = graph ? nodeRow(graph.name, id) : -1;
+    await revealRow(graph ? nodeRow(graph.name, id) : -1);
+  }
+
+  /** Open the tree down to a row and scroll it into view. */
+  async function revealRow(at: number) {
     if (at < 0) return;
     filter = "";
     if (onlyChanges && rows[at].status === "same") setOnlyChanges(false);
@@ -216,6 +231,12 @@
       graphName = [...data.graphs].sort((a, b) => b.changes - a.changes)[0]?.name ?? "";
     }
     if (/Texture/.test(data.class)) void loadTexture();
+    if (!data.animations.some((a) => a.name === animName)) {
+      animName = (data.animations.find((a) => a.status !== "same") ?? data.animations[0])?.name ?? "";
+      // Open on the time line when that is where the changes are.
+      const graphChanged = data.graphs.some((g) => g.changes > 0);
+      if (data.animations.some((a) => a.status !== "same") && !graphChanged) topMode = "anim";
+    }
   }
 
   onMount(async () => {
@@ -310,7 +331,21 @@
     if (r.depth === 0 && r.key === "All data") return !summaryChanged;
     if (r.status === "changed") return true;
     if (r.status === "same") return false;
+    // An object that came or went shows as one row saying what it was.
+    if (!isSize(r.left ?? r.right) && inObjects(i)) return false;
     return shape.end[i] - i - 1 <= SMALL;
+  }
+
+  /** Whether a row sits under the package's Objects (an object, not a property). */
+  function inObjects(i: number): boolean {
+    let p = shape.parent[i];
+    if (p < 0 || rows[i].key === "Properties" || rows[i].key === "Pins") return false;
+    for (; p >= 0; p = shape.parent[p]) {
+      if (rows[p].key === "Objects" && (rows[p].depth === 0 || (rows[p].depth === 1 && rows[shape.parent[p]].key === "All data")))
+        return true;
+      if (rows[p].key === "Properties" || rows[p].key === "Pins") return false;
+    }
+    return false;
   }
 
   function matches(i: number, term: string): boolean {
@@ -486,35 +521,67 @@
   {:else if loading}
     <div class="pad dim">Reading both revisions…</div>
   {:else}
-    {#if graph}
+    {#if graph || anim}
       <div class="gsec" style={graphOpen ? `height:${graphH}px` : ""}>
         <div class="gbar">
           <button class="fold" onclick={() => ((graphOpen = !graphOpen), (fitted = ""))} title={graphOpen ? "Hide the graph" : "Show the graph"}
             >{graphOpen ? "▾" : "▸"}</button
           >
-          <select value={graphName} onchange={(e) => pickGraph(e.currentTarget.value)}>
-            {#each data?.graphs ?? [] as g (g.name)}
-              <option value={g.name}>{g.name}{g.changes ? ` (${g.changes})` : ""}</option>
-            {/each}
-          </select>
-          {#if graphOpen}
-            <button onclick={() => nextChange(-1)} disabled={!changed.length} title="Previous changed node">◀</button>
-            <button onclick={() => nextChange(1)} disabled={!changed.length} title="Next changed node">Next change ▶</button>
-            <span class="dim"
-              >{changed.length
-                ? `${changeAt >= 0 ? changeAt + 1 : "–"} / ${changed.length} changed node${changed.length === 1 ? "" : "s"}`
-                : "no node changed"}</span
-            >
-            <span class="grow"></span>
-            <span class="legend"
-              ><i class="lg-added"></i>added <i class="lg-removed"></i>removed <i class="lg-changed"></i>changed
-              <i class="lg-moved"></i>moved</span
-            >
-            <label class="opt"><input type="checkbox" bind:checked={dimSame} />Dim unchanged</label>
-            <button onclick={fit} title="Show the whole graph">Fit</button>
+          {#if graph && anim}
+            <span class="modes">
+              <button class:on={!showAnim} onclick={() => ((topMode = "graph"), (fitted = ""))}>Graphs</button>
+              <button class:on={showAnim} onclick={() => (topMode = "anim")}
+                >Animations{anims.some((a) => a.status !== "same") ? " •" : ""}</button
+              >
+            </span>
+          {/if}
+          {#if showAnim && anim}
+            <select value={animName} onchange={(e) => (animName = e.currentTarget.value)}>
+              {#each anims as a (a.name)}
+                <option value={a.name}
+                  >{a.name}{a.status === "same" ? "" : ` (${a.status === "changed" ? `${a.lanes.filter((l) => l.status !== "same").length} changed` : a.status})`}</option
+                >
+              {/each}
+            </select>
+            {#if graphOpen}
+              <span class="grow"></span>
+              <span class="legend"
+                ><i class="lg-added"></i>added <i class="lg-removed"></i>removed <i class="lg-changed"></i>changed · keys
+                only on one side take its colour</span
+              >
+            {/if}
+          {:else if graph}
+            <select value={graphName} onchange={(e) => pickGraph(e.currentTarget.value)}>
+              {#each data?.graphs ?? [] as g (g.name)}
+                <option value={g.name}>{g.name}{g.changes ? ` (${g.changes})` : ""}</option>
+              {/each}
+            </select>
+            {#if graphOpen}
+              <button onclick={() => nextChange(-1)} disabled={!changed.length} title="Previous changed node">◀</button>
+              <button onclick={() => nextChange(1)} disabled={!changed.length} title="Next changed node">Next change ▶</button>
+              <span class="dim"
+                >{changed.length
+                  ? `${changeAt >= 0 ? changeAt + 1 : "–"} / ${changed.length} changed node${changed.length === 1 ? "" : "s"}`
+                  : "no node changed"}</span
+              >
+              <span class="grow"></span>
+              <span class="legend"
+                ><i class="lg-added"></i>added <i class="lg-removed"></i>removed <i class="lg-changed"></i>changed
+                <i class="lg-moved"></i>moved</span
+              >
+              <label class="opt"><input type="checkbox" bind:checked={dimSame} />Dim unchanged</label>
+              <button onclick={fit} title="Show the whole graph">Fit</button>
+            {/if}
           {/if}
         </div>
-        {#if graphOpen}
+        {#if graphOpen && showAnim && anim}
+          <AnimTimeline
+            {anim}
+            {leftLabel}
+            {rightLabel}
+            onselect={(track) => void revealRow(rowAt(["Animations", anim.name, track]))}
+          />
+        {:else if graphOpen && graph}
           <div class="garea" bind:clientWidth={areaW} bind:clientHeight={areaH}>
             {#if graphOnly !== "right"}
               <AssetGraph
@@ -826,6 +893,23 @@
   }
   .fold {
     padding: 0 6px;
+  }
+  .modes {
+    display: flex;
+  }
+  .modes button {
+    padding: 1px 8px;
+    border-radius: 0;
+  }
+  .modes button:first-child {
+    border-radius: 3px 0 0 3px;
+  }
+  .modes button:last-child {
+    border-radius: 0 3px 3px 0;
+  }
+  .modes button.on {
+    background: var(--bg-sel);
+    border-color: var(--accent);
   }
   .s-changed {
     background: rgba(90, 150, 230, 0.1);

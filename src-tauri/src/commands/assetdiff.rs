@@ -11,6 +11,7 @@ use crate::uasset::canvas::{self, GraphPair};
 use crate::uasset::diff::{diff, Row, Status};
 use crate::uasset::doc::{document_in, graph_node, main_class, thumbnail_url, ALL_DATA, GRAPHS};
 use crate::uasset::graph::read_graph;
+use crate::uasset::moviescene::{self, Anim, AnimPair};
 use crate::uasset::package::Package;
 
 #[derive(Serialize)]
@@ -29,6 +30,8 @@ pub struct AssetDiff {
     class: String,
     /// Each graph, both revisions drawn side by side.
     graphs: Vec<GraphPair>,
+    /// Each animation's tracks on a time line, both revisions.
+    animations: Vec<AnimPair>,
 }
 
 struct Side {
@@ -37,12 +40,13 @@ struct Side {
     thumb: Option<String>,
     class: String,
     graphs: Vec<(String, canvas::Side)>,
+    anims: Vec<Anim>,
 }
 
 /// An absent side (an add, a delete) is an empty document, not an error.
 fn read_side(path: &str, roots: &[std::path::PathBuf]) -> Side {
     let empty =
-        |error: String| Side { doc: Val::Map(Vec::new()), error, thumb: None, class: String::new(), graphs: Vec::new() };
+        |error: String| Side { doc: Val::Map(Vec::new()), error, thumb: None, class: String::new(), graphs: Vec::new(), anims: Vec::new() };
     if path.is_empty() || std::fs::metadata(path).map(|m| m.len() == 0).unwrap_or(true) {
         return empty(String::new());
     }
@@ -53,6 +57,7 @@ fn read_side(path: &str, roots: &[std::path::PathBuf]) -> Side {
             thumb: thumbnail_url(&pkg),
             class: main_class(&pkg),
             graphs: canvas::sides(&pkg, &read_graph(&pkg)),
+            anims: moviescene::read(&pkg),
         },
         Err(e) => empty(e),
     }
@@ -80,6 +85,7 @@ pub async fn asset_diff(left: String, right: String, job: Option<String>) -> Res
             (l.join().unwrap_or_else(|_| read_side("", &[])), r)
         });
         let rows = diff(&l.doc, &r.doc);
+        let animations = moviescene::pair(&l.anims, &r.anims);
         let graphs = canvas::pair(
             l.graphs,
             r.graphs,
@@ -113,6 +119,7 @@ pub async fn asset_diff(left: String, right: String, job: Option<String>) -> Res
             right_thumb: r.thumb,
             class: if r.class.is_empty() { l.class } else { r.class },
             graphs,
+            animations,
         }
     })
     .await

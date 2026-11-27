@@ -3,6 +3,8 @@
 //! and what moves on every save for no reason (file offsets, saved hashes,
 //! name-table order) is left out.
 
+use std::collections::HashMap;
+
 use super::archive::Val;
 use super::graph::{read_graph, GraphNode, Pin};
 use super::package::{flag_names, Package, OBJECT_FLAGS, PACKAGE_FLAGS};
@@ -220,52 +222,99 @@ fn pin_val(pin: &Pin) -> Val {
     Val::map(m)
 }
 
+/// "MovieSceneFloatTrack · Render Opacity": an object's row says what it is.
+fn object_label(class: &str, props: &Val) -> String {
+    let name = ["DisplayName", "DisplayLabel", "ParameterName", "VarName"]
+        .iter()
+        .find_map(|k| props.get(k).and_then(|v| v.as_str()))
+        .filter(|n| !n.is_empty() && *n != "None");
+    match name {
+        Some(n) => format!("{} · {n}", leaf(class)),
+        None => leaf(class).to_string(),
+    }
+}
+
+/// Every export nested under the object that owns it, so a sub-object comes and
+/// goes as one branch: Objects › WBP › FadeToFlat › FadeToFlat › Track_0 › Section_0.
 fn objects(pkg: &Package, graph: &[GraphNode]) -> Val {
-    let by_export: std::collections::HashMap<usize, &GraphNode> = graph.iter().map(|n| (n.export, n)).collect();
-    let mut out = Vec::new();
-    for (index, exp) in pkg.exports.iter().enumerate() {
-        let class = pkg.export_class(exp);
-        if is_material_graph_object(&class) {
+    let nodes: HashMap<usize, &GraphNode> = graph.iter().map(|n| (n.export, n)).collect();
+    let mut built: Vec<Option<Vec<(String, Val)>>> = (0..pkg.exports.len()).map(|i| object(pkg, &nodes, i)).collect();
+    let mut children: Vec<Vec<usize>> = vec![Vec::new(); pkg.exports.len()];
+    let mut roots = Vec::new();
+    for (i, exp) in pkg.exports.iter().enumerate() {
+        if built[i].is_none() {
             continue;
         }
-        let mut m: Vec<(String, Val)> = vec![("Class".into(), Val::Str(class))];
-        if exp.super_index != 0 {
-            m.push(("Super".into(), Val::Str(pkg.resolve_index(exp.super_index))));
+        let outer = exp.outer_index - 1;
+        if outer >= 0 && (outer as usize) < built.len() && built[outer as usize].is_some() && outer as usize != i {
+            children[outer as usize].push(i);
+        } else {
+            roots.push(i);
         }
-        let flags = flag_names(exp.object_flags, OBJECT_FLAGS);
-        if !flags.is_empty() {
-            m.push(("Flags".into(), Val::Str(flags.join(" "))));
+    }
+    fn nest(i: usize, built: &mut [Option<Vec<(String, Val)>>], children: &[Vec<usize>], pkg: &Package) -> Val {
+        let mut m = built[i].take().unwrap_or_default();
+        for &c in &children[i] {
+            let key = super::summary::unique_key(&m, pkg.exports[c].object_name.clone());
+            let v = nest(c, built, children, pkg);
+            m.push((key, v));
         }
-        let props = properties(pkg, index);
-        if !matches!(&props, Val::Map(p) if p.is_empty()) {
-            m.push(("Properties".into(), props));
-        }
-        let node = by_export.get(&index);
-        match node.and_then(|n| n.pins.as_ref()) {
-            Some(pins) => {
-                let mut named: Vec<(String, Val)> = Vec::new();
-                for pin in pins {
-                    let mut key = pin.name.clone();
-                    let mut n = 2;
-                    while named.iter().any(|(k, _)| *k == key) {
-                        key = format!("{} #{n}", pin.name);
-                        n += 1;
-                    }
-                    named.push((key, pin_val(pin)));
-                }
-                m.push(("Pins".into(), Val::Map(named)));
-            }
-            // The pins ARE the native data of a graph node; anything else
-            // (mesh data, bulk payloads) can only be compared as bytes.
-            None => {
-                if let Some(native) = native_data(pkg, exp) {
-                    m.push(("Native data".into(), native));
-                }
-            }
-        }
-        out.push((pkg.export_path(index), Val::Map(m)));
+        Val::Map(m)
+    }
+    let mut out: Vec<(String, Val)> = Vec::new();
+    for i in roots {
+        let key = if pkg.exports[i].outer_index == 0 { pkg.exports[i].object_name.clone() } else { pkg.export_path(i) };
+        let key = super::summary::unique_key(&out, key);
+        let v = nest(i, &mut built, &children, pkg);
+        out.push((key, v));
     }
     Val::Map(out)
+}
+
+/// One export's own entry (no sub-objects yet), or None when it is left out.
+fn object(pkg: &Package, nodes: &HashMap<usize, &GraphNode>, index: usize) -> Option<Vec<(String, Val)>> {
+    let exp = &pkg.exports[index];
+    let class = pkg.export_class(exp);
+    if is_material_graph_object(&class) {
+        return None;
+    }
+    let props = properties(pkg, index);
+    let mut m: Vec<(String, Val)> =
+        vec![(super::diff::LABEL.into(), Val::Str(object_label(&class, &props))), ("Class".into(), Val::Str(class))];
+    if exp.super_index != 0 {
+        m.push(("Super".into(), Val::Str(pkg.resolve_index(exp.super_index))));
+    }
+    let flags = flag_names(exp.object_flags, OBJECT_FLAGS);
+    if !flags.is_empty() {
+        m.push(("Flags".into(), Val::Str(flags.join(" "))));
+    }
+    if !matches!(&props, Val::Map(p) if p.is_empty()) {
+        m.push(("Properties".into(), props));
+    }
+    let node = nodes.get(&index);
+    match node.and_then(|n| n.pins.as_ref()) {
+        Some(pins) => {
+            let mut named: Vec<(String, Val)> = Vec::new();
+            for pin in pins {
+                let mut key = pin.name.clone();
+                let mut n = 2;
+                while named.iter().any(|(k, _)| *k == key) {
+                    key = format!("{} #{n}", pin.name);
+                    n += 1;
+                }
+                named.push((key, pin_val(pin)));
+            }
+            m.push(("Pins".into(), Val::Map(named)));
+        }
+        // The pins ARE the native data of a graph node; anything else
+        // (mesh data, bulk payloads) can only be compared as bytes.
+        None => {
+            if let Some(native) = native_data(pkg, exp) {
+                m.push(("Native data".into(), native));
+            }
+        }
+    }
+    Some(m)
 }
 
 /// An undecodable value as one line — "StateTreeReference · 75 bytes · sha1 …" —

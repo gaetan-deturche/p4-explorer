@@ -596,6 +596,37 @@ export interface AssetDiff {
   class: string;
   /** Each graph, both revisions, drawable. */
   graphs: import("$lib/assetgraph").GraphPair[];
+  /** Each animation's tracks on a time line, both revisions. */
+  animations: AnimPair[];
+}
+
+export type RowStatus = AssetRow["status"];
+export interface AnimKey {
+  /** Seconds. */
+  t: number;
+  v: number;
+  interp: string;
+}
+export interface AnimLaneSide {
+  /** [start, end] in seconds; null is an open bound. */
+  sections: [number | null, number | null][];
+  keys: AnimKey[];
+}
+/** One row of the time line: a track's channel ("" when the track has one value). */
+export interface AnimLane {
+  track: string;
+  channel: string;
+  status: RowStatus;
+  left: AnimLaneSide | null;
+  right: AnimLaneSide | null;
+}
+export interface AnimPair {
+  name: string;
+  status: RowStatus;
+  /** Playback range per side; null when the animation is not in that revision. */
+  left: [number | null, number | null] | null;
+  right: [number | null, number | null] | null;
+  lanes: AnimLane[];
 }
 
 /** Open the in-app asset diff window; `name` is the asset's object name, kept

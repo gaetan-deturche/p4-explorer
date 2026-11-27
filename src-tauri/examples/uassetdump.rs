@@ -17,6 +17,14 @@ fn main() {
         std::process::exit(2);
     };
     let mode = args.next().unwrap_or_else(|| "py".into());
+    if mode == "anims" {
+        // uassetdump <old> anims <new>: both revisions' animations paired for the time line.
+        let other = args.next().expect("anims needs a second file");
+        let read = |p: &str| p4gui_lib::uasset::moviescene::read(&Package::open(std::path::Path::new(p)).unwrap());
+        let pairs = p4gui_lib::uasset::moviescene::pair(&read(&path), &read(&other));
+        println!("{}", serde_json::to_string_pretty(&pairs).unwrap());
+        return;
+    }
     if mode == "layout" {
         // uassetdump <texture> layout: the source layout as one JSON line.
         let pkg = Package::open(std::path::Path::new(&path)).unwrap();

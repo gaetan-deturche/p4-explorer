@@ -25,8 +25,20 @@ pub fn summary(pkg: &Package, roots: &[PathBuf]) -> Option<Vec<(String, Val)>> {
         c if c.ends_with("Blueprint") => blueprint(pkg, main),
         "StaticMesh" => static_mesh(pkg, main, roots),
         "SkeletalMesh" => skeletal_mesh(pkg, main, roots),
-        _ => vec![("Properties".into(), saved(pkg, main, &[]))],
+        _ => {
+            let mut out = vec![("Properties".into(), saved(pkg, main, &["MovieScene"]))];
+            push_animations(pkg, &mut out);
+            out
+        }
     })
+}
+
+/// A Widget Blueprint's animations or a sequence's tracks, keys in seconds.
+fn push_animations(pkg: &Package, out: &mut Vec<(String, Val)>) {
+    let anims = super::moviescene::read(pkg);
+    if !anims.is_empty() {
+        out.push(("Animations".into(), super::moviescene::summary(&anims)));
+    }
 }
 
 /// What the object saved, minus derived data and `skip`.
@@ -96,6 +108,7 @@ fn blueprint(pkg: &Package, main: usize) -> Vec<(String, Val)> {
     if !components.is_empty() {
         out.push(("Components".into(), Val::Map(components)));
     }
+    push_animations(pkg, &mut out);
     out
 }
 
@@ -177,13 +190,19 @@ fn parameter_expressions(pkg: &Package) -> Val {
 }
 
 fn insert_unique(out: &mut Vec<(String, Val)>, key: String, v: Val) {
+    let k = unique_key(out, key);
+    out.push((k, v));
+}
+
+/// `key`, or "key #2", "key #3"… when `out` already has it.
+pub fn unique_key(out: &[(String, Val)], key: String) -> String {
     let mut k = key.clone();
     let mut n = 2;
     while out.iter().any(|(e, _)| *e == k) {
         k = format!("{key} #{n}");
         n += 1;
     }
-    out.push((k, v));
+    k
 }
 
 fn material(pkg: &Package, main: usize) -> Vec<(String, Val)> {
