@@ -674,6 +674,9 @@ pub fn hex(bytes: &[u8]) -> String {
 // culture-invariant string (Engine/Source/Runtime/Core/Private/UObject/DevObjectVersion.cpp).
 const EDITOR_OBJECT_VERSION_GUID: &str = "E4B068EDF49442E9A231DA0B2E46BB41";
 const EDITOR_CULTURE_INVARIANT_TEXT_KEY_STABILITY: i32 = 32;
+// FFortniteMainBranchObjectVersion::AddDevNotesToFText (UE 5.8): base texts gain a DevNotes string.
+const FORTNITE_MAIN_OBJECT_VERSION_GUID: &str = "601D1886AC644F84AA16D3DE0DEAC7D6";
+const FORTNITE_MAIN_ADD_DEV_NOTES_TO_FTEXT: i32 = 260;
 
 /// EFormatArgumentType, serialized by index
 fn format_argument(ar: &mut Reader, package: &Package) -> Res<Val> {
@@ -707,6 +710,14 @@ pub fn read_text(ar: &mut Reader, package: &Package) -> Res<Val> {
             let namespace = ar.fstring()?;
             let key = ar.fstring()?;
             let source = ar.fstring()?;
+            if package.summary.custom_version(FORTNITE_MAIN_OBJECT_VERSION_GUID) >= FORTNITE_MAIN_ADD_DEV_NOTES_TO_FTEXT
+                && !package.summary.filter_editor_only
+            {
+                let dev_notes = ar.fstring()?;
+                if !dev_notes.is_empty() {
+                    return Ok(Val::map(vec![("source", Val::Str(source)), ("dev_notes", Val::Str(dev_notes))]));
+                }
+            }
             if !source.is_empty() || (namespace.is_empty() && key.is_empty()) {
                 return Ok(Val::Str(source));
             }
